@@ -25,8 +25,13 @@ equivalent: locally the tool comes from your package manager (CONTRIBUTING.md).
 Beyond the CI gates it runs checks CI cannot make for you: a merge-conflict gate (`git merge-tree --write-tree
 origin/main <tip>`: a branch that conflicts needs a merge commit and a full CI re-run), and in hook mode, before
 any gate, a wrong-commit guard (a detached HEAD whose commits the pushed refs do not carry; a pushed branch ref that
-is not the HEAD of the current branch) and an identity guard (every pushed commit is authored and committed by this
-repository's `git config user.email`, with no AI identity or attribution: aeos.core.commit_identity).
+is not the HEAD of the current branch), an identity guard (every pushed commit is authored and committed by this
+repository's `git config user.email`, with no AI identity or attribution: aeos.core.commit_identity) and a full-suite
+guard (every pushed commit's tree has a passing full-suite record written by scripts/run_tests.sh, see
+scripts/full_suite_record.py; AEOS_PUSH_WITHOUT_FULL_SUITE='<reason>' makes it SKIPPED, never PASS). A
+conflict-markers gate (`git diff --check <merge base with origin/main>..<tip>`, only its "leftover conflict marker"
+findings) fails on a committed conflict marker. A local run prints, informationally, whether HEAD's tree has a
+passing full-suite record.
 
 The output ends with one `NOT RUN: <job> (<reason>)` line for every CI job this run does not execute (every job of
 every workflow that runs on pull_request or push, ci.yml and pr-title.yml alike), then exactly
@@ -53,6 +58,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from full_suite_record import find_record, read_state  # noqa: E402
 
 from aeos.core.commit_identity import (  # noqa: E402
     CODE_ATTRIBUTION,
@@ -385,6 +393,9 @@ SHELLCHECK = "shellcheck"
 MERGE_TREE_USAGE = 129  # git < 2.38 has no `merge-tree --write-tree` and answers with its usage text
 IDENTITY = "identity"
 MERGE_CONFLICT = "merge-conflict"
+CONFLICT_MARKERS = "conflict-markers"
+FULL_SUITE = "full-suite"
+PUSH_WITHOUT_FULL_SUITE_ENV = "AEOS_PUSH_WITHOUT_FULL_SUITE"
 MAX_LISTED = 10
 
 
@@ -559,6 +570,105 @@ def merge_conflict_result(root: Path, env: Mapping[str, str], tip: str = "HEAD",
                   command, ref)
 
 
+_CHECK_MARKER = re.compile(r"^(?P<path>.+):(?P<line>\d+): leftover conflict marker$")
+# git diff --check also flags a lone 7-character '=======' line, which is a markdown setext heading underline as often
+# as it is the middle of a conflict. Only a file that also has an opening, closing or base marker is reported.
+_STRONG_MARKERS = ("<<<<<<<", ">>>>>>>", "|||||||")
+
+
+def conflict_markers_result(root: Path, env: Mapping[str, str], tip: str = "HEAD", ref: str = "") -> Result:
+    """FAIL when the commits from the merge base with origin/main to `tip` add a conflict marker (incident 2026-10-27:
+    a scripted conflict resolution failed, the next step still committed, and conflict markers were committed). Uses
+    `git diff --check` and only its "leftover conflict marker" findings (whitespace complaints are ignored); a file
+    whose only finding is a lone '=======' line (a setext heading underline) passes. SKIPPED, with the reason, when
+    origin/main is missing or has no merge base with the tip (the merge-conflict gate reports that)."""
+    if not ref_exists(root, DEFAULT_BASE, env):
+        return Result(CONFLICT_MARKERS, SKIPPED, 0.0, f"{DEFAULT_BASE} not found (git fetch origin)", "", ref)
+    started = time.perf_counter()
+    base = git(["merge-base", DEFAULT_BASE, tip], root, env)
+    if base.returncode != 0 or not base.stdout.strip():
+        return Result(CONFLICT_MARKERS, SKIPPED, time.perf_counter() - started,
+                      f"no merge base of {tip} with {DEFAULT_BASE} (the merge-conflict gate reports it)", "", ref)
+    argv = ["-c", "core.quotePath=false", "diff", "--check", "--no-color", "--no-ext-diff", base.stdout.strip(), tip]
+    command = "git " + " ".join(argv)
+    proc = git(argv, root, env)
+    found: dict[str, list[int]] = {}
+    for line in proc.stdout.splitlines():
+        match = _CHECK_MARKER.match(line)
+        if match:
+            found.setdefault(match.group("path"), []).append(int(match.group("line")))
+    if proc.returncode not in (0, 2) and not found and proc.stderr.strip():
+        return Result(CONFLICT_MARKERS, FAIL, time.perf_counter() - started,
+                      f"git diff --check failed (exit {proc.returncode}):\n{_tail(proc.stderr)}", command, ref)
+    places: list[str] = []
+    for path, numbers in found.items():
+        shown = git(["cat-file", "-p", f"{tip}:{path}"], root, env)
+        lines = shown.stdout.splitlines() if shown.returncode == 0 else []
+        texts = [lines[n - 1] if 0 < n <= len(lines) else "" for n in numbers]
+        if shown.returncode != 0 or any(text.startswith(_STRONG_MARKERS) for text in texts):
+            places += [f"{path}:{n}" for n in numbers]
+    seconds = time.perf_counter() - started
+    if not places:
+        return Result(CONFLICT_MARKERS, PASS, seconds, "", command, ref)
+    listed = "\n".join(f"  {p}" for p in places[:MAX_LISTED * 3])
+    more = f"\n  (+{len(places) - MAX_LISTED * 3} more)" if len(places) > MAX_LISTED * 3 else ""
+    return Result(CONFLICT_MARKERS, FAIL, seconds,
+                  f"{len(places)} leftover conflict marker(s) committed:\n{listed}{more}\n"
+                  "Fix: resolve each conflict in the file, commit, and check again. Chain dependent steps with && "
+                  "(LESSONS L22), so a failed resolution never reaches the commit. A document that must show a "
+                  "conflict example can raise the marker length for that file in .gitattributes "
+                  "(conflict-marker-size), which git diff --check honours.", command, ref)
+
+
+def _git_common_dir(root: Path, env: Mapping[str, str]) -> Path | None:
+    proc = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], root, env)
+    return Path(proc.stdout.strip()) if proc.returncode == 0 and proc.stdout.strip() else None
+
+
+def full_suite_guard(sha: str, root: Path, env: Mapping[str, str], bypass: str = "", ref: str = "") -> Result:
+    """PASS when the tree of `sha` has a passing full-suite record (scripts/run_tests.sh, scripts/full_suite_record.py)
+    in the common git dir of this clone. Without one: FAIL, or SKIPPED (never PASS) with the reason when
+    AEOS_PUSH_WITHOUT_FULL_SUITE holds a non-empty reason (`bypass`). Incident (LESSONS L8, strike 3, 2026-10-27): a
+    branch tested only with targeted tests was pushed and CI went red on a test the full suite would have run."""
+    started = time.perf_counter()
+    tree = git(["rev-parse", "--verify", "--quiet", f"{sha}^{{tree}}"], root, env)
+    if tree.returncode != 0 or not tree.stdout.strip():
+        return Result(FULL_SUITE, FAIL, time.perf_counter() - started, f"cannot read the tree of {sha}", "", ref)
+    tree_sha = tree.stdout.strip()
+    directory = _git_common_dir(root, env)
+    found = find_record(directory, tree_sha) if directory else None
+    seconds = time.perf_counter() - started
+    if found:
+        return Result(FULL_SUITE, PASS, seconds, f"passing full suite recorded {found.time} (load {found.load})", "",
+                      ref)
+    reason = bypass.strip()
+    if reason:
+        return Result(FULL_SUITE, SKIPPED, seconds, f"{PUSH_WITHOUT_FULL_SUITE_ENV} is set: {reason} (no passing "
+                      f"full-suite record for tree {tree_sha[:12]} ({sha}))", "", ref)
+    return Result(FULL_SUITE, FAIL, seconds,
+                  f"full suite not run for tree {tree_sha[:12]} ({sha}): run scripts/run_tests.sh on a clean tree, "
+                  f"or push with {PUSH_WITHOUT_FULL_SUITE_ENV}='<reason>'", "", ref)
+
+
+def full_suite_note(root: Path, env: Mapping[str, str] | None = None) -> str:
+    """Informational line of a local run: whether HEAD's tree has a passing full-suite record. Never fails a run."""
+    env = clean_env() if env is None else env
+    try:
+        state = read_state(root, env)
+        directory = _git_common_dir(root, env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"full suite: unknown ({exc})"
+    if state is None or directory is None:
+        return "full suite: unknown (not a git checkout, or no commit yet)"
+    dirty = "" if state.clean else "; the working tree has uncommitted changes, which no record covers"
+    found = find_record(directory, state.tree)
+    if found:
+        return (f"full suite: HEAD tree {state.tree[:12]} has a passing record ({found.time}, load {found.load})"
+                f"{dirty}")
+    return (f"full suite: no passing record for HEAD tree {state.tree[:12]}; the pre-push hook refuses to push it "
+            f"(run scripts/run_tests.sh on a clean tree){dirty}")
+
+
 # ------------------------------------------------------------------ runs
 def run_hook(stdin_text: str, root: Path = ROOT) -> list[Result]:
     env = clean_env()
@@ -570,11 +680,18 @@ def run_hook(stdin_text: str, root: Path = ROOT) -> list[Result]:
         results.append(wrong)
     if wrong is None or wrong.status != FAIL:
         results.extend(identity_guard(ref, base, root, env) for ref, base in targets)
+        bypass = os.environ.get(PUSH_WITHOUT_FULL_SUITE_ENV, "")
+        checked: set[str] = set()
+        for ref, _base in targets:
+            if ref.local_sha not in checked:
+                checked.add(ref.local_sha)
+                results.append(full_suite_guard(ref.local_sha, root, env, bypass, ref_label(ref)))
     if any(r.status == FAIL for r in results):
         return results  # a refused push does not spend minutes on the gates
     for ref, base in targets:
         label = ref_label(ref)
         results.append(merge_conflict_result(root, env, ref.local_sha, label))
+        results.append(conflict_markers_result(root, env, ref.local_sha, label))
         try:
             with detached_worktree(root, ref.local_sha, env) as tmp:
                 results.extend(run_gate(g, tmp, env, label) for g in STATIC_GATES)
@@ -597,7 +714,7 @@ def run_hook(stdin_text: str, root: Path = ROOT) -> list[Result]:
 def run_local(args: argparse.Namespace, root: Path = ROOT) -> list[Result]:
     env = clean_env()
     base = args.base or (DEFAULT_BASE if ref_exists(root, DEFAULT_BASE, env) else None)
-    results = [merge_conflict_result(root, env)]
+    results = [merge_conflict_result(root, env), conflict_markers_result(root, env)]
     results.extend(run_gate(g, root, env) for g in STATIC_GATES)
     results.append(shellcheck_result(root, env))
     results.append(actionlint_result(root, env))
@@ -825,14 +942,14 @@ def render_not_run(not_run: Sequence[tuple[str, str]]) -> str:
 
 
 def to_json(results: Sequence[Result], mode: str, not_run: Sequence[tuple[str, str]] = (),
-            facts: Sequence[str] = ()) -> str:
+            facts: Sequence[str] = (), full_suite: str = "") -> str:
     verdict = verdict_of(results, not_run)
     payload = {"mode": mode, "ok": verdict.status == PASS, "verdict": verdict.line,
                "counts": {"run": verdict.run, "failed": verdict.failed, "not_run": verdict.not_run},
                "results": [{"gate": r.gate, "status": r.status, "seconds": round(r.seconds, 2),
                             "command": r.command, "detail": r.detail, "ref": r.ref} for r in results],
                "not_run_jobs": [{"job": job, "reason": reason} for job, reason in not_run],
-               "facts": list(facts)}
+               "facts": list(facts), "full_suite": full_suite}
     return json.dumps(payload, indent=2)  # ensure_ascii keeps the output ASCII
 
 
@@ -867,8 +984,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         results = run_hook(sys.stdin.read(), root)
         if args.tests:
             print("--tests is ignored in --hook mode (static gates only)", file=sys.stderr)
+        note = ""
     else:
         results = run_local(args)
+        note = full_suite_note(root)
+        if not args.json:
+            print(ascii_text(f"{note} (informational)"))
     not_run = not_run_jobs(results, root)
     verdict = verdict_of(results, not_run)
     mode = "hook" if args.hook else "local"
@@ -876,12 +997,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             report = Path(args.report)
             report.parent.mkdir(parents=True, exist_ok=True)
-            report.write_text(to_json(results, mode, not_run, facts) + "\n", encoding="utf-8")
+            report.write_text(to_json(results, mode, not_run, facts, note) + "\n", encoding="utf-8")
         except OSError as exc:
             print(ascii_text(f"gates: cannot write the report {args.report}: {exc}"), file=sys.stderr)
             return 2
     if args.json:
-        print(to_json(results, mode, not_run, facts), flush=True)  # flushed first: with 2>&1 the verdict must come last
+        print(to_json(results, mode, not_run, facts, note), flush=True)  # flushed first: with 2>&1 the verdict must come last
         print(verdict.line, file=sys.stderr, flush=True)  # stdout stays one JSON document
     else:
         if not results:

@@ -21,6 +21,11 @@ rulesets for one that does not, then reads everything again and prints the verdi
 status checks it would write are the merge gate, so an owner or the delegating session runs it by hand
 (CONTRIBUTING.md "Merging").
 
+GitHub can serve a stale read for a while after a write (2026-10-27: a --check seconds after --apply --yes read DRIFT,
+the same --check minutes later read OK). So when a read shows DRIFT, --check and the check after --apply --yes wait
+--settle SECONDS (default 10; 0 disables) and read once more; the verdict is that second read, OK only when it matches
+the files, and the output says that it waited. The differences printed are those of the last read.
+
 The last line is always ``GITHUB_SETTINGS: OK``, ``GITHUB_SETTINGS: DRIFT`` or ``GITHUB_SETTINGS: ERROR``.
 Exit 0 OK, 1 DRIFT, 2 ERROR (usage, files, gh or API failure). Stdlib and the gh CLI only, ASCII output. The API is a
 small class (``GhApi``) so that tests inject a fake; no test reaches the network.
@@ -32,6 +37,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,6 +59,8 @@ SETTING_KEYS = frozenset({
 RULESET_KEYS = frozenset({"name", "target", "enforcement", "conditions", "bypass_actors", "rules"})
 # Lists of objects that are matched by one field instead of by position.
 KEYED_LISTS = {"rules": "type", "required_status_checks": "context"}
+DEFAULT_SETTLE_SECONDS = 10.0
+MAX_SETTLE_SECONDS = 300.0
 
 Runner = Callable[[list[str], "str | None"], str]
 
@@ -262,7 +270,36 @@ def _write(out: TextIO, text: str) -> None:
     out.write(text.encode("ascii", "backslashreplace").decode("ascii") + "\n")
 
 
-def main(argv: Sequence[str] | None = None, out: TextIO | None = None, api: Api | None = None) -> int:
+def settled_compute(api: Api, desired: Desired, settle: float, sleep: Callable[[float], None],
+                    out: TextIO) -> tuple[list[str], list[Action]]:
+    """compute(); when it shows a difference and settle > 0, wait `settle` seconds and read once more (GitHub's
+    read-after-write lag). The second read is the answer; the output says that it waited and what it found."""
+    lines, actions = compute(api, desired)
+    if not lines or settle <= 0:
+        return lines, actions
+    _write(out, f"first read: {len(lines)} difference(s); waiting {settle:g} s for GitHub to settle "
+                "(read-after-write lag), then reading again")
+    sleep(settle)
+    lines, actions = compute(api, desired)
+    if lines:
+        _write(out, f"second read after {settle:g} s: still {len(lines)} difference(s)")
+    else:
+        _write(out, f"settled: the second read after {settle:g} s equals the files (the first read was stale)")
+    return lines, actions
+
+
+def _settle_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not a number of seconds: {text}") from exc
+    if not 0 <= value <= MAX_SETTLE_SECONDS:
+        raise argparse.ArgumentTypeError(f"must be between 0 and {MAX_SETTLE_SECONDS:g} seconds, got {text}")
+    return value
+
+
+def main(argv: Sequence[str] | None = None, out: TextIO | None = None, api: Api | None = None,
+         sleep: Callable[[float], None] = time.sleep) -> int:
     out = out or sys.stdout
     parser = argparse.ArgumentParser(prog="github_settings.py", description="Compare or apply the repository settings "
                                      "stored in .github/ with the live GitHub repository.")
@@ -271,6 +308,9 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None, api: Api 
     mode.add_argument("--apply", action="store_true", help="print the changes; with --yes send them")
     parser.add_argument("--yes", action="store_true", help="with --apply: really change the repository")
     parser.add_argument("--repo", metavar="OWNER/NAME", help="repository (default: the remote of the current directory)")
+    parser.add_argument("--settle", type=_settle_seconds, default=DEFAULT_SETTLE_SECONDS, metavar="SECONDS",
+                        help="on DRIFT, wait this long and read once more before the verdict (GitHub read-after-write "
+                             f"lag; default {DEFAULT_SETTLE_SECONDS:g}, 0 disables)")
     parser.add_argument("--root", default=str(Path(__file__).resolve().parent.parent),
                         help="checkout that holds .github/ (default: this repository)")
     args = parser.parse_args(argv)
@@ -284,7 +324,10 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None, api: Api 
     try:
         desired = load_desired(Path(args.root))
         client = api if api is not None else GhApi(repo=args.repo)
-        lines, actions = compute(client, desired)
+        if args.check:
+            lines, actions = settled_compute(client, desired, args.settle, sleep, out)
+        else:
+            lines, actions = compute(client, desired)
         for line in lines:
             _write(out, f"DIFF: {line}")
         if not lines:
@@ -303,7 +346,7 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None, api: Api 
         for action in actions:
             client.send(action.method, action.path, action.body)
             _write(out, f"DONE {action.summary}")
-        lines, _ = compute(client, desired)
+        lines, _ = settled_compute(client, desired, args.settle, sleep, out)
         for line in lines:
             _write(out, f"DIFF: {line}")
         return verdict(DRIFT if lines else OK)

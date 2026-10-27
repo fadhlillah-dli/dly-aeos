@@ -321,6 +321,7 @@ def test_git_variables_are_scrubbed_from_every_gate_environment(monkeypatch: pyt
     for name in gates.SCRUBBED_ENV:
         monkeypatch.setenv(name, str(repo / "nowhere"))
     monkeypatch.setenv("AEOS_KEEP_ME", "1")
+    monkeypatch.setenv(gates.PUSH_WITHOUT_FULL_SUITE_ENV, "test: the full-suite guard has its own tests")
     env = gates.clean_env()
     assert set(gates.SCRUBBED_ENV) == {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR",
                                        "GIT_OBJECT_DIRECTORY"}

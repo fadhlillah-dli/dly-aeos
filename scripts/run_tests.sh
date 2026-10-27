@@ -9,6 +9,10 @@
 #    arguments. Arguments are kept in bash arrays (never in an unquoted variable: zsh does not word-split those).
 # 3. --deadline MINUTES (or AEOS_TEST_DEADLINE_MIN) stops the run after that long, using scripts/run_with_deadline.py
 #    because macOS has no `timeout`. A stopped run exits 124.
+# 4. Full-suite record (LESSONS L8): a PASS of a FULL run (no pytest argument that can select or deselect tests; the
+#    exact rule is in scripts/full_suite_record.py) on a working tree that was clean before and after the run is
+#    appended to <git common dir>/aeos-full-suite-runs; the pre-push hook (scripts/gates.py --hook) refuses a push
+#    whose tree has no record. Otherwise one line says why it was not recorded. Recording never fails a run.
 # Last line of output, always: RUN_TESTS: PASS rc=<n> or RUN_TESTS: FAIL rc=<n> (grep for it; tools that hide lines
 # of a long log still show it).
 # Interpreter, first match wins: $AEOS_GATES_PYTHON; the .venv of this checkout; the .venv of the main checkout (a
@@ -118,9 +122,23 @@ if [ -n "$deadline" ]; then
   cmd=("$py" "$root/scripts/run_with_deadline.py" "$deadline" -- "${cmd[@]}")
 fi
 
+recorder="$root/scripts/full_suite_record.py"
+start_state=$("$py" "$recorder" state 2>/dev/null) || start_state=unknown
+
 echo "run_tests: ${cmd[*]}"
 set +e
 "${cmd[@]}"
 rc=$?
 set -e
+if [ "$rc" -eq 0 ]; then
+  record_cmd=("$py" "$recorder" record --start "$start_state" --)
+  if [ "${#extra[@]}" -gt 0 ]; then
+    record_cmd+=("${extra[@]}")
+  fi
+  if ! "${record_cmd[@]}"; then
+    echo "run_tests: full-suite record: not recorded: the recorder failed (the test result stands)"
+  fi
+else
+  echo "run_tests: full-suite record: not recorded: the run did not pass (rc=$rc)"
+fi
 exit "$rc"

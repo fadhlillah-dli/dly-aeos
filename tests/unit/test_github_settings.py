@@ -98,10 +98,12 @@ def before_state() -> FakeApi:
                    [main])
 
 
-def run(api: FakeApi, *argv: str, root: Path | None = None) -> tuple[int, list[str]]:
+def run(api: FakeApi, *argv: str, root: Path | None = None, slept: list[float] | None = None) -> tuple[int, list[str]]:
+    """The tool with an injected sleep: nothing here really waits; the waits are appended to `slept`."""
     out = io.StringIO()
     args = list(argv) + (["--root", str(root)] if root else [])
-    code = gs.main(args, out=out, api=api)
+    waits = slept if slept is not None else []
+    code = gs.main(args, out=out, api=api, sleep=waits.append)
     text = out.getvalue()
     assert text.isascii()
     return code, text.splitlines()
@@ -238,6 +240,80 @@ def test_yes_without_apply_is_a_usage_error():
     assert exc.value.code == 2
     with pytest.raises(SystemExit):
         gs.main([], out=io.StringIO(), api=in_sync())
+
+
+# ------------------------------------------------------------------ settle (GitHub read-after-write lag, 2026-10-27)
+class LaggingApi(FakeApi):
+    """GitHub after a write: the next `stale` reads of the repository still return the old state."""
+
+    def __init__(self, repo: dict[str, Any], rulesets: list[dict[str, Any]], stale_repo: dict[str, Any] | None = None,
+                 stale: int = 0, stale_after_send: int = 0) -> None:
+        super().__init__(repo, rulesets)
+        self.stale_repo = None if stale_repo is None else {**self.repo, **stale_repo}
+        self.stale = stale
+        self.stale_after_send = stale_after_send
+
+    def get(self, path: str) -> Any:
+        if path == "" and self.stale > 0 and self.stale_repo is not None:
+            self.stale -= 1
+            self.gets.append(path)
+            return copy.deepcopy(self.stale_repo)
+        return super().get(path)
+
+    def send(self, method: str, path: str, body: dict[str, Any]) -> Any:
+        if self.stale_after_send and self.stale_repo is None:
+            self.stale_repo = copy.deepcopy(self.repo)  # what GitHub serves until the write is visible
+            self.stale = self.stale_after_send
+        return super().send(method, path, body)
+
+
+def test_a_stale_first_read_that_settles_is_ok_with_the_settled_note():
+    settings, main, tags = _files()
+    api = LaggingApi(settings, [main, tags], stale_repo={"allow_squash_merge": True}, stale=1)
+    slept: list[float] = []
+    code, lines = run(api, "--check", slept=slept)
+    assert (code, lines[-1]) == (0, "GITHUB_SETTINGS: OK"), lines
+    assert slept == [10.0]
+    assert any(ln.startswith("first read: 1 difference(s); waiting 10 s") for ln in lines), lines
+    assert any(ln.startswith("settled: the second read after 10 s equals the files") for ln in lines), lines
+    assert not [ln for ln in lines if ln.startswith("DIFF:")]  # the stale difference is not reported as drift
+
+
+def test_a_persistent_drift_is_drift_after_one_wait():
+    api = in_sync()
+    api.repo.update(allow_squash_merge=True)
+    slept: list[float] = []
+    code, lines = run(api, "--check", "--settle", "2.5", slept=slept)
+    assert code == 1 and lines[-1] == "GITHUB_SETTINGS: DRIFT"
+    assert slept == [2.5] and "second read after 2.5 s: still 1 difference(s)" in lines
+    assert [ln for ln in lines if ln.startswith("DIFF:")] == ["DIFF: repository.allow_squash_merge: live true, file false"]
+
+
+def test_settle_zero_never_waits_and_an_ok_read_never_waits():
+    settings, main, tags = _files()
+    stale = LaggingApi(settings, [main, tags], stale_repo={"allow_squash_merge": True}, stale=1)
+    slept: list[float] = []
+    code, lines = run(stale, "--check", "--settle", "0", slept=slept)
+    assert code == 1 and slept == [] and not any("waiting" in ln for ln in lines)
+    code, _ = run(in_sync(), "--check", slept=slept)
+    assert code == 0 and slept == []
+
+
+def test_the_check_after_apply_yes_uses_the_same_settle():
+    settings, main, tags = _files()
+    api = LaggingApi({**settings, "allow_squash_merge": True}, [main, tags], stale_after_send=1)
+    slept: list[float] = []
+    code, lines = run(api, "--apply", "--yes", "--settle", "3", slept=slept)
+    assert (code, lines[-1]) == (0, "GITHUB_SETTINGS: OK"), lines
+    assert slept == [3.0] and any(ln.startswith("settled: ") for ln in lines)
+    assert [(m, p) for m, p, _ in api.calls] == [("PATCH", "")]
+
+
+@pytest.mark.parametrize("value", ["-1", "soon", "301"])
+def test_a_bad_settle_value_is_a_usage_error(value: str):
+    with pytest.raises(SystemExit) as exc:
+        gs.main(["--check", "--settle", value], out=io.StringIO(), api=in_sync(), sleep=lambda s: None)
+    assert exc.value.code == 2
 
 
 # ------------------------------------------------------------------ files

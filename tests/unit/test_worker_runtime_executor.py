@@ -101,9 +101,12 @@ if scenario == "outside_sleep":
     write("other/hack.py", "x\n")
     time.sleep(120)
 if scenario == "hog":
+    # random, not zero-filled: macOS compresses zero pages in memory, so a zero-filled hog kept its resident size
+    # under the 80 MB cap (peak 63.6 MB measured on 2026-10-27) and finished without the cap ever firing
+    chunk = os.urandom(10 * 1024 * 1024)
     blocks = []
     for _ in range(60):
-        blocks.append(bytearray(10 * 1024 * 1024))
+        blocks.append(bytearray(chunk))
         time.sleep(0.3)
     time.sleep(120)
 if scenario in ("blocker", "badreport"):
@@ -518,6 +521,13 @@ def test_out_of_scope_edit_stops_the_run_at_once(settings, setup):
     assert te.state == "REVIEW" and te.reason_code == "ATTEMPT_FAILED"
 
 
+def _loadavg() -> str:
+    try:
+        return ",".join(f"{x:.2f}" for x in os.getloadavg())
+    except (AttributeError, OSError):
+        return "n/a"
+
+
 def test_memory_cap_stops_the_worker(settings, setup, monkeypatch):
     """§21 'batas waktu/resource' / §25 'process/resource/time cap' on the process sandbox."""
     monkeypatch.setattr(executor, "USAGE_CHECK_SECONDS", 0.2)  # sample the tree more often; the cap is unchanged
@@ -528,10 +538,17 @@ def test_memory_cap_stops_the_worker(settings, setup, monkeypatch):
     run_id, task_id = make("hog", task={"limits": {"timeout_seconds": 3600, "max_memory_mb": 80}})
     res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
-    assert res["stop_reason"] == "RESOURCE_LIMIT" and run.outcome_code == "RESOURCE_LIMIT", res
-    assert run.usage_summary["resource_peak"]["rss_bytes"] > 0 and run.caps["resource_limits"]["max_memory_mb"] == 80
-    assert run.caps["timeout_seconds_effective"] == 3600  # the timeout could not have stopped this run
-    assert not processes.is_alive(run.pid, run.pid_create_time)
+    # L15: this test failed once in a full suite at load average ~10-14 and the failure text was lost. Every assertion
+    # carries the facts needed to diagnose it, so the next failure explains itself; what it proves is unchanged.
+    alive = processes.is_alive(run.pid, run.pid_create_time)
+    facts = (f"res={res!r}\noutcome_code={run.outcome_code!r}\nusage_summary={run.usage_summary!r}\n"
+             f"caps={run.caps!r}\npid={run.pid!r} alive={alive}\nloadavg={_loadavg()}")
+    assert res["stop_reason"] == "RESOURCE_LIMIT" and run.outcome_code == "RESOURCE_LIMIT", facts
+    peak = ((run.usage_summary or {}).get("resource_peak") or {}).get("rss_bytes") or 0
+    assert peak > 0, facts
+    assert run.caps["resource_limits"]["max_memory_mb"] == 80, facts
+    assert run.caps["timeout_seconds_effective"] == 3600, facts  # the timeout could not have stopped this run
+    assert not alive, facts
 
 
 def test_cpu_cap_in_force_is_recorded_per_run(settings, setup):

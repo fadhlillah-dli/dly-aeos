@@ -64,6 +64,7 @@ def _hermetic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     empty.write_text("", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(empty))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.delenv(gates.PUSH_WITHOUT_FULL_SUITE_ENV, raising=False)  # the developer's own bypass never leaks in
     monkeypatch.setattr(gates, "run_facts", lambda: [])
 
 
@@ -419,7 +420,7 @@ def test_a_local_run_fails_on_a_conflict_prints_the_verdict_last_and_exits_1(
     out = capsys.readouterr().out
     assert "merge-conflict" in out and "a.txt" in out
     last = out.strip().splitlines()[-1]
-    assert last.startswith("GATES: FAIL (3 run, 1 failed, ") and last.endswith(" not run)")
+    assert last.startswith("GATES: FAIL (4 run, 1 failed, ") and last.endswith(" not run)")  # + conflict-markers
 
 
 # ------------------------------------------------------------------ NOT RUN lines and the verdict line
@@ -799,6 +800,11 @@ sys.exit(gates.main(sys.argv[1:]))
 '''
 
 
+# The rig's pushes carry a bypass reason, so the guards and gates above are tested on their own; the full-suite guard
+# has its own push tests below, which push without it.
+RIG_BYPASS = "test rig: the full-suite guard has its own tests"
+
+
 class Rig:
     """A working clone, a bare remote and the hook, all under tmp_path."""
 
@@ -823,8 +829,11 @@ class Rig:
         hook.chmod(hook.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         _git(self.work, "config", "core.hooksPath", str(self.hooks))  # this clone only
 
-    def push(self, *refspec: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(["git", "push", "origin", *refspec], cwd=self.work, env=_env(), capture_output=True,
+    def push(self, *refspec: str, bypass: str | None = RIG_BYPASS) -> subprocess.CompletedProcess[str]:
+        env = _env()
+        if bypass is not None:
+            env[gates.PUSH_WITHOUT_FULL_SUITE_ENV] = bypass
+        return subprocess.run(["git", "push", "origin", *refspec], cwd=self.work, env=env, capture_output=True,
                               text=True, encoding="utf-8", check=False)
 
     def remote_sha(self, ref: str) -> str | None:
@@ -838,7 +847,8 @@ class Rig:
     def run_hook_with_stdin(self, line: str) -> subprocess.CompletedProcess[str]:
         """The hook as git calls it (cwd = the working tree, push lines on stdin), for a line git itself cannot
         produce from an attached HEAD."""
-        return subprocess.run(["sh", str(self.hooks / "pre-push"), "origin", str(self.remote)], cwd=self.work, env=_env(),
+        env = {**_env(), gates.PUSH_WITHOUT_FULL_SUITE_ENV: RIG_BYPASS}
+        return subprocess.run(["sh", str(self.hooks / "pre-push"), "origin", str(self.remote)], cwd=self.work, env=env,
                               input=line, capture_output=True, text=True, encoding="utf-8", check=False)
 
 
@@ -962,6 +972,27 @@ def test_a_deletion_is_not_judged(rig: Rig):
     gone = rig.push("--delete", "feat")
     assert gone.returncode == 0, _combined(gone)
     assert rig.remote_sha("refs/heads/feat") is None
+
+
+@NEEDS_SH
+def test_a_push_without_a_full_suite_record_is_refused_and_a_recorded_tree_goes_out(rig: Rig):
+    """LESSONS L8 strike 3: a real `git push` through the hook, without the rig's bypass reason."""
+    record = _load("full_suite_record")
+    _git(rig.work, "checkout", "-q", "-b", "feat")
+    tip = _commit(rig.work, "feat: new work")
+    tree = _git(rig.work, "rev-parse", "HEAD^{tree}")
+    refused = rig.push("feat", bypass=None)
+    text = _combined(refused)
+    assert refused.returncode != 0 and "GATES: FAIL" in text
+    assert (f"full suite not run for tree {tree[:12]} ({tip}): run scripts/run_tests.sh on a clean tree, or push with "
+            "AEOS_PUSH_WITHOUT_FULL_SUITE='<reason>'") in text
+    assert rig.remote_sha("refs/heads/feat") is None
+    state = record.read_state(rig.work)
+    assert state is not None and state.clean
+    assert "recorded tree" in record.record(rig.work, state.line, [])
+    allowed = rig.push("feat", bypass=None)
+    assert allowed.returncode == 0, _combined(allowed)
+    assert rig.remote_sha("refs/heads/feat") == tip
 
 
 # ------------------------------------------------------------------ scripts/run_with_deadline.py
