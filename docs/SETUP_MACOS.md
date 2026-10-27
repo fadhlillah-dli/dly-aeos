@@ -79,6 +79,11 @@ sets the bit on `./aeos` and `./scripts/dev.sh` again.
 
 ```bash
 ./aeos admin create
+```
+
+`admin create` asks for a password without echo, so it ends its block. Then:
+
+```bash
 ./aeos serve
 ```
 
@@ -122,10 +127,18 @@ delete it from the disk). After a restart of OpenBao, `serve` or `vault unseal` 
 ([ADR-0123](decisions/ADR-0123-openbao-unseal-key-in-os-keyring.md); `vault init --show-unseal-once` keeps the
 former flow).
 
+`vault install` and `vault init` ask before they change anything, so each one ends its own block:
+
 ```bash
 ./aeos vault install
+```
+
+```bash
 ./aeos vault start
 ./aeos vault init
+```
+
+```bash
 ./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ./aeos vault unseal
 ```
@@ -194,7 +207,8 @@ Google Drive + Docs:
 4. *Credentials → Create credentials → OAuth client ID* → type **Desktop app** → download the JSON.
 5. Connect, then delete the downloaded JSON once consent has succeeded:
    ```bash
-   ./aeos publish google-connect --client-secret ~/Downloads/client_secret_XXXX.json
+   ./aeos publish google-connect \
+     --client-secret ~/Downloads/client_secret_XXXX.json
    rm ~/Downloads/client_secret_XXXX.json
    ```
 
@@ -230,7 +244,7 @@ Only after measured benefit.
 
 ```bash
 ./aeos ops backup create --label after-setup
-./aeos ops backup restore-test <backup_id>
+./aeos ops backup restore-test "<backup_id>"
 ```
 
 ## Troubleshooting

@@ -111,6 +111,11 @@ choose PERSONAL.
 
 ```bash
 ./aeos admin create
+```
+
+Then:
+
+```bash
 ./aeos doctor -g LOCAL_AUTH
 ./aeos serve
 ```
@@ -193,14 +198,16 @@ reporting the CONTAINER runner, not WEAK.
 ```bash
 brew install --cask docker
 open -a Docker && docker version
-docker build --build-arg OPENCODE_VERSION=1.19.3 -t dly-aeos-worker:1.19.3 sandbox/
+docker build --build-arg OPENCODE_VERSION=1.19.3 \
+  -t dly-aeos-worker:1.19.3 sandbox/
 docker build -f sandbox/verifier.Dockerfile -t dly-aeos-verifier:0.1.0 .
 ./aeos worker containment --kind container
 ./aeos worker containment --kind container --domain OFFICE
 ./aeos worker status --domain PERSONAL
 ./aeos doctor -g CONTAINMENT
 ./aeos doctor -g EVIDENCE_REVIEW
-.venv/bin/python -m pytest -m integration -q -p no:cacheprovider tests/acceptance/test_containment.py
+.venv/bin/python -m pytest -m integration -q -p no:cacheprovider \
+  tests/acceptance/test_containment.py
 ```
 
 The verifier tag follows `./aeos version`. If the pinned OpenCode version changes, use the exact `docker build`
@@ -223,10 +230,19 @@ recovery copy to a new owner-only file and prints only its path. `doctor -g SECR
 `secret.openbao_*` checks passing and says where the unseal key lives, and `doctor --functional -g SECRET` must
 show `secret.keyring` VERIFIED (allow the Keychain prompt for the dly-aeos service only).
 
+`vault install` shows its plan and asks before it changes anything, and `vault init` asks `Continue?`; each one
+ends its own block, so a pasted line is never read as the answer.
+
 ```bash
-./aeos vault install --version <X.Y.Z>
+./aeos vault install --version "<X.Y.Z>"
+```
+
+```bash
 ./aeos vault start
 ./aeos vault init
+```
+
+```bash
 ./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ./aeos vault status --verify
 ./aeos doctor -g SECRET
@@ -272,9 +288,19 @@ The OpenRouter key should have a spend limit; it is prompted without echo. `pers
 PAT and its expiry date (see below). `delivery capabilities --record` records the GitHub provider capability
 probe as evidence. `doctor -g DELIVERY` must show `delivery.branch_protection`: the main ruleset reads CONFIGURED.
 
+Each `secrets set` asks for the value twice without echo, so each one is a block of its own:
+
 ```bash
 ./aeos secrets set workers/openrouter
-./aeos secrets set personal/github --expires-at <YYYY-MM-DD>
+```
+
+```bash
+./aeos secrets set personal/github --expires-at "<YYYY-MM-DD>"
+```
+
+Then:
+
+```bash
 ./aeos secrets status
 ./aeos delivery capabilities --record
 ./aeos doctor -g DELIVERY
@@ -298,8 +324,9 @@ date, `./aeos doctor --functional` also from the date GitHub reports for the tok
 
    ```bash
    ./aeos secrets set workers/opencode-go
-   ./aeos secrets status
    ```
+
+   Then check it with `./aeos secrets status`.
 
 4. On the Console's Go page, keep **Extra Usage OFF**. With it ON, Go falls back to your pay-as-you-go balance after
    a usage limit, and AEOS cannot see that setting.
@@ -338,11 +365,29 @@ Delete the downloaded client secret file (the `rm` below) only after the consent
 CAN_PUBLISH_PERSONAL` must end READY.
 
 ```bash
-./aeos publish google-connect --client-secret ~/Downloads/client_secret_<...>.json
-rm ~/Downloads/client_secret_<...>.json
+./aeos publish google-connect \
+  --client-secret ~/Downloads/"client_secret_<...>.json"
+rm ~/Downloads/"client_secret_<...>.json"
 ./aeos publish google-status
-./aeos policy decide --kind WRITE_ENABLEMENT --provider google-drive --enable --domain PERSONAL --as <admin> --rationale "Enable PERSONAL docs publication"
-./aeos policy decide --kind WRITE_ENABLEMENT --provider github-issues --enable --domain PERSONAL --as <admin> --rationale "Enable platform GitHub issues"
+```
+
+Each `--as` decision asks for your password, so each one is a block of its own:
+
+```bash
+./aeos policy decide --kind WRITE_ENABLEMENT --provider google-drive \
+  --enable --domain PERSONAL --as "<admin>" \
+  --rationale "Enable PERSONAL docs publication"
+```
+
+```bash
+./aeos policy decide --kind WRITE_ENABLEMENT --provider github-issues \
+  --enable --domain PERSONAL --as "<admin>" \
+  --rationale "Enable platform GitHub issues"
+```
+
+Then:
+
+```bash
 ./aeos doctor --functional -c CAN_PUBLISH_PERSONAL
 ```
 
@@ -359,7 +404,9 @@ Copy the route key and its config hash from the `routes list` output.
 ```bash
 ./aeos routes refresh
 ./aeos routes list --pool WORKER
-./aeos routes activate <route_key> --as <admin> --mode TRIAL --expected-hash <hash> --terms-reviewed --terms-note "<what you read>" --rationale "<why this route>"
+./aeos routes activate "<route_key>" --as "<admin>" --mode TRIAL \
+  --expected-hash "<hash>" --terms-reviewed \
+  --terms-note "<what you read>" --rationale "<why this route>"
 ```
 
 * **In the UI:** *Model & Rute* (`/models`) → route → *Aktifkan rute…*.
@@ -383,7 +430,10 @@ Copy the route key and its config hash from the `routes list` output.
      the plan fee, not per-token spend. Usage inside the plan costs $0 and only uses up plan allowance:
 
      ```bash
-     ./aeos policy decide --kind BUDGET --as <admin> --domain PERSONAL --target-type model_route --target-id opencode-go/glm-5.3-flash --days 30 --rationale "OpenCode Go subscription, \$10/month plan fee for the TRIAL"
+     ./aeos policy decide --kind BUDGET --as "<admin>" --domain PERSONAL \
+       --target-type model_route --target-id opencode-go/glm-5.3-flash \
+       --days 30 \
+       --rationale "OpenCode Go subscription, \$10/month plan fee for the TRIAL"
      ```
 
      The command prints the decision id. In the UI the same decision is *Keputusan* → *Catat keputusan manusia*, with
@@ -452,7 +502,8 @@ Copy the route key and its config hash from the `routes list` output.
      ```bash
      CFG="$HOME/Library/Application Support/DLY-AEOS/aeos.yaml"
      test -f "$CFG" || cp config/aeos.example.yaml "$CFG"
-     grep -q '^openrouter_free_daily_limit:' "$CFG" || printf '\nopenrouter_free_daily_limit: 1000\n' >> "$CFG"
+     grep -q '^openrouter_free_daily_limit:' "$CFG" ||
+       printf '\nopenrouter_free_daily_limit: 1000\n' >> "$CFG"
      grep '^openrouter_free_daily_limit:' "$CFG"
      ```
 
@@ -467,7 +518,12 @@ Copy the route key and its config hash from the `routes list` output.
      `openrouter/google/gemma-4-31b-it:free`, copy its hash from `./aeos routes list --pool ARENA` and run:
 
      ```bash
-     ./aeos routes activate openrouter/cohere/north-mini-code:free --as <admin> --mode TRIAL --expected-hash <hash> --data-class PUBLIC --days 30 --terms-reviewed --terms-note "Read the OpenRouter model page and privacy settings on <date>: training-capable free endpoints enabled, PUBLIC data only" --rationale "G1: evaluate this free model in ARENA"
+     NOTE="Read the OpenRouter model page and privacy settings on <date>:"
+     NOTE="$NOTE training-capable free endpoints enabled, PUBLIC data only"
+     ./aeos routes activate openrouter/cohere/north-mini-code:free \
+       --as "<admin>" --mode TRIAL --expected-hash "<hash>" \
+       --data-class PUBLIC --days 30 --terms-reviewed --terms-note "$NOTE" \
+       --rationale "G1: evaluate this free model in ARENA"
      ```
 
   6. **Decision C, the move into WORKER.** For each route you want as a worker, move it. The move is a new
@@ -475,9 +531,12 @@ Copy the route key and its config hash from the `routes list` output.
      Only a `:free` OpenRouter route moves (`ROUTE_POOL_MOVE_UNSUPPORTED` otherwise).
 
      ```bash
-     ./aeos routes set-pool openrouter/cohere/north-mini-code:free --pool WORKER --as <admin> --rationale "Decision C: free worker tier for PUBLIC data"
-     ./aeos routes list --pool WORKER
+     ./aeos routes set-pool openrouter/cohere/north-mini-code:free \
+       --pool WORKER --as "<admin>" \
+       --rationale "Decision C: free worker tier for PUBLIC data"
      ```
+
+     Then list the pool with `./aeos routes list --pool WORKER`.
 
      The line of the route must show `decision-c=PUBLIC-ONLY`. Copy its new hash. A move is refused
      (`FREE_WORKER_ROUTE_INELIGIBLE`) for a catalog price that is not exactly zero, an ended free period, data classes
@@ -487,7 +546,12 @@ Copy the route key and its config hash from the `routes list` output.
      (`./aeos work pause --reason "OpenRouter probe"`, then `./aeos work resume`).
 
      ```bash
-     ./aeos routes activate openrouter/cohere/north-mini-code:free --as <admin> --mode TRIAL --expected-hash <new hash> --data-class PUBLIC --days 30 --terms-reviewed --terms-note "Decision C: OpenRouter free endpoints may train on inputs, PUBLIC data only, credits bought on <date>" --rationale "Decision C: first-tier worker for PUBLIC tasks"
+     NOTE="Decision C: OpenRouter free endpoints may train on inputs,"
+     NOTE="$NOTE PUBLIC data only, credits bought on <date>"
+     ./aeos routes activate openrouter/cohere/north-mini-code:free \
+       --as "<admin>" --mode TRIAL --expected-hash "<new hash>" \
+       --data-class PUBLIC --days 30 --terms-reviewed --terms-note "$NOTE" \
+       --rationale "Decision C: first-tier worker for PUBLIC tasks"
      ```
 
      No BUDGET decision: the route is free. A `--data-class INTERNAL` is refused (`FREE_WORKER_ROUTE_INELIGIBLE`).
@@ -527,9 +591,21 @@ Then set this machine's resource budget and enable the worker agent:
 `agent-prereqs` is repeated until it reports READY; `doctor -c CAN_RUN_WORKER` must end READY.
 
 ```bash
-./aeos doctor budget --cpu <n> --ram <GiB> --disk <GiB> --max-workers <n> --reason "<measured on this Mac>"
+./aeos doctor budget --cpu "<n>" --ram "<GiB>" --disk "<GiB>" \
+  --max-workers "<n>" --reason "<measured on this Mac>"
 ./aeos work agent-prereqs opencode-implementer --domain PERSONAL
-./aeos work agent-enable opencode-implementer --as <admin> --domain PERSONAL --reason "<why>"
+```
+
+`agent-enable` asks for your password, so it ends its own block:
+
+```bash
+./aeos work agent-enable opencode-implementer --as "<admin>" \
+  --domain PERSONAL --reason "<why>"
+```
+
+Then:
+
+```bash
 ./aeos doctor -c CAN_RUN_WORKER
 ```
 
@@ -561,7 +637,8 @@ it off 1.19.3, and `./aeos doctor -c CAN_RUN_WORKER` then reports `OPENCODE_PIN_
 the worker with self-update off. Turn it off for your own shell too, once per machine (on Windows, see section 5):
 
 ```zsh
-grep -qx 'export OPENCODE_DISABLE_AUTOUPDATE=1' ~/.zshrc || echo 'export OPENCODE_DISABLE_AUTOUPDATE=1' >> ~/.zshrc
+grep -qx 'export OPENCODE_DISABLE_AUTOUPDATE=1' ~/.zshrc ||
+  echo 'export OPENCODE_DISABLE_AUTOUPDATE=1' >> ~/.zshrc
 source ~/.zshrc
 opencode --version
 ```
@@ -623,9 +700,10 @@ it carries the new `aeos.opencode_version` label.
 `plan status` must show READY_FOR_HUMAN_REVIEW, bridge proof PROVEN and four verified stage runs.
 
 ```bash
-./aeos plan create --project dly-aeos --domain PERSONAL --title "<title>" --prompt-file <idea.md> --actor <admin>
-./aeos plan run <plan_id> --actor <admin>
-./aeos plan status <plan_id>
+./aeos plan create --project dly-aeos --domain PERSONAL --title "<title>" \
+  --prompt-file "<idea.md>" --actor "<admin>"
+./aeos plan run "<plan_id>" --actor "<admin>"
+./aeos plan status "<plan_id>"
 ```
 
 1. **Approve.** On *Rencana* (`/plans`) → plan, review the version, then press *Approve*. Press *Approve &
@@ -655,7 +733,7 @@ Note the `backup_id` from `backup list`. `doctor -g RECOVERY` must show `recover
 ```bash
 ./aeos ops backup create --label first
 ./aeos ops backup list
-./aeos ops backup restore-test <backup_id>
+./aeos ops backup restore-test "<backup_id>"
 ./aeos doctor -g RECOVERY
 ```
 
@@ -667,14 +745,28 @@ Optional but needed for `recovery.config_rollback`: promote the first controller
 ([runbook](runbooks/controller-upgrade-rollback.md)).
 
 The first `release build` answers RELEASE_NOT_ACCEPTED when no trusted CI PASS is recorded for the commit; the
-`release accept` line records it. Note the `release_id` printed by the second build.
+`release accept` line records it. `release accept` asks you to type `accept` and `release promote` to type
+`promote`, so each one ends its block (a pasted line would be read as the confirmation).
 
 ```bash
 (cd frontend && npm ci && npm run build)
 ./aeos ops release build --ref HEAD
-./aeos ops release accept --commit "$(git rev-parse HEAD)" --operator <admin> --reason "GitHub Actions CI green on main for this commit"
+./aeos ops release accept --commit "$(git rev-parse HEAD)" \
+  --operator "<admin>" \
+  --reason "GitHub Actions CI green on main for this commit"
+```
+
+Then build again and note the `release_id` it prints:
+
+```bash
 ./aeos ops release build --ref HEAD
-./aeos ops release promote <release_id> --operator <admin> --reason "first release"
+```
+
+Promote that release:
+
+```bash
+./aeos ops release promote "<release_id>" --operator "<admin>" \
+  --reason "first release"
 ```
 
 AEOS never creates a GitHub tag or Release. To publish one, use
@@ -710,12 +802,15 @@ Every SLI shows NO_TARGET until you set one. Choose targets per project critical
 Record:
 
 ```bash
-./aeos ops sli criticality <project_key> HIGH --rationale "<why>"
-./aeos ops sli target queue_age_seconds --max <seconds> --rationale "<why>"
+./aeos ops sli criticality "<project_key>" HIGH --rationale "<why>"
+./aeos ops sli target queue_age_seconds --max "<seconds>" --rationale "<why>"
 ./aeos ops sli target stale_leases --max 0 --rationale "<why>"
-./aeos ops sli target recovery_point_age_seconds --max <seconds> --rationale "<why>"
-./aeos ops sli target sync_freshness_seconds --max <seconds> --rationale "<why>"
-./aeos ops sli budget-policy --window-days 28 --objective <objective> --action alert --rationale "<why>"
+./aeos ops sli target recovery_point_age_seconds --max "<seconds>" \
+  --rationale "<why>"
+./aeos ops sli target sync_freshness_seconds --max "<seconds>" \
+  --rationale "<why>"
+./aeos ops sli budget-policy --window-days 28 --objective "<objective>" \
+  --action alert --rationale "<why>"
 ./aeos ops sli --domain PERSONAL --raise-alerts
 ```
 
@@ -770,7 +865,8 @@ pemilik*. The form shows the exact `max_failure_rate` before you confirm. CLI al
 The value is between 0 and 1 (0.05 = 5%).
 
 ```bash
-./aeos policy route-threshold --max-failure-rate 0.05 --domain PERSONAL --as <admin> --rationale "<why>"
+./aeos policy route-threshold --max-failure-rate 0.05 --domain PERSONAL \
+  --as "<admin>" --rationale "<why>"
 ```
 
 A newer decision replaces the threshold. It never makes a route pass without trusted evaluation.
@@ -786,8 +882,16 @@ preset "Capture screenshot terautentikasi read-only". Choose ALLOWED with the sc
 Center routes, read-only"), or DENIED. Or run:
 
 ```bash
-./aeos policy decide --kind POLICY --authenticated-capture ALLOWED --capture-scope "<pages it covers>" --domain PERSONAL --as <admin> --rationale "<why>"
-./aeos policy decide --kind POLICY --authenticated-capture DENIED --domain PERSONAL --as <admin> --rationale "<why>"
+./aeos policy decide --kind POLICY --authenticated-capture ALLOWED \
+  --capture-scope "<pages it covers>" --domain PERSONAL --as "<admin>" \
+  --rationale "<why>"
+```
+
+or:
+
+```bash
+./aeos policy decide --kind POLICY --authenticated-capture DENIED \
+  --domain PERSONAL --as "<admin>" --rationale "<why>"
 ```
 
 It is PERSONAL only, and `--days` is optional. Either way the collector stays unauthenticated in this build:
@@ -805,7 +909,9 @@ Record, only if a machine has no Docker: *Keputusan* → *Catat keputusan manusi
 sandbox (WEAK) untuk PERSONAL". Or run:
 
 ```bash
-./aeos policy decide --kind EXCEPTION --exception worker_sandbox_process --no-allow-bash --days 7 --domain PERSONAL --as <admin> --rationale "<why>"
+./aeos policy decide --kind EXCEPTION --exception worker_sandbox_process \
+  --no-allow-bash --days 7 --domain PERSONAL --as "<admin>" \
+  --rationale "<why>"
 ```
 
 To revoke it: *Keputusan* → highlighted EXCEPTION row → *Cabut*, or
@@ -835,7 +941,8 @@ The outcome is ACCEPTED, or REJECTED / SUPERSEDED (with `--superseded-by ADR-NNN
 
 ```bash
 ./aeos policy adrs --load
-./aeos policy adr-decide ADR-0004 --outcome ACCEPTED --as <admin> --rationale "<why>"
+./aeos policy adr-decide ADR-0004 --outcome ACCEPTED --as "<admin>" \
+  --rationale "<why>"
 ```
 
 Or use *Keputusan* → *Register ADR*. Your decision is bound to the ADR's content hash: a later edit of the file
@@ -866,7 +973,9 @@ Record the attestation: *Keputusan* → preset "Atestasi pemilik: extra usage be
 akun claude.ai". Or run:
 
 ```bash
-./aeos policy decide --kind POLICY --policy-preset claude_extra_usage_off --domain PERSONAL --as <admin> --days <N> --rationale "<what you checked>"
+./aeos policy decide --kind POLICY --policy-preset claude_extra_usage_off \
+  --domain PERSONAL --as "<admin>" --days "<N>" \
+  --rationale "<what you checked>"
 ```
 
 It is shown as an owner attestation (E0), never VERIFIED.
@@ -1060,10 +1169,19 @@ otorisasi perusahaan untuk OFFICE", enter the company reference, tick the provid
 keys in the OFFICE override. Or run:
 
 ```bash
-./aeos policy decide --kind POLICY --domain OFFICE --office-authorization --company-reference "<ref>" --allowed-provider bitbucket --allowed-provider jira --allowed-provider confluence --approved-target 'bitbucket:workspace=<ws>,root_id=<ws>/<repo>' --approved-data-class <CLASS> --approved-identity office/atlassian=<account id> --office-policy atlassian_deployment=CLOUD --as <admin> --rationale "<what the company approved>"
+./aeos policy decide --kind POLICY --domain OFFICE \
+  --office-authorization --company-reference "<ref>" \
+  --allowed-provider bitbucket --allowed-provider jira \
+  --allowed-provider confluence \
+  --approved-target 'bitbucket:workspace=<ws>,root_id=<ws>/<repo>' \
+  --approved-data-class "<CLASS>" \
+  --approved-identity "office/atlassian=<account id>" \
+  --office-policy atlassian_deployment=CLOUD --as "<admin>" \
+  --rationale "<what the company approved>"
 ```
 
-Keep the single quotes around values with commas: Windows PowerShell splits them otherwise. Once the
+Keep the single quotes around values with commas: Windows PowerShell splits them otherwise. In PowerShell, end
+each continued line with a backtick instead of `\` ([section 5](#5-windows-notes)). Once the
 authorisation exists, OFFICE targets, data classes and identities fail closed until they are recorded.
 
 Next, make each approved route OFFICE-eligible with
@@ -1144,12 +1262,19 @@ Windows stays a supported host. Everything above applies, with these differences
 | `./aeos <command>` | `aeos <command>` | `.\aeos.ps1 <command>` |
 | `.venv/bin/python ...` | `.venv\Scripts\python.exe ...` | `.\.venv\Scripts\python.exe ...` |
 | `~/Library/Application Support/DLY-AEOS` | `%LOCALAPPDATA%\DLY-AEOS` | `$env:LOCALAPPDATA\DLY-AEOS` |
+| `\` at the end of a line (the command goes on) | `^` at the end of the line | `` ` `` (backtick) at the end of the line |
+
+Long commands above are split over several lines, each but the last ending with `\`. Neither Windows shell reads
+that `\` as "the command goes on": both pass it as an argument and run the next line as a new command. Before you
+paste such a command, replace each line-ending `\` with `^` (cmd.exe) or a backtick (PowerShell), with nothing
+after it, not even a space, or join the lines into one.
 
 In cmd.exe, `.\aeos.ps1` opens in an editor instead of running. Use `aeos`, which runs `aeos.cmd`. If PowerShell
 blocks scripts, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Environment variables for the
 pytest lines: in PowerShell write `$env:NAME="value"; <command>`, in cmd.exe `set NAME=value` first.
 
-* **Docker:** `winget install -e --id Docker.DockerDesktop`, then start it. The `docker build` lines are the same.
+* **Docker:** `winget install -e --id Docker.DockerDesktop`, then start it. The `docker build` lines are the same,
+  with the line endings of the table above.
   The container boundary was proven on the Windows build host in a throw-away data directory. Your real data
   directory still needs its own `aeos worker containment --kind container` report.
 * **Claude Code:** `winget install --id Anthropic.ClaudeCode -e`. To remove `ANTHROPIC_API_KEY`, run

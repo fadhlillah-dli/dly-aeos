@@ -232,7 +232,8 @@ The second command, with `--runxfail`, makes each xfail run for real: it must fa
 
 ```
 python -m pytest tests/acceptance -m "not integration and not network"
-python -m pytest tests/acceptance -m "not integration and not network" --runxfail
+python -m pytest tests/acceptance -m "not integration and not network" \
+  --runxfail
 ```
 
 Never mark a row PASS on the basis of a design, a mock or an xfail; when a seam bug is fixed the

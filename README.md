@@ -63,6 +63,11 @@ git clone https://github.com/fadhlillah-dli/dly-aeos.git
 cd dly-aeos
 ./scripts/bootstrap.sh
 ./aeos admin create
+```
+
+`admin create` asks for a password without echo, so it ends its block. Then:
+
+```bash
 ./aeos serve
 ```
 
