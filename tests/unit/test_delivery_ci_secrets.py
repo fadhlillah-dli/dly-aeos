@@ -71,3 +71,81 @@ def test_third_party_actions_are_pinned_to_full_commit_shas(path: Path):
                 continue
             ref = uses.rsplit("@", 1)[-1] if "@" in uses else ""
             assert re.fullmatch(r"[0-9a-f]{40}", ref), f"{uses} is not pinned to a full commit SHA"
+
+
+# ------------------------------------------------------------------ rules for every workflow file (one owner: here)
+# A timeout on every job (the default is 360 minutes and GitHub Free has 5 account-wide macOS slots), no macOS runner
+# outside ci.yml (a pull request title or lint check is platform-neutral and a macOS slot is scarce), and no
+# ``${{ }}`` expression other than a matrix value inside ``run:`` (script injection: an untrusted value such as a pull
+# request title or a branch name has to reach the shell through ``env:``).
+MAX_JOB_MINUTES = 25
+MATRIX_VALUE = re.compile(r"\s*matrix\.[A-Za-z0-9_-]+\s*")
+
+
+def _timeout_problems(data: dict) -> list[str]:
+    problems = []
+    for jid, job in (data.get("jobs") or {}).items():
+        timeout = (job or {}).get("timeout-minutes")
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or not 0 < timeout <= MAX_JOB_MINUTES:
+            problems.append(f"job {jid}: timeout-minutes must be an integer in 1..{MAX_JOB_MINUTES}, got {timeout!r}")
+    return problems
+
+
+def _macos_problems(name: str, data: dict) -> list[str]:
+    if name == "ci.yml":
+        return []
+    return [f"job {jid}: runs on {(job or {}).get('runs-on')!r}; only ci.yml may use a macOS runner"
+            for jid, job in (data.get("jobs") or {}).items() if "macos" in str((job or {}).get("runs-on")).lower()]
+
+
+def _run_interpolation_problems(data: dict) -> list[str]:
+    problems = []
+    for jid, job in (data.get("jobs") or {}).items():
+        for step in (job or {}).get("steps") or []:
+            for expr in re.findall(r"\$\{\{(.*?)\}\}", str((step or {}).get("run", "")), flags=re.S):
+                if not MATRIX_VALUE.fullmatch(expr):
+                    problems.append(f"job {jid}, step {(step or {}).get('name')}: run: interpolates {{{{{expr}}}}}; "
+                                    "pass it through env:")
+    return problems
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.name)
+def test_every_job_has_a_timeout_no_macos_outside_ci_and_no_expression_in_run(path: Path):
+    data = _load(path)
+    assert _timeout_problems(data) == []
+    assert _macos_problems(path.name, data) == []
+    assert _run_interpolation_problems(data) == []
+
+
+def test_the_every_workflow_rules_bite_on_a_violation_and_pass_a_near_miss():
+    import copy
+
+    ok = {"jobs": {"a": {"runs-on": "ubuntu-latest", "timeout-minutes": 5,
+                         "steps": [{"name": "s", "run": "echo ${{ matrix.os }} \"$PR_TITLE\"",
+                                    "env": {"PR_TITLE": "${{ github.event.pull_request.title }}"}}]}}}
+    assert _timeout_problems(ok) == [] and _macos_problems("pr-title.yml", ok) == []
+    assert _run_interpolation_problems(ok) == []  # near miss: a matrix value in run:, the title in env:
+
+    for value in (None, 0, 26, "5", True):
+        bad = copy.deepcopy(ok)
+        bad["jobs"]["a"]["timeout-minutes"] = value
+        assert _timeout_problems(bad) == [
+            f"job a: timeout-minutes must be an integer in 1..25, got {value!r}"], value
+    missing = copy.deepcopy(ok)
+    del missing["jobs"]["a"]["timeout-minutes"]
+    assert "job a: timeout-minutes must be an integer" in _timeout_problems(missing)[0]
+    edge = copy.deepcopy(ok)
+    edge["jobs"]["a"]["timeout-minutes"] = 25
+    assert _timeout_problems(edge) == []
+
+    mac = copy.deepcopy(ok)
+    mac["jobs"]["a"]["runs-on"] = "macos-26-intel"
+    assert _macos_problems("pr-title.yml", mac) == [
+        "job a: runs on 'macos-26-intel'; only ci.yml may use a macOS runner"]
+    assert _macos_problems("ci.yml", mac) == []  # ci.yml is the one place for macOS runners
+
+    for expr in ("github.event.pull_request.title", "github.head_ref", "matrix.os == 'x'", "matrix.a.b"):
+        injected = copy.deepcopy(ok)
+        injected["jobs"]["a"]["steps"][0]["run"] = f"echo '${{{{ {expr} }}}}'"
+        (problem,) = _run_interpolation_problems(injected)
+        assert problem == f"job a, step s: run: interpolates {{{{ {expr} }}}}; pass it through env:", expr

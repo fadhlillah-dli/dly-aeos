@@ -735,7 +735,6 @@ def test_the_parity_guard_names_a_new_event_conditional_job_or_step():
 
 # ------------------------------------------------------------------ every workflow file (ci.yml and pr-title.yml)
 WORKFLOWS_DIR = ROOT / ".github" / "workflows"
-SHA_PIN = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 
 
 def _workflow_files() -> dict[str, dict]:
@@ -746,66 +745,23 @@ def _all_jobs(doc: dict) -> dict:
     return doc["jobs"]
 
 
-def _untrusted_in_run(doc: dict) -> list[str]:
-    """Steps whose ``run:`` interpolates a ``${{ }}`` expression other than a matrix value: any github.* value (a pull
-    request title, a branch name) there is script injection; it has to go through env:."""
-    bad = []
-    for jid, job in _all_jobs(doc).items():
-        for step in job.get("steps") or []:
-            for expr in re.findall(r"\$\{\{(.*?)\}\}", str(step.get("run", "")), flags=re.S):
-                if not re.fullmatch(r"\s*matrix\.[A-Za-z0-9_-]+\s*", expr):
-                    bad.append(f"{jid}/{step.get('name')}: {{{{{expr}}}}}")
-    return bad
-
-
-def _unpinned_actions(doc: dict) -> list[str]:
-    return [f"{jid}: {step['uses']}" for jid, job in _all_jobs(doc).items() for step in job.get("steps") or []
-            if "uses" in step and not SHA_PIN.match(str(step["uses"]))]
-
-
-def test_every_action_of_every_workflow_is_pinned_by_commit_sha_and_no_run_block_interpolates_untrusted_text():
-    files = _workflow_files()
-    assert {"ci.yml", "pr-title.yml"} <= set(files)
-    for name, doc in files.items():
-        assert _unpinned_actions(doc) == [], name
-        assert _untrusted_in_run(doc) == [], name
-        assert doc["permissions"] == {"contents": "read"}, name
-        for jid, job in _all_jobs(doc).items():
-            assert isinstance(job.get("timeout-minutes"), int) and 0 < job["timeout-minutes"] <= 25, (name, jid)
-            assert "pull_request_target" not in str(doc.get("on", doc.get(True))), name
-
-
-def test_the_pin_and_injection_checks_bite_on_a_tag_a_branch_and_a_title_in_a_run_block():
-    import copy
-
-    doc = _workflow_files()["pr-title.yml"]
-    assert _unpinned_actions(doc) == [] and _untrusted_in_run(doc) == []
-    for ref in ("v7", "main", "3d3c42e5aac5ba805825da76410c181273ba90b1abc", "3d3c42e"):
-        tagged = copy.deepcopy(doc)
-        tagged["jobs"]["pr-title"]["steps"][0]["uses"] = f"actions/checkout@{ref}"
-        assert _unpinned_actions(tagged), ref
-    injected = copy.deepcopy(doc)
-    injected["jobs"]["pr-title"]["steps"][1]["run"] = "python3 scripts/commit_subject.py --subject '${{ github.event.pull_request.title }}'"
-    assert _untrusted_in_run(injected)
-    head_ref = copy.deepcopy(_workflow())
-    head_ref["jobs"]["static-checks"]["steps"][2]["run"] = "echo ${{ github.head_ref }}"
-    assert _untrusted_in_run(head_ref)
+# Rules that apply to every workflow file (full-SHA pins, read-only token, no pull_request_target, a timeout on every
+# job, no macOS runner outside ci.yml, no github.* expression in run:) have one owner: tests/unit/test_delivery_ci_secrets.py.
 
 
 PR_TITLE_JOB = "pr-title"
 
 
 def _pr_title_problems(doc: dict) -> list[str]:
-    """What is wrong with pr-title.yml (a parsed workflow): read-only token, the five event types, one ubuntu job
-    named ``pr title [G1]`` with a 5-minute timeout and a SHA-pinned checkout without ``with:``, and the title reaching
-    the script through ``env:`` only."""
+    """What is wrong with pr-title.yml (a parsed workflow), the parts that are specific to it: the five event types,
+    one ubuntu job named ``pr title [G1]`` with a 5-minute timeout and the same checkout as ci.yml without ``with:``,
+    and the title reaching the script through ``env:`` only. The all-workflow rules (pins, token, timeouts) are owned
+    by tests/unit/test_delivery_ci_secrets.py."""
     problems = []
     on = doc.get("on", doc.get(True)) or {}
     if set(on) != {"pull_request"} or set(on["pull_request"]["types"]) != {
             "opened", "edited", "synchronize", "reopened", "ready_for_review"}:
         problems.append(f"on: {on}")
-    if doc.get("permissions") != {"contents": "read"}:
-        problems.append(f"permissions {doc.get('permissions')}")
     jobs = _all_jobs(doc)
     if list(jobs) != [PR_TITLE_JOB]:
         return problems + [f"jobs {list(jobs)}"]
@@ -818,7 +774,6 @@ def _pr_title_problems(doc: dict) -> list[str]:
         problems.append(f"timeout-minutes {job.get('timeout-minutes')!r}")
     if "if" in job or "continue-on-error" in job or "permissions" in job:
         problems.append("job-level if / continue-on-error / permissions")
-    problems += _unpinned_actions(doc) + _untrusted_in_run(doc)
     steps = job["steps"]
     checkout = steps[0]
     if not str(checkout.get("uses", "")).startswith("actions/checkout@") or checkout.get("with"):
@@ -871,9 +826,6 @@ def test_the_pr_title_checks_bite_on_each_unsafe_or_weakened_shape():
     assert mutated(lambda d: job(d).update({"runs-on": "macos-latest"}))
     assert mutated(lambda d: job(d).update({"name": "pr title"}))
     assert mutated(lambda d: job(d).update({"if": "github.event.action == 'edited'"}))
-    assert mutated(lambda d: d.update({"permissions": {"contents": "write"}}))
-    assert mutated(lambda d: d.update({"permissions": {"contents": "read", "pull-requests": "write"}}))
-    assert mutated(lambda d: d.pop("permissions"))
     assert mutated(lambda d: job(d)["steps"][0].update(uses="actions/checkout@v7"))
     assert mutated(lambda d: job(d)["steps"][0].update({"with": {"ref": "main"}}))
     assert mutated(lambda d: d.update({"on": {"pull_request": {"types": ["opened"]}}}))

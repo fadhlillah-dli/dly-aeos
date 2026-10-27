@@ -28,7 +28,8 @@ any gate, a wrong-commit guard (a detached HEAD whose commits the pushed refs do
 is not the HEAD of the current branch) and an identity guard (every pushed commit is authored and committed by this
 repository's `git config user.email`, with no AI identity or attribution: aeos.core.commit_identity).
 
-The output ends with one `NOT RUN: <job> (<reason>)` line for every CI job this run does not execute, then exactly
+The output ends with one `NOT RUN: <job> (<reason>)` line for every CI job this run does not execute (every job of
+every workflow that runs on pull_request or push, ci.yml and pr-title.yml alike), then exactly
 one verdict line `GATES: PASS|FAIL (<n> run, <m> failed, <k> not run)` ("not run" counts SKIPPED gates and those
 CI jobs), so a local PASS never reads as a CI PASS. `--report` writes the same facts to a file for tools that hide
 output lines. Before everything, scripts/preflight.py --facts prints environment facts (informational only)."""
@@ -67,7 +68,8 @@ from aeos.core.commit_identity import (  # noqa: E402
 SCRIPTS = Path(__file__).resolve().parent
 COMMIT_SUBJECT = SCRIPTS / "commit_subject.py"
 PREFLIGHT = SCRIPTS / "preflight.py"
-CI_WORKFLOW = Path(".github") / "workflows" / "ci.yml"
+WORKFLOWS_DIR = Path(".github") / "workflows"
+CI_WORKFLOW = WORKFLOWS_DIR / "ci.yml"
 
 PASS, FAIL, SKIPPED = "PASS", "FAIL", "SKIPPED"
 ZERO_SHA_CHARS = frozenset("0")
@@ -612,9 +614,11 @@ def run_local(args: argparse.Namespace, root: Path = ROOT) -> list[Result]:
 
 
 # ------------------------------------------------------------------ what this run did not do
-# Reasons by job id prefix, first match wins. Job ids come from the `jobs:` keys of ci.yml, so a job added to the
-# workflow shows up as NOT RUN ("no local equivalent") without anyone editing this file.
+# Reasons by job label prefix, first match wins. The labels come from the workflows: the `jobs:` keys of ci.yml, and
+# the `name:` of a job of any other workflow that runs on pull_request or push (for example "pr title [G1]"). A job
+# added to a workflow shows up as NOT RUN ("no local equivalent") without anyone editing this file.
 NOT_RUN_REASONS: tuple[tuple[str, str], ...] = (
+    ("pr title", "checks the pull request title; runs only in CI"),
     ("backend-shards-", "test shards run on that CI host; locally only the G1 static gates run, and --tests runs the "
                         "suite once on this host (Windows and Intel macOS stay NOT-PROVEN)"),
     ("backend-verifier-", "the real trusted-suite verifier test is not part of a local run"),
@@ -634,13 +638,9 @@ LOCALLY_RUN_JOBS: dict[str, tuple[str, ...]] = {
 }
 
 
-def ci_job_ids(root: Path) -> list[str]:
-    """The job ids of ci.yml (the keys under `jobs:`), read without a YAML library."""
-    try:
-        text = (root / CI_WORKFLOW).read_text(encoding="utf-8")
-    except OSError:
-        return []
-    ids: list[str] = []
+def _job_blocks(text: str) -> list[tuple[str, str | None]]:
+    """(job id, literal `name:` or None) for each job under the top-level `jobs:` key, read without a YAML library."""
+    jobs: list[tuple[str, str | None]] = []
     in_jobs = False
     for line in text.splitlines():
         if re.match(r"^jobs:\s*(#.*)?$", line):
@@ -652,18 +652,72 @@ def ci_job_ids(root: Path) -> list[str]:
             break
         match = re.match(r"^  ([A-Za-z_][\w-]*):\s*(#.*)?$", line)
         if match:
-            ids.append(match.group(1))
-    return ids
+            jobs.append((match.group(1), None))
+            continue
+        named = re.match(r"^    name:\s*(.*?)\s*$", line)
+        if named and jobs and jobs[-1][1] is None:
+            value = re.sub(r"\s+#.*$", "", named.group(1)).strip().strip("'\"")
+            if value and "${{" not in value:
+                jobs[-1] = (jobs[-1][0], value)
+    return jobs
+
+
+def _workflow_events(text: str) -> set[str]:
+    """The event names of the top-level `on:` key (a scalar, a flow list, a block list or a mapping)."""
+    events: set[str] = set()
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        inline = re.match(r"^(?:on|'on'|\"on\"):[ \t]*(.*?)\s*$", line)
+        if not inline:
+            continue
+        rest = re.sub(r"\s*#.*$", "", inline.group(1))
+        if rest:
+            return set(re.findall(r"[A-Za-z_]+", rest))
+        for follow in lines[i + 1:]:
+            if follow and not follow[0].isspace() and not follow.startswith("#"):
+                break
+            key = re.match(r"^  (?:- *)?([A-Za-z_]+)\b", follow)
+            if key:
+                events.add(key.group(1))
+        break
+    return events
+
+
+def ci_job_ids(root: Path) -> list[str]:
+    """The job ids of ci.yml (the keys under `jobs:`), read without a YAML library."""
+    try:
+        text = (root / CI_WORKFLOW).read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [jid for jid, _ in _job_blocks(text)]
+
+
+def other_workflow_jobs(root: Path) -> list[str]:
+    """Labels of the jobs of every workflow besides ci.yml that runs on pull_request or push: the job's literal
+    `name:` (the check name CI shows, for example "pr title [G1]"), else its id."""
+    labels: list[str] = []
+    try:
+        files = sorted(p for p in (root / WORKFLOWS_DIR).glob("*.y*ml") if p.name != CI_WORKFLOW.name)
+    except OSError:
+        return []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if _workflow_events(text) & {"push", "pull_request"}:
+            labels += [name or jid for jid, name in _job_blocks(text)]
+    return labels
 
 
 def not_run_jobs(results: Sequence[Result], root: Path = ROOT) -> list[tuple[str, str]]:
-    """(job id, reason) for every CI job of ci.yml that this run did not execute."""
+    """(job label, reason) for every CI job of a push or pull_request workflow that this run did not execute."""
     ids = ci_job_ids(root)
     if not ids:
         return [("all CI jobs", f"{CI_WORKFLOW.as_posix()} was not found or has no jobs")]
     ran = {r.gate for r in results if r.status in (PASS, FAIL)}
     out: list[tuple[str, str]] = []
-    for job in ids:
+    for job in [*ids, *other_workflow_jobs(root)]:
         needed = LOCALLY_RUN_JOBS.get(job)
         if needed and all(g in ran for g in needed):
             continue

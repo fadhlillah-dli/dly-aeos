@@ -125,8 +125,8 @@ def test_every_type_of_the_rule_is_accepted():
 # ------------------------------------------------------------------ --subject: a pull request title
 # The title becomes the merge-commit body and the squash subject, so it gets the commit-subject rules (same functions,
 # no copy). AI samples are assembled from parts so that the repository-wide hygiene scan finds nothing in this file.
-_PR_TRAILER = "Co-authored-by"
-_PR_ADDR = "noreply" + "@" + "anthropic.com"
+TRAILER = "Co-authored-by"
+AI_ADDR = "noreply" + "@" + "anthropic.com"
 
 
 def _subject_main(subject: str, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
@@ -148,12 +148,12 @@ def test_a_title_that_is_not_a_conventional_commits_subject_fails_with_the_reaso
 
 
 def test_an_attribution_in_a_pull_request_title_fails_inline_and_as_a_trailer(capsys: pytest.CaptureFixture[str]):
-    trailer_in_body = f"feat: add a thing\n\n{_PR_TRAILER}: Some Bot <{_PR_ADDR}>"
-    inline = f"feat: add a thing {_PR_TRAILER}: Some Bot <{_PR_ADDR}>"
+    trailer_in_body = f"feat: add a thing\n\n{TRAILER}: Some Bot <{AI_ADDR}>"
+    inline = f"feat: add a thing {TRAILER}: Some Bot <{AI_ADDR}>"
     for title in (trailer_in_body, inline):
         code, out = _subject_main(title, capsys)
         assert code == 1 and "AI attribution in the message" in out, title
-        assert _PR_ADDR not in out and out.isascii()  # the guard's reasons never echo the address
+        assert AI_ADDR not in out and out.isascii()  # the guard's reasons never echo the address
     # the format passes and only the attribution is reported for the inline form
     assert cs.check_subject(inline) is None and cs.subject_reasons(inline)
     code, out = _subject_main("feat: the generated client is regenerated in CI", capsys)
@@ -580,9 +580,8 @@ def test_git_revert_of_a_merge_and_of_a_revert_pass_the_gate(repo: Path):
 # ------------------------------------------------------------------ no attribution in commits
 # The judgement is the repository's own guard (backend/aeos/core/attribution.py); these tests prove that the gate
 # applies it to the message, the author and the committer, and prints its reasons. Every AI sample is assembled from
-# parts so that the repository-wide hygiene scan has nothing to find in this file.
-TRAILER = "Co-authored-by"
-AI_ADDR = "noreply" + "@" + "anthropic.com"
+# parts so that the repository-wide hygiene scan has nothing to find in this file. TRAILER and AI_ADDR are defined
+# above, with the pull request title tests.
 GEN = "Generated" + " with"
 
 

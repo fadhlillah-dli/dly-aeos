@@ -93,9 +93,10 @@ The run also does what CI cannot do for you, and says what it did not do:
   conflict is a FAIL that lists the files: pushing such a branch costs a conflict-resolution commit and a full CI
   re-run. Any other failure of that command (for example unrelated histories, exit 128) is a FAIL with git's message.
   It needs git 2.38 or newer; only with an older git (usage error, exit 129) is the gate SKIPPED with that reason.
-- **`NOT RUN: <job> (<reason>)`.** One line for every job of `ci.yml` that this run does not execute (the job ids
-  are read from the workflow, so a new job shows up by itself): the backend shards, the verifier, bootstrap,
-  browser e2e, the supply-chain report and the aggregators. `static-checks` counts as run only when ruff, both mypy
+- **`NOT RUN: <job> (<reason>)`.** One line for every job of every workflow that runs on `pull_request` or `push` that this run does not
+  execute (the job ids of `ci.yml` and the job names of the other workflows are read from the files, so a new job shows
+  up by itself): the backend shards, the verifier, bootstrap, browser e2e, the supply-chain report, the aggregators
+  and `pr title [G1]` (checked only in CI). `static-checks` counts as run only when ruff, both mypy
   platforms, the secret scan, `shellcheck`, `actionlint` and the actionlint bite control all ran here (a SKIPPED one,
   for example without the tool installed, keeps the job NOT RUN); `commit-subjects` counts as run when the
   commit-subject gate ran. CI uses the shellcheck that ubuntu-latest ships (0.9.x) and a pinned actionlint, so a

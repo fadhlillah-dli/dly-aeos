@@ -8,8 +8,9 @@
   scripts no longer word-split an unquoted variable. A new workflow `pr-title.yml` (`pr title [G1]`, not a required
   check) validates the pull request title as a commit subject through `scripts/commit_subject.py --subject`, with the
   title passed through `env:` only. `scripts/gates.py` mirrors the new steps (SKIPPED with a reason, never PASS, when
-  the tools are missing, so the job stays NOT RUN), and `tests/unit/test_ci_gates.py` pins the checksum comparison, the
-  SHA pins of every workflow, the title-in-env rule and an allow-list of jobs and steps whose `if:` reads the `github` context (only
+  the tools are missing, so the job stays NOT RUN) and lists `pr title [G1]` as NOT RUN, `tests/unit/test_delivery_ci_secrets.py`
+  owns the rules of every workflow (SHA pins, read-only token, a timeout on every job, no macOS runner outside `ci.yml`,
+  no expression in `run:`), and `tests/unit/test_ci_gates.py` pins the checksum comparison, the title-in-env rule and an allow-list of jobs and steps whose `if:` reads the `github` context (only
   `commit-subjects`).
   Evidence: E2 unit run on macOS arm64 for the tests and `gates.py`; actionlint and shellcheck themselves ran on no
   host yet (E3 only after the first CI run on ubuntu-latest), Windows and Linux are NOT-PROVEN for the new tests.

@@ -432,9 +432,9 @@ def test_the_commit_subjects_job_counts_as_run_only_when_its_gate_ran():
     """shellcheck moved to the static-checks job (it runs on main too); the commit-subjects job is its one gate."""
     jobs = list(yaml.safe_load(CI_TEXT)["jobs"])
     nothing = gates.not_run_jobs([], ROOT)
-    assert [job for job, _ in nothing] == jobs  # no gate ran: every job is NOT RUN
+    assert [job for job, _ in nothing] == [*jobs, PR_TITLE_LABEL]  # no gate ran: every job is NOT RUN
     ran = gates.not_run_jobs([gates.Result("commit-subjects", gates.FAIL, 0.0, "x")], ROOT)
-    assert [job for job, _ in ran] == [j for j in jobs if j != "commit-subjects"]
+    assert [job for job, _ in ran] == [*(j for j in jobs if j != "commit-subjects"), PR_TITLE_LABEL]
     assert gates.LOCALLY_RUN_JOBS["commit-subjects"] == ("commit-subjects",)
     skipped = dict(gates.not_run_jobs([gates.Result("commit-subjects", gates.SKIPPED, 0.0, "no base"),
                                        gates.Result("shellcheck", gates.PASS)], ROOT))
@@ -475,6 +475,45 @@ def test_a_job_added_to_the_workflow_shows_up_as_not_run_by_itself(tmp_path: Pat
     assert "brand-new-job" not in dict(gates.not_run_jobs([], plain))
 
 
+PR_TITLE_LABEL = "pr title [G1]"
+
+
+def test_the_pr_title_job_of_the_other_workflow_is_listed_as_not_run(capsys: pytest.CaptureFixture[str],
+                                                                      monkeypatch: pytest.MonkeyPatch):
+    assert gates.other_workflow_jobs(ROOT) == [PR_TITLE_LABEL]
+    found = dict(gates.not_run_jobs([gates.Result("commit-subjects", gates.PASS)], ROOT))
+    assert found[PR_TITLE_LABEL] == "checks the pull request title; runs only in CI"
+    monkeypatch.setattr(gates, "run_local", lambda args: [gates.Result("a", gates.PASS, 0.1)])
+    assert gates.main([]) == 0  # the verdict semantics are unchanged: NOT RUN lines do not fail a run
+    out = capsys.readouterr().out
+    assert f"NOT RUN: {PR_TITLE_LABEL} (checks the pull request title; runs only in CI)" in out.splitlines()
+    assert gates.main(["--json"]) == 0
+    listed = json.loads(capsys.readouterr().out)["not_run_jobs"]
+    assert {"job": PR_TITLE_LABEL, "reason": "checks the pull request title; runs only in CI"} in listed
+
+
+def test_only_workflows_that_run_on_pull_request_or_push_count_and_the_label_is_the_job_name(tmp_path: Path):
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "ci.yml").write_text(CI_TEXT, encoding="utf-8")
+    job = "jobs:\n  lint:\n    name: 'lint things [G1]'  # shown by CI\n    runs-on: ubuntu-latest\n    steps: []\n"
+    cases = {
+        "a.yml": ("on:\n  pull_request:\n    types: [opened]\n", True),
+        "b.yml": ("on: push\n", True),
+        "c.yml": ("on: [workflow_dispatch, pull_request]\n", True),
+        "d.yml": ("on:\n  - push\n  - workflow_dispatch\n", True),
+        "e.yml": ("on:\n  workflow_dispatch:\n  schedule:\n    - cron: '0 3 * * *'\n", False),  # near miss
+        "f.yml": ("on:\n  workflow_run:\n    workflows: [ci]\n", False),  # near miss
+    }
+    for name, (trigger, _) in cases.items():
+        (wf / name).write_text(f"name: x\n{trigger}\n{job}", encoding="utf-8")
+    expected = ["lint things [G1]"] * sum(counts for _, counts in cases.values())
+    assert gates.other_workflow_jobs(tmp_path) == expected
+    (wf / "g.yml").write_text("on: push\njobs:\n  by-id:\n    name: ${{ matrix.os }}\n    steps: []\n", encoding="utf-8")
+    assert gates.other_workflow_jobs(tmp_path)[-1] == "by-id"  # an expression is no label: fall back to the id
+    assert gates.other_workflow_jobs(tmp_path / "no-such-dir") == []
+
+
 def test_the_workflow_missing_is_one_honest_line(tmp_path: Path):
     assert gates.not_run_jobs([], tmp_path)[0][0] == "all CI jobs"
 
@@ -494,7 +533,7 @@ def test_the_output_ends_with_exactly_one_verdict_line_after_the_not_run_lines(
     lines = capsys.readouterr().out.strip().splitlines()
     assert sum(line.startswith("GATES:") for line in lines) == 1 and lines[-1].startswith("GATES: PASS (1 run, 0 failed, ")
     not_run = [line for line in lines if line.startswith("NOT RUN: ")]
-    assert len(not_run) == len(yaml.safe_load(CI_TEXT)["jobs"])
+    assert len(not_run) == len(yaml.safe_load(CI_TEXT)["jobs"]) + 1  # + the job of pr-title.yml
     assert all(line.endswith(")") and line.isascii() for line in not_run)
     assert lines.index(not_run[-1]) < len(lines) - 1
 
