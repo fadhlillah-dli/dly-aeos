@@ -42,12 +42,16 @@ at the deadline the verdict is TIMEOUT. The last line is always exactly one ``CI
 Exit 0 GREEN; 1 RED, SUPERSEDED or sha mismatch (MISMATCH); 2 TIMEOUT or ERROR; 3 PENDING without --wait; 4 INFRA.
 
 HINT: when a ``--pr`` verdict is RED and the base branch of the pull request has commits newer than the earliest
-check run of this commit, one line ``HINT: main moved since this run (<old>..<new>); update the branch, do not
-re-run.`` is printed before the verdict line (never for GREEN or any other verdict). A re-run reuses the original
-GITHUB_SHA and GITHUB_REF of the triggering event, so for ``pull_request`` it measures the old test merge commit
-again; merging the base branch into the PR branch makes a new run. The check run start time stands in for the time
-the test merge commit was made (NOT-PROVEN: a base commit landing between the trigger and the first job start is not
-seen; a failed hint lookup prints a ``note:`` line and never changes the verdict). One extra read-only call.
+start of the judged (latest attempt) check runs of this commit, one line ``HINT: main moved since this run
+(approximate <old>..<new>); update the branch, do not re-run.`` is printed before the verdict line (never for GREEN or
+any other verdict). A re-run reuses the original GITHUB_SHA and GITHUB_REF of the triggering event, so for
+``pull_request`` it measures the old test merge commit again; merging the base branch into the PR branch makes a new
+run. The exact base is not available: the workflow run object's ``pull_requests[]`` (with ``base.sha``) is empty for
+every run of this repository (checked live on 100 runs, PR 26 and PR 27 included), and the test merge commit is not
+exposed. So the check run start time stands in for the time the test merge commit was made, ``<old>`` is the first
+parent of the oldest base commit since then, and the line says "approximate" (NOT-PROVEN: a base commit landing between
+the trigger and the first job start is not seen; a failed hint lookup prints a ``note:`` line and never changes the
+verdict). One extra read-only call (paginated).
 Output is ASCII only. Stdlib only.
 """
 
@@ -234,17 +238,21 @@ def infra_cancelled(api: Api, run: dict[str, Any]) -> bool:
 
 
 def base_moved_hint(api: Api, base_ref: str, runs: Sequence[dict[str, Any]]) -> str | None:
-    """The HINT line when *base_ref* got commits after the earliest check run of the judged commit, else None."""
-    started = sorted(str(r.get("started_at")) for r in runs if r.get("started_at"))
+    """The HINT line when *base_ref* got commits after the earliest LATEST-attempt check run, else None.
+
+    The workflow run object cannot name the base the run was built on: its ``pull_requests`` list is empty for every
+    run of this repository (checked live), so the line is an approximation and says so."""
+    started = sorted(str(r.get("started_at")) for r in latest_by_name(runs).values() if r.get("started_at"))
     if not started or not base_ref:
         return None
-    pages = api.get(f"commits?sha={urllib.parse.quote(base_ref, safe='')}&since={started[0]}&per_page=100")
+    pages = api.get(f"commits?sha={urllib.parse.quote(base_ref, safe='')}&since={started[0]}&per_page=100",
+                    paginate=True)
     newer = [c for page in pages if isinstance(page, list) for c in page if isinstance(c, dict)]
     if not newer or not SHA_RE.match(str(newer[0].get("sha") or "")):
         return None
     parents = newer[-1].get("parents")
     old = str(parents[0].get("sha") or "") if isinstance(parents, list) and parents and isinstance(parents[0], dict) else ""
-    return (f"HINT: {base_ref} moved since this run ({old[:10] or 'unknown'}..{str(newer[0]['sha'])[:10]}); "
+    return (f"HINT: {base_ref} moved since this run (approximate {old[:10] or 'unknown'}..{str(newer[0]['sha'])[:10]}); "
             "update the branch, do not re-run.")
 
 

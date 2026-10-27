@@ -291,9 +291,9 @@ to merge stays the owner's (see "Rules for every change"); this is how it is car
    merge commit always gets its own verdict.
 3. **While `main` is RED, merge nothing else.** The next merge waits until a fix pull request has made `main` GREEN
    again; otherwise two failures hide behind one red.
-4. **Re-run only for INFRA.** A required job cancelled because no runner acquired it is INFRA (exit 4, see
-   "Developer tools" above): re-run that job (`gh run rerun <run id> --failed`). A RED verdict is a code or test
-   failure: do not re-run until green (LESSONS L15).
+4. **Re-run only for INFRA.** For an [INFRA verdict](#developer-tools) (defined there) re-run that job
+   (`gh run rerun <run id> --failed`). A RED verdict is a code or test failure: do not re-run until green
+   (LESSONS L15).
 5. **RED and `main` moved since the run: update the branch, do not re-run.** Merge `main` into the pull request branch
    and push; the new head gets a new run. GitHub's documentation says that a re-run "will also use the same
    `GITHUB_SHA` (commit SHA) and `GITHUB_REF` (git ref) of the original event that triggered the workflow run"
@@ -303,9 +303,10 @@ to merge stays the owner's (see "Rules for every change"); this is how it is car
    So a re-run measures the old base again. NOT-PROVEN: that the checkout step of this workflow then really
    builds the old test merge commit was not run against the live service. When a RED pull request exists and the base
    branch got commits after the run started, `ci_status.py --pr` prints
-   `HINT: main moved since this run (<old>..<new>); update the branch, do not re-run.` before the verdict (the run
-   start is taken from the earliest check run of the head; a base commit that landed between the trigger and the
-   first job start is not seen).
+   `HINT: main moved since this run (approximate <old>..<new>); update the branch, do not re-run.` before the verdict.
+   The range is approximate: the workflow run object does not name its base (`pull_requests[]` is empty for every
+   run of this repository), so the run start is taken from the earliest latest-attempt check run of the head, and a
+   base commit that landed between the trigger and the first job start is not seen.
 6. **One concern per pull request, merged the same day it is green.** Every open pull request costs a full run. At
    the time of writing one run starts about 16 jobs, 7 of them on macOS, and GitHub Free allows 20 concurrent jobs
    and 5 concurrent macOS jobs ([Actions limits](https://docs.github.com/en/actions/reference/limits)), so a

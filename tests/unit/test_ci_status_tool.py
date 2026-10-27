@@ -561,7 +561,7 @@ def test_the_infra_verdict_is_in_the_docstring_and_the_exit_code_differs_from_re
 # ------------------------------------------------------------------------------------------------ base-moved hint
 RUN_START = "2026-01-01T10:00:00Z"
 OLD_BASE, NEW_BASE, MID_BASE = "c" * 40, "d" * 40, "e" * 40
-HINT_LINE = f"HINT: main moved since this run ({OLD_BASE[:10]}..{NEW_BASE[:10]}); update the branch, do not re-run."
+HINT_LINE = f"HINT: main moved since this run (approximate {OLD_BASE[:10]}..{NEW_BASE[:10]}); update the branch, do not re-run."
 
 
 def _hint_files(conclusion, base_commits):
@@ -612,17 +612,52 @@ def test_a_failed_hint_lookup_keeps_the_red_verdict_and_prints_a_note():
     assert "HINT" not in text and "note: could not check whether main moved" in text
 
 
+class _Spy(FakeGh):
+    def __init__(self, files):
+        super().__init__(files)
+        self.queries = []
+
+    def __call__(self, args):
+        self.queries.append(args[-1])
+        return super().__call__(args)
+
+
+def _since(gh):
+    return [q.split("since=")[1].split("&")[0] for q in gh.queries if "/commits?sha=main" in q]
+
+
 def test_hint_uses_the_earliest_check_run_start_as_the_run_time():
-    class Spy(FakeGh):
-        queries = []
-
-        def __call__(self, args):
-            self.queries.append(args[-1])
-            return super().__call__(args)
-
-    gh = Spy(_hint_files("failure", []))
+    gh = _Spy(_hint_files("failure", []))
     runs = [check(REQUIRED[0], conclusion="failure", started="2026-01-01T12:00:00Z"),
             check(REQUIRED[1], rid=2, started=RUN_START)]
     gh.files[f"{BASE}/commits/{SHA}/check-runs"] = {"total_count": 2, "check_runs": runs}
     call(["--pr", "21"], gh)
-    assert any("/commits?sha=main" in q and f"since={RUN_START}" in q for q in gh.queries)
+    assert _since(gh) == [RUN_START]
+
+
+def test_hint_time_comes_from_the_latest_attempts_only_not_from_an_old_attempt():
+    # violating: the first attempt of a check started long before the judged re-run; it must not set the time
+    gh = _Spy(_hint_files("failure", []))
+    runs = [check(REQUIRED[0], conclusion="success", rid=1, started="2026-01-01T09:00:00Z"),
+            check(REQUIRED[0], conclusion="failure", rid=3, started="2026-01-01T12:00:00Z"),
+            check(REQUIRED[1], rid=2, started=RUN_START)]
+    gh.files[f"{BASE}/commits/{SHA}/check-runs"] = {"total_count": 3, "check_runs": runs}
+    code, last, _ = call(["--pr", "21"], gh)
+    assert (code, last) == (1, f"CI: RED {SHA}")
+    assert _since(gh) == [RUN_START] and "2026-01-01T09:00:00Z" not in "".join(gh.queries)
+    # near-miss: when the only run of every check is the judged one, its own start is used
+    gh2 = _Spy(_hint_files("failure", []))
+    gh2.files[f"{BASE}/commits/{SHA}/check-runs"] = {"total_count": 2, "check_runs": [
+        check(REQUIRED[0], conclusion="failure", rid=3, started="2026-01-01T12:00:00Z"),
+        check(REQUIRED[1], rid=2, started="2026-01-01T12:30:00Z")]}
+    call(["--pr", "21"], gh2)
+    assert _since(gh2) == ["2026-01-01T12:00:00Z"]
+
+
+def test_hint_says_approximate_and_ignores_a_workflow_run_pull_requests_list():
+    # the live repository returns pull_requests == [] on every run, so the line must not claim an exact range
+    moved = [_commit(NEW_BASE, MID_BASE), _commit(MID_BASE, OLD_BASE)]
+    code, last, text = call(["--pr", "21"], FakeGh(_hint_files("failure", moved)))
+    hint = [ln for ln in text.splitlines() if ln.startswith("HINT:")]
+    assert len(hint) == 1 and "(approximate " in hint[0] and hint[0].endswith("do not re-run.")
+    assert text.strip().splitlines()[-1] == last

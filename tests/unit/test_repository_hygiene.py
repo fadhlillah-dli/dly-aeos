@@ -75,17 +75,15 @@ def test_frontend_package_is_private_and_unlicensed():
     pkg = json.loads(_read("frontend/package.json"))
     assert pkg["private"] is True, "a private package can never be published to the npm registry by mistake"
     assert pkg["license"] == "UNLICENSED"
-    assert pkg["version"] == VERSION
     root = json.loads(_read("frontend/package-lock.json"))["packages"][""]
-    assert root["license"] == "UNLICENSED" and root["version"] == VERSION, "lockfile root entry out of date"
+    assert root["license"] == "UNLICENSED", "lockfile root entry out of date"
 
 
 # ------------------------------------------------------------------ citation, changelog, release notes
-def test_citation_cff_parses_with_the_required_keys_and_the_project_version():
+def test_citation_cff_parses_with_the_required_keys():
     cff = yaml.safe_load(_read("CITATION.cff"))
     assert {"cff-version", "message", "title", "authors"} <= set(cff), "CFF 1.2.0 required keys"
     assert cff["cff-version"] == "1.2.0" and cff["type"] == "software"
-    assert cff["version"] == VERSION, "CITATION.cff version must equal pyproject version"
     assert cff["authors"] == [{"name": HOLDER}], "author is the holder, with no e-mail address"
     assert isinstance(cff["date-released"], str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", cff["date-released"])
     assert cff["repository-code"] == REPO_URL
@@ -104,14 +102,39 @@ def _release_check_script():
     return mod
 
 
+def _version_drift(script, texts: dict[str, str]) -> list[str]:
+    """One line per version source whose declared version is not the project version (pyproject.toml)."""
+    problems = []
+    for rel, _ in script.VERSION_SOURCES:
+        declared = script.extract_version(rel, texts[rel])
+        if declared != VERSION:
+            problems.append(f"{rel}: declares {declared}, the project version is {VERSION}")
+    return problems
+
+
 def test_every_version_source_declares_the_project_version():
-    # The list of version sources lives once, in scripts/release_check.py (which also checks a release tag against
-    # it). The fifth source, backend/aeos/__init__.py (__version__), is what `aeos ops release` reads.
+    # The ONLY version-equality check of the repository tests. The list of version sources lives once, in
+    # scripts/release_check.py (which also checks a release tag against it). The fifth source,
+    # backend/aeos/__init__.py (__version__), is what `aeos ops release` reads.
     script = _release_check_script()
-    declared = {rel: script.extract_version(rel, _read(rel)) for rel, _ in script.VERSION_SOURCES}
-    assert set(declared) >= {"pyproject.toml", "frontend/package.json", "frontend/package-lock.json",
-                             "CITATION.cff", "backend/aeos/__init__.py"}
-    assert declared == {rel: VERSION for rel in declared}, declared
+    rels = [rel for rel, _ in script.VERSION_SOURCES]
+    assert set(rels) >= {"pyproject.toml", "frontend/package.json", "frontend/package-lock.json",
+                         "CITATION.cff", "backend/aeos/__init__.py"}
+    assert _version_drift(script, {rel: _read(rel) for rel in rels}) == []
+
+
+def test_version_drift_check_names_the_drifted_source_and_passes_a_consistent_set():
+    script = _release_check_script()
+    texts = {rel: _read(rel) for rel, _ in script.VERSION_SOURCES}
+    assert _version_drift(script, texts) == []  # near-miss: a consistent set is green
+    cff = re.sub(r"(?m)^version:.*$", "version: 0.0.1", texts["CITATION.cff"])
+    assert cff != texts["CITATION.cff"]
+    assert _version_drift(script, {**texts, "CITATION.cff": cff}) == [
+        f"CITATION.cff: declares 0.0.1, the project version is {VERSION}"]
+    lock = json.loads(texts["frontend/package-lock.json"])
+    lock["packages"][""]["version"] = "0.0.1"
+    assert _version_drift(script, {**texts, "frontend/package-lock.json": json.dumps(lock)}) == [
+        f"frontend/package-lock.json: declares 0.0.1, the project version is {VERSION}"]
 
 
 def assert_changelog_structure(log: str) -> None:
