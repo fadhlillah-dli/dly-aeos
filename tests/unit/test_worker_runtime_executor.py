@@ -101,14 +101,19 @@ if scenario == "outside_sleep":
     write("other/hack.py", "x\n")
     time.sleep(120)
 if scenario == "hog":
-    # random, not zero-filled: macOS compresses zero pages in memory, so a zero-filled hog kept its resident size
-    # under the 80 MB cap (peak 63.6 MB measured on 2026-10-27) and finished without the cap ever firing
+    # The process sandbox caps memory with the runtime watchdog's RSS sample (macOS has no kernel cap). Under memory
+    # pressure macOS compresses or swaps out pages a process does not touch, so an idle hog's resident size stayed
+    # under the 80 MB cap (2026-10-27: peak 63.6 MB zero-filled, then 78.1 MB random, both exit 0 in a full suite).
+    # The hog keeps touching every page it holds (random data, so compression gains nothing), as a busy process does.
     chunk = os.urandom(10 * 1024 * 1024)
     blocks = []
-    for _ in range(60):
-        blocks.append(bytearray(chunk))
+    end = time.monotonic() + 140
+    while time.monotonic() < end:
+        if len(blocks) < 60:
+            blocks.append(bytearray(chunk))
+        for b in blocks:
+            b[::4096] = bytes(len(range(0, len(b), 4096)))  # write one byte per page: every page stays resident
         time.sleep(0.3)
-    time.sleep(120)
 if scenario in ("blocker", "badreport"):
     write("src/feature.py", "VALUE = 5\n")
     os.makedirs(".aeos", exist_ok=True)

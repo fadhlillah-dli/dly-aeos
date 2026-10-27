@@ -25,7 +25,11 @@ KEY_LABELS = {"workers/openrouter": "OpenRouter untuk pekerja",
               "workers/opencode-zen": "OpenCode Zen untuk pekerja", "workers/gemini": "Gemini API (pembanding)"}
 CATALOG_MAX_AGE = timedelta(days=30)
 ROUTE_DOMAIN = "PERSONAL"  # OFFICE routes stay denied by the office policy (§23) and are gated per domain
-ROUTE_CLASSIFICATION = "INTERNAL"  # TaskSpec default data classification (same probe as the agent enable endpoint)
+ROUTE_CLASSIFICATION = "INTERNAL"  # TaskSpec default data classification
+# The data classes a worker route can serve, in the order a readiness probe reports them: INTERNAL work, or PUBLIC work
+# only (a free OpenRouter WORKER route, decision C, ADR-0041 amendment 2026-10-26). The agent enable probe
+# (workforce/agents.py) accepts the same two; every task is still routed by its own data class.
+ROUTE_CLASSIFICATIONS = ("INTERNAL", "PUBLIC")
 
 
 def _routes_fp(ctx: CheckContext) -> dict[str, Any] | None:
@@ -45,27 +49,48 @@ def _routes_fp(ctx: CheckContext) -> dict[str, Any] | None:
 
 
 def eligible_worker_routes(session: Any) -> tuple[list[str], dict[str, list[str]], str | None]:
-    """(eligible route keys, rejections of APPROVED/TRIAL rows, error) for PERSONAL/INTERNAL tool-using work.
+    """(route keys eligible for PERSONAL tool-using work of any class in ROUTE_CLASSIFICATIONS, rejections of the
+    rows eligible for none, error). ``eligible_worker_routes_by_class`` says which class each key serves."""
+    by_class, rejected, error = eligible_worker_routes_by_class(session)
+    union = [k for c in ROUTE_CLASSIFICATIONS for k in by_class.get(c, [])]
+    return list(dict.fromkeys(union)), rejected, error
+
+
+def eligible_worker_routes_by_class(session: Any) -> tuple[dict[str, list[str]], dict[str, list[str]], str | None]:
+    """({data class: eligible route keys}, rejections of the rows eligible for no class, error) for PERSONAL
+    tool-using work, per class in ROUTE_CLASSIFICATIONS.
 
     The routing filter may backfill a missing config hash in memory; autoflush is off during the call and
     those attributes are expired afterwards, so a readiness probe never writes routing state."""
     try:
         from aeos.routing import facade as routing
     except (ImportError, ModuleNotFoundError):
-        return [], {}, "routing module not available (fail closed)"
+        return {}, {}, "routing module not available (fail closed)"
     from aeos.models.routing import ModelRoute
 
     unhashed = list(session.scalars(select(ModelRoute).where(ModelRoute.config_hash.is_(None))))
+    by_class: dict[str, list[str]] = {}
+    rejected_by_class: dict[str, dict[str, list[str]]] = {}
     try:
         with session.no_autoflush:
-            rd = routing.eligible_routes(session, domain=ROUTE_DOMAIN, data_classification=ROUTE_CLASSIFICATION,
-                                         needs_tools=True, pool="WORKER")
+            for c in ROUTE_CLASSIFICATIONS:
+                rd = routing.eligible_routes(session, domain=ROUTE_DOMAIN, data_classification=c,
+                                             needs_tools=True, pool="WORKER")
+                by_class[c] = list(rd.eligible)
+                rejected_by_class[c] = dict(rd.rejected)
     except Exception as exc:  # fail closed, never green
-        return [], {}, f"eligibility could not be evaluated ({type(exc).__name__})"
+        return {}, {}, f"eligibility could not be evaluated ({type(exc).__name__})"
     finally:
         for r in unhashed:
             session.expire(r, ["config_hash"])
-    return list(rd.eligible), dict(rd.rejected), None
+    served = {k for keys in by_class.values() for k in keys}
+    rejected: dict[str, list[str]] = {}
+    for c in ROUTE_CLASSIFICATIONS:  # a row eligible for no class: the reasons of every class, without repeats
+        for key, reasons in rejected_by_class.get(c, {}).items():
+            if key not in served:
+                rejected.setdefault(key, [])
+                rejected[key] += [r for r in reasons if r not in rejected[key]]
+    return by_class, rejected, None
 
 
 @check("route.registry", "MODEL_ROUTE", "Route pekerja APPROVED/TRIAL yang eligible", component_id="model-routing",
@@ -73,7 +98,7 @@ def eligible_worker_routes(session: Any) -> tuple[list[str], dict[str, list[str]
                                                       "config:office_policy"),
        ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH", fingerprint=_routes_fp,
        description="Hard filter routing (keputusan manusia terikat hash konfigurasi, domain, data terms, tool support, "
-                   "kuota, kesegaran harga/terms, budget) untuk PERSONAL / INTERNAL.")
+                   "kuota, kesegaran harga/terms, budget) untuk PERSONAL / INTERNAL, atau PUBLIC saja (keputusan C).")
 def route_registry(ctx: CheckContext) -> Outcome:
     from aeos.models.routing import ModelRoute
 
@@ -86,16 +111,19 @@ def route_registry(ctx: CheckContext) -> Outcome:
     worker = counts.get("WORKER", {})
     decided = worker.get("APPROVED", 0) + worker.get("TRIAL", 0)
     evidence: dict[str, Any] = {"by_pool_status": counts, "approved_or_trial_worker_routes": decided,
-                                "evaluated_for": {"domain": ROUTE_DOMAIN, "data_classification": ROUTE_CLASSIFICATION,
+                                "evaluated_for": {"domain": ROUTE_DOMAIN,
+                                                  "data_classifications": list(ROUTE_CLASSIFICATIONS),
                                                   "needs_tools": True}}
     if not rows:
         return Outcome("MISSING", "Registry model kosong.", evidence=evidence, error_code="ROUTE_REGISTRY_EMPTY",
                        remedy=Remedy(operation="Muat katalog model (DESIGN/CANDIDATE, bukan aktif)",
                                      command=aeos_cmd("seed"), evidence_to_collect="route.registry"))
-    eligible, rejected, error = eligible_worker_routes(ctx.session)
+    by_class, rejected, error = eligible_worker_routes_by_class(ctx.session)
+    eligible = list(dict.fromkeys(k for c in ROUTE_CLASSIFICATIONS for k in by_class.get(c, [])))
     decided_keys = {k for (k,) in ctx.session.execute(select(ModelRoute.route_key).where(
         ModelRoute.pool == "WORKER", ModelRoute.status.in_(("APPROVED", "TRIAL"))))}
     evidence["eligible"] = eligible
+    evidence["eligible_by_class"] = {c: keys for c, keys in by_class.items() if keys}
     evidence["rejected_decided"] = {k: v[:4] for k, v in rejected.items() if k in decided_keys}
     activate = Remedy(operation="Evaluasi lalu aktifkan satu route pekerja lewat keputusan manusia (ROUTE_ACTIVATION "
                       "atau TRIAL terikat hash konfigurasi; route berbayar butuh keputusan BUDGET, route langganan "
@@ -107,9 +135,16 @@ def route_registry(ctx: CheckContext) -> Outcome:
     if error:
         return Outcome("UNKNOWN", f"Eligibilitas route tidak dapat dinilai: {error}.", evidence=evidence,
                        error_code="ROUTE_ELIGIBILITY_UNKNOWN")
+    internal = by_class.get(ROUTE_CLASSIFICATION, [])
+    if internal:
+        return Outcome("CONFIGURED", f"{len(internal)} route pekerja eligible untuk {ROUTE_DOMAIN}/{ROUTE_CLASSIFICATION}: "
+                       f"{', '.join(internal[:5])} (keputusan manusia terikat hash; belum bukti kualitas).",
+                       evidence=evidence)
     if eligible:
-        return Outcome("CONFIGURED", f"{len(eligible)} route pekerja eligible untuk {ROUTE_DOMAIN}/{ROUTE_CLASSIFICATION}: "
-                       f"{', '.join(eligible[:5])} (keputusan manusia terikat hash; belum bukti kualitas).",
+        # decision C: only PUBLIC work can run; INTERNAL tasks wait (routing refuses them on these routes)
+        return Outcome("CONFIGURED", f"{len(eligible)} route pekerja eligible untuk {ROUTE_DOMAIN}/PUBLIC saja "
+                       f"(keputusan C): {', '.join(eligible[:5])}; tugas INTERNAL menunggu route yang mengizinkan "
+                       "INTERNAL (mis. OpenCode Go) (keputusan manusia terikat hash; belum bukti kualitas).",
                        evidence=evidence)
     # §08: the remedy (activating a worker route) may be a paid write when any candidate is not free. A flat-fee
     # SUBSCRIPTION candidate (ADR-0080 amendment 2026-10-26) is neither free nor an unpriced paid route: activating it
