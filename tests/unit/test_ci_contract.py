@@ -456,4 +456,4 @@ def test_near_miss_a_real_run_value_or_gates_string_stays_a_caller(tmp_path):
         "gates string": {"gates": 'CMD = "python scripts/orphan.py --check"\n'},
     }
     for label, kwargs in cases.items():
-        assert _problems(tmp_path, label, **kwargs) == [], label
+        assert registry_problems(_repo(tmp_path / label.replace(" ", "_"), **kwargs), {}) == [], label

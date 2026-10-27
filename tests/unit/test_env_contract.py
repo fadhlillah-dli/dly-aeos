@@ -37,6 +37,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TypeGuard
 
 from aeos.core.paths import repo_root
 
@@ -293,7 +294,7 @@ def section_text(markdown: str) -> str:
     return "\n".join(body)
 
 
-def _is_refuse_call(node: ast.AST) -> bool:
+def _is_refuse_call(node: ast.AST) -> TypeGuard[ast.Call]:
     return (isinstance(node, ast.Call)
             and ((isinstance(node.func, ast.Name) and node.func.id == "refuse_worker_context")
                  or (isinstance(node.func, ast.Attribute) and node.func.attr == "refuse_worker_context")))
@@ -302,7 +303,7 @@ def _is_refuse_call(node: ast.AST) -> bool:
 def worker_context_scan(root: Path) -> tuple[dict[str, str], list[str]]:
     """(operation text -> file of every ``refuse_worker_context("<operation>")`` call under backend/, problems).
 
-    A call whose first argument is not a string literal cannot be checked against the docs list, so it is a problem
+    A call whose operation (first positional argument, or the keyword ``action``) is not a string literal cannot be checked against the docs list, so it is a problem
     naming file:line."""
     found: dict[str, str] = {}
     bad: list[str] = []
@@ -314,7 +315,8 @@ def worker_context_scan(root: Path) -> tuple[dict[str, str], list[str]]:
         for node in ast.walk(ast.parse(text, filename=str(path))):
             if not _is_refuse_call(node):
                 continue
-            first = node.args[0] if node.args else None
+            first = node.args[0] if node.args else next(
+                (k.value for k in node.keywords if k.arg == "action"), None)  # _util.py names it `action`
             if isinstance(first, ast.Constant) and isinstance(first.value, str):
                 found[first.value] = rel
             else:
@@ -590,6 +592,9 @@ def test_bite_a_human_only_operation_missing_from_the_list_is_red_and_named(tmp_
     assert problems(listed, {}) == []
     mention = _tree(tmp_path / "near", 'def run():\n    print("refuse_worker_context")\n')
     assert problems(mention, {}) == []  # a mention in a string is not a call site
+    keyword = _tree(tmp_path / "keyword", 'def run():\n    refuse_worker_context(action="controller rollback")\n')
+    red = problems(keyword, {})  # a keyword literal is checked against the list, not reported as non-literal
+    assert len(red) == 1 and "controller rollback" in red[0] and "non-literal" not in red[0], red
 
 
 def test_bite_a_non_literal_operation_name_is_red_and_names_file_and_line(tmp_path):
