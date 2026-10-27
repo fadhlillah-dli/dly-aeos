@@ -502,8 +502,9 @@ REAL_SECRETS_OPT_IN = "DLY_AEOS_REAL_SECRETS"
 
 @contextlib.contextmanager
 def lifted_secret_guard(guard: SecretGuard, environ: Mapping[str, str]) -> Iterator[None]:
-    """Owner opt-in: the SecretGuard is off inside the block, so the test reads the owner's real vault and OS keyring,
-    and on again afterwards. Skips unless ``DLY_AEOS_REAL_SECRETS=1``; the opt-in live provider test
+    """Owner opt-in: the whole SecretGuard is off inside the block (vault, OS keyring, sandbox keyring config and the
+    refusal to start the owner's real Claude Code), so the test reads the owner's real vault and OS keyring; it is on
+    again afterwards, also when the test fails. Skips unless ``DLY_AEOS_REAL_SECRETS=1``; the opt-in live provider test
     (tests/acceptance/test_delivery.py) reads its low-privilege token this way."""
     if environ.get(REAL_SECRETS_OPT_IN) != "1":
         pytest.skip(f"owner opt-in: {REAL_SECRETS_OPT_IN}=1 lets this test read the owner's real secret stores")

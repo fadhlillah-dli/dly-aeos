@@ -274,28 +274,48 @@ def test_session_guard_knows_the_owner_claude(_hermetic_secret_stores: SecretGua
             assert guard.refuses_exec([found, "auth", "status", "--json"])
 
 
-def _refusal(port: int) -> str:
-    with pytest.raises(ConnectionRefusedError) as exc:  # nothing listens on the port, so the OS refuses too
+GUARDED = "tests never reach a real OpenBao"
+
+
+def _connect(port: int) -> str:
+    """'connected' when the connect reaches the test's own listener, else the refusal message."""
+    try:
         socket.create_connection(("127.0.0.1", port), timeout=5).close()
-    return str(exc.value)
+    except ConnectionRefusedError as exc:
+        return str(exc)
+    return "connected"
 
 
 def test_bite_the_real_secret_stores_opt_in_skips_without_the_owner_variable_and_restores_the_guard():
-    with socket.socket() as probe:  # a free loopback port that only this guard blocks (the session guard does not)
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
+    # the test's own listener on a free loopback port that only this guard blocks (the session guard does not): it
+    # holds the port for the whole test, so no other process can take it, and a connect with the guard off succeeds
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+    port = listener.getsockname()[1]
     guard = SecretGuard(frozenset({port}))
     guard.install()
     try:
-        assert "tests never reach a real OpenBao" in _refusal(port)
+        assert GUARDED in _connect(port)
         with pytest.raises(pytest.skip.Exception, match=f"{REAL_SECRETS_OPT_IN}=1"), lifted_secret_guard(guard, {}):
             pass  # pragma: no cover - never entered
         # only the exact value "1" opts in
         with pytest.raises(pytest.skip.Exception), lifted_secret_guard(guard, {REAL_SECRETS_OPT_IN: "yes"}):
             pass  # pragma: no cover
-        assert "tests never reach a real OpenBao" in _refusal(port)  # a skip leaves the guard on
+        assert GUARDED in _connect(port)  # a skip leaves the guard on
         with lifted_secret_guard(guard, {REAL_SECRETS_OPT_IN: "1"}):
-            assert "tests never reach a real OpenBao" not in _refusal(port)  # off inside the block: the OS answers
-        assert "tests never reach a real OpenBao" in _refusal(port)  # and on again afterwards
+            assert _connect(port) == "connected"  # off inside the block: the listener answers
+        assert GUARDED in _connect(port)  # and on again afterwards
+        with pytest.raises(RuntimeError), lifted_secret_guard(guard, {REAL_SECRETS_OPT_IN: "1"}):
+            raise RuntimeError("the opted-in test failed")
+        assert GUARDED in _connect(port)  # a failing test re-installs it too
     finally:
         guard.uninstall()
+        listener.close()
+
+
+def test_bite_the_real_secret_stores_fixture_reads_the_real_environment(request, monkeypatch):
+    """The fixture's wiring: it reads os.environ (not a fixed mapping), so without the owner's variable it skips."""
+    monkeypatch.delenv(REAL_SECRETS_OPT_IN, raising=False)
+    with pytest.raises(pytest.skip.Exception, match=f"{REAL_SECRETS_OPT_IN}=1"):
+        request.getfixturevalue("real_secret_stores")
