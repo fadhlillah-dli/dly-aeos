@@ -205,16 +205,17 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   fails the test, so it cannot silently skip `main` that way; a condition that reaches the event by another route,
   for example through a `needs` output or an `env` value, is not caught and needs a human look.
 - **Pull request title.** `.github/workflows/pr-title.yml` (job `pr title [G1]`, `ubuntu-latest`, read-only token) checks
-  the title with `python scripts/commit_subject.py --subject "<title>"`: the title becomes the merge-commit body and,
-  with a squash merge, the subject on `main`, so it follows the same Conventional Commits and no-attribution rules.
+  the title with `python scripts/commit_subject.py --subject "<title>"`: the title becomes the merge-commit body on
+  `main` (the repository merges with a merge commit only), so it follows the same Conventional Commits and
+  no-attribution rules.
   The title reaches the script through an environment variable, never through an expression inside `run:`. The check
-  is not in any ruleset: making it required is an owner decision.
+  is a required check of the ruleset on `main` (see "Merging").
 - **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
 - **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
   OS. These are small jobs on `ubuntu-latest` that wait for the static job and every backend job of their OS. They pass only
   when each of those jobs succeeded: a failed, skipped or cancelled job fails them. The other required
-  checks are real jobs: `bootstrap [G2] (<os>)`, `frontend [G1,G3]` and
-  `browser e2e + a11y smoke [G3]`. The supply-chain report, `supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)`, is `[NO-GATE]`. Keep these names when you
+  checks are real jobs: `bootstrap [G2] (<os>)`, `frontend [G1,G3]`,
+  `browser e2e + a11y smoke [G3]`, `commit subjects [G1]` and `pr title [G1]`. The supply-chain report, `supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)`, is `[NO-GATE]`. Keep these names when you
   change the workflow; `tests/unit/test_ci_gates.py` checks them.
 - **Changelog check.** The job `browser e2e + a11y smoke [G3]` first runs
   `python scripts/changelog.py --check` (stdlib only, a few seconds).
@@ -250,7 +251,7 @@ is added or dropped.
 
 ### Developer tools
 
-Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the verdict):
+Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the verdict):
 
 - **`scripts/worktree.py`** makes git worktrees safe. `python scripts/worktree.py add <name> <branch> [<base>]`
   creates `<main checkout>-wt-<name>` on a new branch, marks it as created by the tool and prints the
@@ -280,8 +281,17 @@ Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is th
   not acquired by a runner, as when hosted macOS capacity runs out). It is infrastructure, not a code failure:
   re-run the job and never read it as RED.
 
-Both have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`): a violating
-fixture is red and a near-miss legitimate one is green. The junction test runs only on Windows.
+- **`scripts/github_settings.py`** keeps the repository settings in the repository: `.github/repository-settings.json`
+  (merge methods, merge commit title and message, delete branch on merge) and `.github/rulesets/*.json` (the ruleset
+  on `main` and the release tag ruleset). `--check` reads the live settings with `gh api` (read-only), prints each
+  difference by setting name or check context and ends with `GITHUB_SETTINGS: OK`, `DRIFT` or `ERROR` (exit 0, 1, 2).
+  `--apply` prints the changes it would send and sends nothing without `--yes`; with `--yes` it updates the repository
+  (`PATCH`), the existing rulesets (`PUT`, matched by name) and creates a missing one (`POST`), then checks again. It
+  never deletes a ruleset and never runs in CI; `--repo owner/name` names another repository.
+
+The tools have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`,
+`tests/unit/test_github_settings.py`): a violating fixture is red and a near-miss legitimate one is green. The junction
+test runs only on Windows.
 
 ### Rules for every change
 
@@ -313,6 +323,12 @@ fixture is red and a near-miss legitimate one is green. The junction test runs o
 
 One written procedure, backed by `scripts/ci_status.py` (flags are described under "Developer tools" above). The decision
 to merge stays the owner's (see "Rules for every change"); this is how it is carried out.
+
+The only merge method is a merge commit: `gh pr merge <n> --merge`. Squash and rebase are switched off in the
+repository and in the ruleset (ADR-0115, amendment 2026-10-27), because `ci_status.py --after-merge` and the release
+tag check look for the merge commit by its SHA. The head branch is deleted on merge. The required checks are the eight
+backend, bootstrap, frontend and browser checks plus `commit subjects [G1]` and `pr title [G1]`; a branch need not be
+up to date with `main` to merge (step 2 and 3 cover the merged result).
 
 1. **Merge only on a GREEN verdict for the exact head.** Run
    `python scripts/ci_status.py --pr <n> --expect-sha <head sha> --required-only --wait --deadline 25`. Merge only if
@@ -346,6 +362,11 @@ to merge stays the owner's (see "Rules for every change"); this is how it is car
    the time of writing one run starts about 16 jobs, 7 of them on macOS, and GitHub Free allows 20 concurrent jobs
    and 5 concurrent macOS jobs ([Actions limits](https://docs.github.com/en/actions/reference/limits)), so a
    second open run queues behind the first. Recount against `ci.yml` when the layout changes.
+7. **Settings change through the files.** The merge policy lives in `.github/repository-settings.json` and
+   `.github/rulesets/*.json`, reviewed like code. After a pull request that changes them is merged, run
+   `python scripts/github_settings.py --apply --yes` and then `python scripts/github_settings.py --check`; the last
+   line must be `GITHUB_SETTINGS: OK`. A required check added to the ruleset must exist in a workflow
+   (`tests/unit/test_ci_gates.py` keeps `REQUIRED_CHECKS` equal to the ruleset file), or every merge waits for ever.
 
 ### Releasing
 
