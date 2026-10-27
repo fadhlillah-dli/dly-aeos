@@ -43,8 +43,9 @@ admission, §37 distinct source/distribution/executable identities), all optiona
 
 **Which pins are recorded** ([OWNER_ACTIONS.md](../docs/OWNER_ACTIONS.md) 1.12): a value is pinned only when drift
 from it is caught without blocking a capability on a routine update. The `claude-code` entry has only its publisher
-pin (it updates itself). `opencode` has no pin, because drift from it blocks `CAN_RUN_WORKER`. `openbao` has its version
-pin. Values are recorded per platform as each machine is reviewed. `tests/unit/test_inventory_pins.py` checks this rule.
+pin (it updates itself). `opencode` has no manifest pin, but the worker runtime keeps its built-in default pin
+(1.19.3) and drift from it blocks `CAN_RUN_WORKER`, so its self-update is turned off on each machine. `openbao` has
+its version pin. Values are recorded per platform as each machine is reviewed. `tests/unit/test_inventory_pins.py` checks this rule.
 
 `aeos inventory sbom` writes a CycloneDX 1.5 SBOM from `requirements.lock` and `frontend/package-lock.json`.
 `aeos inventory poll` is an optional TTL-driven refresh, off by default; `--enable` or `--disable` changes it and

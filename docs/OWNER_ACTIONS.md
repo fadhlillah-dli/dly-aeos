@@ -533,9 +533,22 @@ blocking a capability on a routine update. `tests/unit/test_inventory_pins.py` c
 | Component | Pin | Why |
 |---|---|---|
 | `claude-code` | publisher only: `signature.approved_signer` `darwin: Q6L2SF6YDW` | Claude Code updates itself often, so a version or digest pin would drift on every update. The publisher pin survives updates, and an unsigned or foreign-signed binary is BLOCKED (`claude.binary`). |
-| `opencode` | none | Drift from its pin fails `worker.opencode`, which blocks `CAN_RUN_WORKER`, and OpenCode updates itself. No tool schema hash has been observed yet. |
+| `opencode` | none in the manifest; the worker runtime keeps its built-in default pin 1.19.3 | Drift from the 1.19.3 pin fails `worker.opencode`, which blocks `CAN_RUN_WORKER` (master §38). A manifest pin would change nothing. OpenCode updates itself, so turn its self-update off on each machine (below). No tool schema hash has been observed yet. |
 | `openbao` | `approved_pin: "2.7.1"` | `aeos vault install` installs it, and it never updates itself. Drift is a finding, not a block. |
 | `git`, `nodejs-runtime`, `python-runtime` | none | `approved_pin` applies on every platform, but these versions differ per platform. The OS or package manager ships their security updates. |
+
+**OpenCode self-update.** A self-update of the host OpenCode (for example after you run `opencode` yourself) moves
+it off 1.19.3, and `./aeos doctor -c CAN_RUN_WORKER` then reports `OPENCODE_PIN_DRIFT` and BLOCKED. AEOS already runs
+the worker with self-update off. Turn it off for your own shell too, once per machine:
+
+```zsh
+grep -qx 'export OPENCODE_DISABLE_AUTOUPDATE=1' ~/.zshrc || echo 'export OPENCODE_DISABLE_AUTOUPDATE=1' >> ~/.zshrc
+source ~/.zshrc
+opencode --version
+```
+
+`opencode --version` must print 1.19.3. If it does not, run `npm install -g opencode-ai@1.19.3` (1.9). Move to a new
+OpenCode version only through a reviewed PR that changes the pin after the worker contract test passes on it.
 
 The `openbao` digest for `darwin_arm64` is
 `sha256:50c3588e64271171cc2147bddeace8ec2b6742f94fd3fe53baa60f6d938cda0c`, but it is not recorded yet. A digest pin

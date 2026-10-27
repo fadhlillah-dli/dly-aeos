@@ -258,13 +258,43 @@ def test_the_rule_matches_the_capability_gates():
     assert "claude.binary" in RULES[Capability.CAN_PLAN_PERSONAL].required
 
 
+def test_opencode_keeps_its_runtime_default_pin_so_self_update_is_turned_off(monkeypatch, tmp_path):
+    """The rule above reads only the manifest, but the worker runtime holds a pin of its own: with no approved_pin,
+    resolve_pin() falls back to PINNED_VERSION 1.19.3 and opencode_status flags drift from it, which worker.opencode
+    turns into FAILED / OPENCODE_PIN_DRIFT (tests/unit/test_doctor_seams.py) and CAN_RUN_WORKER BLOCKED (master §38).
+    So "no manifest pin" does not keep a self-update from blocking; 1.12 records the built-in pin and tells the owner
+    to turn OpenCode self-update off (OPENCODE_DISABLE_AUTOUPDATE=1). Red if the docs drop either again."""
+    import subprocess
+    from pathlib import Path
+
+    from aeos.worker_runtime import opencode
+
+    assert opencode.resolve_pin() == {"version": "1.19.3", "source": opencode.PIN_SOURCE_DEFAULT}
+    fake = tmp_path / "opencode"
+    monkeypatch.setattr(opencode, "resolve_binary", lambda configured=None: fake)
+    monkeypatch.setattr(opencode.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "1.20.0\n", ""))
+    monkeypatch.setitem(opencode._status_cache, "value", None)  # restored at teardown: the fake never leaks
+    monkeypatch.setitem(opencode._status_cache, "at", 0.0)
+    status = opencode.opencode_status("fake-configured", refresh=True)
+    assert (status["version"], status["pinned_version"], status["drift"]) == ("1.20.0", "1.19.3", True)
+
+    root = Path(__file__).resolve().parents[2]
+    doc = (root / "docs" / "OWNER_ACTIONS.md").read_text(encoding="utf-8")
+    section = doc[doc.index("### 1.12 "):doc.index("### 1.13 ")]
+    manifest_text = (root / "install-manifest" / "manifest.yaml").read_text(encoding="utf-8")
+    readme = (root / "install-manifest" / "README.md").read_text(encoding="utf-8")
+    for where, text in (("OWNER_ACTIONS 1.12", section), ("manifest.yaml", manifest_text), ("README", readme)):
+        assert "1.19.3" in text and "built-in" in text, where
+    assert "OPENCODE_DISABLE_AUTOUPDATE=1" in section and "OPENCODE_DISABLE_AUTOUPDATE=1" in manifest_text
+
+
 def test_the_reviewed_manifest_follows_the_1_12_pin_rule():
     """OWNER_ACTIONS 1.12, darwin_arm64 (2026-10-27): claude-code gets only the macOS publisher pin (a foreign- or
     un-signed binary is BLOCKED; a version pin would drift on every self-update); opencode gets no version/digest pin
-    (drift BLOCKS CAN_RUN_WORKER and it updates itself); openbao gets its version (installed only by `aeos vault
-    install`, never self-updating, drift is a finding, not a block) but no digest yet, because a digest pin makes every
-    openbao proposal need a candidate digest the trusted acceptance suite does not supply; git, Node.js and Python stay
-    unpinned (approved_pin has no per-platform form). Other platforms stay NOT_RECORDED."""
+    (its runtime default pin already BLOCKS CAN_RUN_WORKER on drift, see above); openbao gets its version (installed
+    only by `aeos vault install`, never self-updating, drift is a finding, not a block) but no digest yet, because a
+    digest pin makes every openbao proposal need a candidate digest the trusted acceptance suite does not supply; git,
+    Node.js and Python stay unpinned (approved_pin has no per-platform form). Other platforms stay NOT_RECORDED."""
     from aeos.inventory import facade as inventory
     from aeos.inventory.manifest import load_manifest
 
