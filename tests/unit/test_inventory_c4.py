@@ -239,6 +239,7 @@ def test_manifest_rejects_guessed_or_invalid_identity_fields():
     comp["ports"] = [{"port": 1, "host": "127.0.0.1", "setting": "nope"}]
     comp["distribution"] = {"kind": "release_asset", "url": "https://example.invalid/guessed.zip"}
     comp["signature"] = {"method": "gpg", "result": "VERIFIED", "verified": True}
+    comp["approved_pin"] = None  # a digest without the pin it belongs to (the reviewed manifest pins openbao)
     comp["approved_digest"] = "sha256:" + "a" * 64
     errors, _ = validate_manifest(data, master_text=master)
     joined = "\n".join(errors)

@@ -207,12 +207,107 @@ def test_manifest_accepts_per_platform_digests_and_per_os_signers():
     assert any("outside compatibility.os" in e for e in errors), errors
 
 
-def test_the_reviewed_manifest_records_no_invented_pins():
-    """Owner step (W6-020/W6-042/W6-166): nothing is pinned until the owner records it in a reviewed PR."""
-    from aeos.inventory import facade as inventory
+# ------------------------------------------------------------------------------------------- OWNER_ACTIONS 1.12
+# Owner decision of 2026-10-27, applied as D13: pin what protects without blocking a routine update.
+# Version drift that BLOCKS a capability: drift from the opencode pin makes worker.opencode FAILED
+# (OPENCODE_PIN_DRIFT), a critical check of CAN_RUN_WORKER. Other version/digest drift is only an inventory finding.
+VERSION_DRIFT_BLOCKS = {"opencode": ("worker.opencode", "CAN_RUN_WORKER")}
+SELF_UPDATING = ("claude-code", "opencode")  # update themselves: a version/digest pin drifts on every update
+HOST_VERSIONED = ("git", "nodejs-runtime", "python-runtime")  # OS/package-manager builds differ per platform
+RECORDED_PLATFORMS = frozenset({"darwin_arm64"})  # windows_amd64 / darwin_amd64: NOT_RECORDED until those machines
+OBSERVED_BAO = "sha256:50c3588e64271171cc2147bddeace8ec2b6742f94fd3fe53baa60f6d938cda0c"  # owner's M4, 2026-10-27
 
-    for cid in ("openbao", "claude-code", "opencode"):
-        assert inventory.approved_pin(cid) is None, cid
-        assert inventory.approved_digest(cid)["status"] == "NOT_RECORDED", cid
+
+def _pin_policy_violations(data: dict) -> list[str]:
+    """The 1.12 rule as findings (empty = the manifest follows it)."""
+    out: list[str] = []
+    for c in data["components"]:
+        cid = c["component_id"]
+        pinned = bool(c.get("approved_pin") or c.get("approved_digest"))
+        if pinned and cid in VERSION_DRIFT_BLOCKS:
+            check_id, cap = VERSION_DRIFT_BLOCKS[cid]
+            out.append(f"{cid}: version/digest pin, but drift from it fails {check_id} and BLOCKS {cap}")
+        elif pinned and cid in SELF_UPDATING:
+            out.append(f"{cid}: version/digest pin on a self-updating tool drifts on every routine update")
+        elif pinned and cid in HOST_VERSIONED:
+            out.append(f"{cid}: approved_pin applies on every platform, but this tool's version differs per platform")
+        raw = c.get("approved_digest")
+        if isinstance(raw, str):
+            out.append(f"{cid}: a scalar approved_digest applies on every platform; record it per <os>_<arch>")
+        elif isinstance(raw, dict) and set(raw) - RECORDED_PLATFORMS:
+            out.append(f"{cid}: approved_digest records {sorted(set(raw) - RECORDED_PLATFORMS)}, "
+                       "which are NOT_RECORDED until those machines")
+    claude = next(c for c in data["components"] if c["component_id"] == "claude-code")
+    signer = (claude.get("signature") or {}).get("approved_signer")
+    if not (isinstance(signer, dict) and signer.get("darwin")):
+        out.append("claude-code: no darwin publisher pin (signature.approved_signer.darwin = TeamIdentifier)")
+    return out
+
+
+def test_the_rule_matches_the_capability_gates():
+    """The components listed as BLOCKING really are: their check is a critical check of the capability (FAILED there
+    -> BLOCKED), and the claude-code publisher pin is applied by claude.binary, which planning requires."""
+    from aeos.core.enums import Capability
+    from aeos.doctor.capabilities import RULES
+    from aeos.doctor.checks import REGISTRY, load_all
+
+    load_all()
+    for cid, (check_id, cap) in VERSION_DRIFT_BLOCKS.items():
+        assert REGISTRY[check_id].component_id == cid
+        assert check_id in RULES[Capability(cap)].critical, (check_id, cap)
+    assert "claude.binary" in RULES[Capability.CAN_PLAN_PERSONAL].required
+
+
+def test_the_reviewed_manifest_follows_the_1_12_pin_rule():
+    """OWNER_ACTIONS 1.12, darwin_arm64 (2026-10-27): claude-code gets only the macOS publisher pin (a foreign- or
+    un-signed binary is BLOCKED; a version pin would drift on every self-update); opencode gets no version/digest pin
+    (drift BLOCKS CAN_RUN_WORKER and it updates itself); openbao gets its version (installed only by `aeos vault
+    install`, never self-updating, drift is a finding, not a block) but no digest yet, because a digest pin makes every
+    openbao proposal need a candidate digest the trusted acceptance suite does not supply; git, Node.js and Python stay
+    unpinned (approved_pin has no per-platform form). Other platforms stay NOT_RECORDED."""
+    from aeos.inventory import facade as inventory
+    from aeos.inventory.manifest import load_manifest
+
+    data = load_manifest().data
+    assert _pin_policy_violations(data) == []
+    assert data["reviewed_by"] == "Fadhlillah"
+    assert inventory.approved_signer("claude-code", os_name="darwin") == "Q6L2SF6YDW"
     assert inventory.approved_signer("claude-code", os_name="windows") is None
-    assert inventory.approved_signer("claude-code", os_name="darwin") is None
+    for cid in ("claude-code", "opencode"):
+        assert inventory.approved_pin(cid) is None, cid
+        assert inventory.approved_digest(cid, platform="darwin_arm64")["status"] == "NOT_RECORDED", cid
+    assert inventory.approved_pin("openbao") == "2.7.1"
+    for platform in ("darwin_arm64", "windows_amd64", "darwin_amd64"):
+        assert inventory.approved_digest("openbao", platform=platform)["status"] == "NOT_RECORDED", platform
+
+
+@pytest.mark.parametrize(("cid", "field", "value", "finding"), [
+    ("opencode", "approved_pin", "1.19.3", "drift from it fails worker.opencode and BLOCKS CAN_RUN_WORKER"),
+    ("claude-code", "approved_pin", "2.1.303", "self-updating tool drifts on every routine update"),
+    ("git", "approved_pin", "2.50.1", "this tool's version differs per platform"),
+    ("openbao", "approved_digest", {"darwin_arm64": OBSERVED_BAO, "windows_amd64": WIN},
+     "['windows_amd64'], which are NOT_RECORDED"),
+    ("openbao", "approved_digest", OBSERVED_BAO, "scalar approved_digest applies on every platform"),
+    ("claude-code", "signature", {"method": "os_codesign", "result": "UNKNOWN", "approved_signer": None},
+     "claude-code: no darwin publisher pin"),
+])
+def test_the_pin_rule_bites(cid, field, value, finding):
+    """Violating fixtures are red for the right reason; the near-miss (the reviewed manifest, which pins openbao's
+    version and the claude-code darwin publisher) is green above, and so is a darwin_arm64-only digest below."""
+    from aeos.inventory.manifest import load_manifest
+
+    data = copy.deepcopy(load_manifest().data)
+    comp = next(c for c in data["components"] if c["component_id"] == cid)
+    comp[field] = value
+    found = _pin_policy_violations(data)
+    assert any(finding in f for f in found), found
+
+
+def test_a_darwin_arm64_only_digest_is_allowed_by_the_rule():
+    """Near-miss: the follow-up digest of openbao for darwin_arm64 alone is not a violation."""
+    from aeos.inventory.manifest import load_manifest
+
+    data = copy.deepcopy(load_manifest().data)
+    next(c for c in data["components"] if c["component_id"] == "openbao")["approved_digest"] = {
+        "darwin_arm64": OBSERVED_BAO}
+    assert _pin_policy_violations(data) == []

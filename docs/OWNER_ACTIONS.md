@@ -524,8 +524,26 @@ Peran* → agent card → *Periksa prasyarat* / *Aktifkan*.
 
 ### 1.12 Approve the pins [once per platform, through a reviewed PR]
 
-The real manifest has no approved pins, so drift from an approved version is never detected. On each platform
-you use, collect the observed values:
+**Status.** `darwin_arm64` (the M4) is done (2026-10-27, owner decision of 2026-10-27 delegated as D13).
+`windows_amd64` and `darwin_amd64` (the i9) stay NOT_RECORDED until those machines.
+
+**Rule: pin what protects without blocking a routine update.** Pin a value only when drift from it is caught without
+blocking a capability on a routine update. `tests/unit/test_inventory_pins.py` checks this rule.
+
+| Component | Pin | Why |
+|---|---|---|
+| `claude-code` | publisher only: `signature.approved_signer` `darwin: Q6L2SF6YDW` | Claude Code updates itself often, so a version or digest pin would drift on every update. The publisher pin survives updates, and an unsigned or foreign-signed binary is BLOCKED (`claude.binary`). |
+| `opencode` | none | Drift from its pin fails `worker.opencode`, which blocks `CAN_RUN_WORKER`, and OpenCode updates itself. No tool schema hash has been observed yet. |
+| `openbao` | `approved_pin: "2.7.1"` | `aeos vault install` installs it, and it never updates itself. Drift is a finding, not a block. |
+| `git`, `nodejs-runtime`, `python-runtime` | none | `approved_pin` applies on every platform, but these versions differ per platform. The OS or package manager ships their security updates. |
+
+The `openbao` digest for `darwin_arm64` is
+`sha256:50c3588e64271171cc2147bddeace8ec2b6742f94fd3fe53baa60f6d938cda0c`, but it is not recorded yet. A digest pin
+makes every OpenBao change proposal on that platform need a candidate digest, and the trusted acceptance suite
+(`tests/acceptance/test_governance.py`, a protected path) does not supply one. Record the digest in the same reviewed
+PR that updates that test.
+
+To collect the values on another platform:
 
 For `claude-code` note `versions.observed_version` and `versions.observed_digest`; for `opencode` also the
 contract test's tool schema hash. The `codesign` line shows the macOS signer of claude-code.
@@ -549,7 +567,8 @@ Then make the change in `install-manifest/manifest.yaml` through a reviewed PR (
   The M4 gives `darwin_arm64` and the i9 gives `darwin_amd64`. A platform without an entry shows NOT_RECORDED.
 * `claude-code` `signature.approved_signer` is `{windows: <Authenticode subject>, darwin: <TeamIdentifier>}`. After
   that pin, an unsigned or foreign-signed Claude binary is BLOCKED on that OS.
-* `opencode` gets `tool_schema_hash`.
+* `opencode` gets `tool_schema_hash` only after the worker contract test records one, and only while drift from it
+  blocks nothing.
 * The top-level `reviewed_by` names you.
 
 After the merge, on each machine:
@@ -560,8 +579,9 @@ git pull --ff-only
 ./aeos inventory reconcile
 ```
 
-*Tools & Repos* (`/tools`) → component must show the approved pin instead of "pin belum disetujui (UNKNOWN)", with
-no `resolved-version-mismatch` drift. When the pinned OpenCode version changes, rebuild the worker image (1.6) so
+*Tools & Repos* (`/tools`) → `openbao` must show the approved pin instead of "pin belum disetujui (UNKNOWN)", with
+no `resolved-version-mismatch` drift. `claude-code` keeps "UNKNOWN" for its version by design, and its authenticity
+is OK (`./aeos doctor -c CAN_PLAN_PERSONAL`). When the pinned OpenCode version changes, rebuild the worker image (1.6) so
 it carries the new `aeos.opencode_version` label.
 
 ### 1.13 First plan approval, first run, first publication [primary machine]

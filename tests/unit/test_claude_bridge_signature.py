@@ -10,6 +10,15 @@ import pytest
 
 from aeos.claude_bridge import binary as binmod
 
+_REAL_PUBLISHER_PIN = binmod.publisher_pin  # captured at import, before the conftest stub runs
+
+
+@pytest.fixture(autouse=True)
+def _real_publisher_pin(monkeypatch):
+    """This module tests the publisher pin itself: undo the conftest NOT_PINNED stub, so the pin is read from the
+    reviewed manifest (or the manifest a test installs with _pinned)."""
+    monkeypatch.setattr(binmod, "publisher_pin", _REAL_PUBLISHER_PIN)
+
 
 def _runner(responses):
     calls = []
@@ -140,6 +149,7 @@ def test_status_reports_blocked_or_degraded_from_the_signature(settings, db, mon
     from aeos.claude_bridge import bridge
     from tests.unit.test_claude_bridge_run import _probe
 
+    _pinned(monkeypatch, None)  # the unpinned behaviour (the reviewed manifest pins darwin)
     monkeypatch.setattr(binmod, "probe", lambda settings, refresh=False: _probe())
     for os_sig, expected in (({"status": "INVALID", "signer": ANTHROPIC}, "BLOCKED"),
                              ({"status": "UNSIGNED", "signer": None}, "DEGRADED"),
@@ -154,8 +164,28 @@ def test_status_reports_blocked_or_degraded_from_the_signature(settings, db, mon
 def test_the_owner_pinned_publisher_is_read_from_the_install_manifest():
     from aeos.inventory import facade as inventory
 
-    assert inventory.approved_signer("claude-code") is None  # owner step: not pinned in the reviewed manifest
+    # OWNER_ACTIONS 1.12 (2026-10-27): darwin pinned to the TeamIdentifier; windows not recorded yet (owner step)
+    assert inventory.approved_signer("claude-code", os_name="darwin") == TEAM
+    assert inventory.approved_signer("claude-code", os_name="windows") is None
     assert inventory.approved_signer("no-such-component") is None
+
+
+@pytest.mark.parametrize(("os_name", "sig", "gate"), [
+    ("darwin", {"status": "VALID", "signer": "Q6L2SF6YDW"}, "OK"),          # the official build
+    ("darwin", {"status": "VALID", "signer": "ABCDE12345"}, "BLOCKED"),     # foreign-signed
+    ("darwin", {"status": "UNSIGNED", "signer": None}, "BLOCKED"),          # un-signed
+    ("darwin", {"status": "NOT_CHECKED"}, "BLOCKED"),                       # not proven
+    ("windows", {"status": "VALID", "signer": "CN=Anyone"}, "UNVERIFIED"),  # windows NOT_RECORDED: never borrowed
+])
+def test_the_reviewed_manifest_pin_blocks_a_foreign_or_unsigned_claude_on_macos(monkeypatch, os_name, sig, gate):
+    """Bite test of the real manifest pin (OWNER_ACTIONS 1.12): on macOS only a VALID signature by the pinned
+    TeamIdentifier passes; on Windows nothing is pinned yet, so authenticity stays UNVERIFIED (never OK)."""
+    from aeos.inventory import pins
+
+    monkeypatch.setattr(pins, "host_os", lambda: os_name)
+    pin = binmod.publisher_pin()
+    assert pin["status"] == ("PINNED" if os_name == "darwin" else "NOT_PINNED")
+    assert binmod.signature_gate(sig, pin["signer"], pin_problem=binmod.pin_error(pin))[0] == gate
 
 
 def test_a_pinned_publisher_in_the_manifest_reaches_the_gate(monkeypatch):
@@ -177,7 +207,7 @@ def test_a_pinned_publisher_in_the_manifest_reaches_the_gate(monkeypatch):
 
 
 # ------------------------------------------------------------------------------------------------- W6-042
-TEAM = "Q6L2SF6YDW"  # an example TeamIdentifier shape (tests only; the owner records the real one)
+TEAM = "Q6L2SF6YDW"  # Anthropic PBC TeamIdentifier, pinned for darwin in the reviewed manifest (OWNER_ACTIONS 1.12)
 
 
 def _pinned(monkeypatch, approved_signer) -> None:
@@ -253,6 +283,7 @@ def test_status_names_the_authenticity_gate_and_a_signature_remedy(settings, db,
 def test_doctor_claude_binary_applies_the_same_gate(settings, db, monkeypatch):
     from tests.unit.test_doctor_checks import NATIVE, _ctx, check, claude_runner
 
+    _pinned(monkeypatch, None)  # starts unpinned (the reviewed manifest pins darwin)
     monkeypatch.setattr(binmod, "invocation_signature",
                         lambda path, fingerprint_value: {"status": "INVALID", "signer": ANTHROPIC})
     res = check("claude.binary", _ctx(settings, db, claude_runner(NATIVE)))
@@ -323,6 +354,7 @@ def test_the_manifest_note_no_longer_claims_the_signature_is_unchecked():
     from aeos.inventory.manifest import load_manifest
 
     comp = next(c for c in load_manifest().data["components"] if c["component_id"] == "claude-code")
-    assert comp["signature"]["approved_signer"] is None  # owner step: not pinned yet (never invented)
+    # read with codesign on the owner's Mac (OWNER_ACTIONS 1.12); windows stays an owner step (never invented)
+    assert comp["signature"]["approved_signer"] == {"darwin": TEAM}
     assert "tidak diperiksa oleh AEOS" not in (comp["signature"]["note"] or "")
     assert comp["signature"]["method"] == "os_codesign"

@@ -63,6 +63,18 @@ def _no_os_signature_probe(monkeypatch: pytest.MonkeyPatch) -> None:
                         lambda path, fingerprint_value: {"status": "NOT_CHECKED", "reason": "test stub"})
 
 
+@pytest.fixture(autouse=True)
+def _no_owner_publisher_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The reviewed manifest pins the Claude Code publisher per OS (darwin: TeamIdentifier, OWNER_ACTIONS 1.12). A
+    pinned publisher BLOCKS every binary whose OS signature is not VALID by that signer, by design, and the test
+    binaries are fakes whose OS check is stubbed above. Other tests therefore see the publisher NOT_PINNED, as on a
+    host without a pin. test_claude_bridge_signature.py restores the real pin and tests it with the gate."""
+    from aeos.claude_bridge import binary
+
+    monkeypatch.setattr(binary, "publisher_pin",
+                        lambda: {"signer": None, "status": "NOT_PINNED", "reason": "test stub"})
+
+
 class _MemoArgon2:
     """Wraps the production ``PasswordHasher`` so one test process pays each Argon2id computation (t=3, 64 MiB,
     p=4, tens of ms) once per distinct input instead of once per test. Every value still comes from the real hasher
