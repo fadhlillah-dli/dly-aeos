@@ -1,0 +1,16 @@
+# Bite-control fixture for the actionlint step of .github/workflows/ci.yml. It is bad on purpose: the matrix key is
+# `os` but the step reads matrix.oss, so actionlint must exit 1 and report that property "oss" is not defined.
+# It is not under .github/workflows, so the plain `actionlint` run (no arguments) never lints it.
+name: bad fixture
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - run: echo "${{ matrix.oss }}"

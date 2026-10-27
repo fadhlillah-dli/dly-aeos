@@ -428,19 +428,14 @@ def test_job_ids_are_read_from_the_workflow_without_a_yaml_library():
     assert gates.ci_job_ids(ROOT / "no-such-dir") == []
 
 
-def test_the_commit_subjects_job_counts_as_run_only_when_both_its_gates_ran():
+def test_the_commit_subjects_job_counts_as_run_only_when_its_gate_ran():
+    """shellcheck moved to the static-checks job (it runs on main too); the commit-subjects job is its one gate."""
     jobs = list(yaml.safe_load(CI_TEXT)["jobs"])
     nothing = gates.not_run_jobs([], ROOT)
     assert [job for job, _ in nothing] == jobs  # no gate ran: every job is NOT RUN
-    both = [gates.Result("commit-subjects", gates.PASS), gates.Result("shellcheck", gates.FAIL, 0.0, "x")]
-    ran = gates.not_run_jobs(both, ROOT)
+    ran = gates.not_run_jobs([gates.Result("commit-subjects", gates.FAIL, 0.0, "x")], ROOT)
     assert [job for job, _ in ran] == [j for j in jobs if j != "commit-subjects"]
-    # near misses: one of the two missing or skipped keeps the job NOT RUN and names the missing gate
-    only_subjects = dict(gates.not_run_jobs([gates.Result("commit-subjects", gates.PASS)], ROOT))
-    assert "shellcheck" in only_subjects["commit-subjects"]
-    no_shellcheck = dict(gates.not_run_jobs([gates.Result("commit-subjects", gates.PASS),
-                                             gates.Result("shellcheck", gates.SKIPPED, 0.0, "not on PATH")], ROOT))
-    assert "shellcheck" in no_shellcheck["commit-subjects"] and "SKIPPED" in no_shellcheck["commit-subjects"]
+    assert gates.LOCALLY_RUN_JOBS["commit-subjects"] == ("commit-subjects",)
     skipped = dict(gates.not_run_jobs([gates.Result("commit-subjects", gates.SKIPPED, 0.0, "no base"),
                                        gates.Result("shellcheck", gates.PASS)], ROOT))
     assert "commit-subjects" in skipped["commit-subjects"]
@@ -451,8 +446,12 @@ def test_the_commit_subjects_job_counts_as_run_only_when_both_its_gates_ran():
 
 
 def test_the_static_checks_job_counts_as_run_only_when_every_static_gate_ran():
-    names = [g.name for g in gates.STATIC_GATES]
-    assert names == ["ruff", "mypy-darwin", "mypy-win32", "secret-scan"]
+    """Its steps here: the four python gates, shellcheck, actionlint and the actionlint bite control (a tool that is
+    not installed is SKIPPED, which keeps the job NOT RUN; the CI-only install step is not a gate)."""
+    assert [g.name for g in gates.STATIC_GATES] == ["ruff", "mypy-darwin", "mypy-win32", "secret-scan"]
+    names = list(gates.LOCALLY_RUN_JOBS["static-checks"])
+    assert names == ["ruff", "mypy-darwin", "mypy-win32", "secret-scan", "shellcheck", "actionlint",
+                     "actionlint-control"]
     all_ran = [gates.Result(n, gates.PASS) for n in names]
     assert "static-checks" not in dict(gates.not_run_jobs(all_ran, ROOT))
     assert "static-checks" in dict(gates.not_run_jobs([], ROOT))
@@ -577,17 +576,86 @@ def test_the_shellcheck_gate_is_skipped_with_a_reason_without_the_tool_or_withou
     assert none.status == gates.SKIPPED and "no shell scripts" in none.detail
 
 
-def test_a_local_run_includes_the_shellcheck_gate_before_the_commit_subject_gate(
+def test_the_actionlint_gate_runs_ci_s_command_and_is_skipped_never_passed_without_the_tool(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    assert gates.ACTIONLINT_COMMAND == "actionlint"  # the CI step, word for word (no arguments)
+    real_resolve = gates.resolve_argv
+    seen: list[list[str]] = []
+
+    def stand_in(code: int):
+        def resolve(gate):
+            seen.append(list(gate.argv))
+            return [sys.executable, "-c", f"raise SystemExit({code})"]
+        return resolve
+
+    monkeypatch.setattr(gates, "resolve_argv", stand_in(1))
+    assert gates.actionlint_result(tmp_path, gates.clean_env()).status == gates.FAIL
+    monkeypatch.setattr(gates, "resolve_argv", stand_in(0))
+    assert gates.actionlint_result(tmp_path, gates.clean_env()).status == gates.PASS
+    assert seen[-1] == ["actionlint"]
+    monkeypatch.setattr(gates, "resolve_argv", real_resolve)
+    monkeypatch.setenv("PATH", str(tmp_path / "no-tools-here"))
+    for result in (gates.actionlint_result(tmp_path, gates.clean_env()),
+                   gates.actionlint_control_result(tmp_path, gates.clean_env())):
+        assert result.status == gates.SKIPPED and "not on PATH" in result.detail and "1.7.12" in result.detail
+
+
+def _fake_actionlint(monkeypatch: pytest.MonkeyPatch, bad: tuple[int, str], near: tuple[int, str]):
+    """Stand-in actionlint: one (exit code, output) per fixture of the bite control."""
+    answers = {gates.ACTIONLINT_BAD_FIXTURE: bad, gates.ACTIONLINT_NEAR_MISS_FIXTURE: near}
+
+    def resolve(gate):
+        code, text = answers[gate.argv[1]]
+        return [sys.executable, "-c", f"import sys; print({text!r}); sys.exit({code})"]
+
+    monkeypatch.setattr(gates, "resolve_argv", resolve)
+
+
+FINDING = 'bad-workflow.yml:15:19: property "oss" is not defined in object type {os: string} [expression]'
+
+
+def test_the_actionlint_bite_control_is_red_when_the_linter_stops_finding_things(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Near miss green (bad fixture exits 1 with the finding, near miss exits 0); every other shape red."""
+    env = gates.clean_env()
+    _fake_actionlint(monkeypatch, (1, FINDING), (0, ""))
+    assert gates.actionlint_control_result(tmp_path, env).status == gates.PASS
+    _fake_actionlint(monkeypatch, (0, ""), (0, ""))  # accepted the bad fixture: the linter is blind
+    blind = gates.actionlint_control_result(tmp_path, env)
+    assert blind.status == gates.FAIL and "exited 0, expected 1" in blind.detail and "lacks the finding" in blind.detail
+    _fake_actionlint(monkeypatch, (1, "some other finding"), (0, ""))  # failed, but not for the planted reason
+    other = gates.actionlint_control_result(tmp_path, env)
+    assert other.status == gates.FAIL and "lacks the finding" in other.detail and "expected 1" not in other.detail
+    _fake_actionlint(monkeypatch, (3, FINDING), (0, ""))  # a crash is not "problems found"
+    assert gates.actionlint_control_result(tmp_path, env).status == gates.FAIL
+    _fake_actionlint(monkeypatch, (1, FINDING), (1, "near miss rejected"))
+    rejected = gates.actionlint_control_result(tmp_path, env)
+    assert rejected.status == gates.FAIL and "near-miss" in rejected.detail and "near miss rejected" in rejected.detail
+
+
+def test_the_actionlint_fixtures_exist_and_differ_only_in_the_matrix_key_spelling():
+    bad = (ROOT / gates.ACTIONLINT_BAD_FIXTURE).read_text(encoding="utf-8")
+    near = (ROOT / gates.ACTIONLINT_NEAR_MISS_FIXTURE).read_text(encoding="utf-8")
+    assert "matrix.oss" in bad and "matrix.oss" not in near
+    assert yaml.safe_load(bad)["jobs"]["probe"]["strategy"]["matrix"] == {"os": ["ubuntu-latest"]}
+    assert (ROOT / ".github" / "workflows") not in (ROOT / gates.ACTIONLINT_BAD_FIXTURE).parents
+
+
+def test_a_local_run_includes_the_shellcheck_and_actionlint_gates_before_the_commit_subject_gate(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     seen = []
     monkeypatch.setattr(gates, "STATIC_GATES", ())
     monkeypatch.setattr(gates, "FRONTEND_GATES", ())
-    monkeypatch.setattr(gates, "shellcheck_result", lambda root, env, ref="": seen.append(root) or gates.Result(
-        "shellcheck", gates.SKIPPED, 0.0, "stand-in"))
+    for fn, gate in (("shellcheck_result", "shellcheck"), ("actionlint_result", "actionlint"),
+                     ("actionlint_control_result", "actionlint-control")):
+        monkeypatch.setattr(gates, fn, lambda root, env, ref="", gate=gate: seen.append((gate, root)) or gates.Result(
+            gate, gates.SKIPPED, 0.0, "stand-in"))
     args = gates.build_parser().parse_args(["--base", "none-such"])
     results = gates.run_local(args, tmp_path)
-    assert [r.gate for r in results].index("shellcheck") < [r.gate for r in results].index("commit-subjects")
-    assert seen == [tmp_path]
+    order = [r.gate for r in results]
+    assert order.index("shellcheck") < order.index("actionlint") < order.index("actionlint-control") < order.index(
+        "commit-subjects")
+    assert seen == [("shellcheck", tmp_path), ("actionlint", tmp_path), ("actionlint-control", tmp_path)]
 
 
 def test_environment_facts_are_printed_first_and_do_not_change_the_result(
@@ -1032,10 +1100,11 @@ def test_the_shell_scripts_follow_the_conventions():
 SHELLCHECK_CMD = "shellcheck scripts/*.sh scripts/git-hooks/pre-push"
 
 
-def test_ci_runs_shellcheck_in_an_existing_ubuntu_job_that_keeps_its_name():
+def test_ci_runs_shellcheck_in_the_static_job_that_runs_on_main_too():
     jobs = yaml.safe_load(CI_TEXT)["jobs"]
     (host,) = [jid for jid, j in jobs.items() if any(s.get("run") == SHELLCHECK_CMD for s in j["steps"])]
-    assert jobs[host]["runs-on"] == "ubuntu-latest" and jobs[host]["name"] == "commit subjects [G1]"
+    assert host == "static-checks" and jobs[host]["runs-on"] == "ubuntu-latest"
+    assert jobs[host]["name"] == "static checks [G1] (ubuntu-latest)" and "if" not in jobs[host]
     assert (ROOT / "scripts" / "git-hooks" / "pre-push").is_file() and sorted((ROOT / "scripts").glob("*.sh"))
 
 

@@ -17,8 +17,10 @@ node_modules, the commit-message check without a base) is SKIPPED with its reaso
 mypy is a FAIL.
 Exit code 1 when any gate FAILs.
 
-It also runs CI's shellcheck step when shellcheck is installed (SKIPPED with the reason otherwise; the version may differ
-from CI's, so the commit-subjects job counts as run only when both its gates ran).
+It also runs CI's shellcheck, actionlint and actionlint bite-control steps (all in the static-checks job) when the tools
+are installed (each SKIPPED with the reason otherwise; the versions may differ from CI's, which pins actionlint, so
+the static-checks job counts as run only when all of its gates ran). CI's "Install actionlint" step has no local
+equivalent: locally the tool comes from your package manager (CONTRIBUTING.md).
 
 Beyond the CI gates it runs checks CI cannot make for you: a merge-conflict gate (`git merge-tree --write-tree
 origin/main <tip>`: a branch that conflicts needs a merge commit and a full CI re-run), and in hook mode, before
@@ -78,6 +80,15 @@ GATE_TIMEOUT_SECONDS = 1800
 AMEND_EXEC = (f"git merge-base --is-ancestor HEAD {DEFAULT_BASE} || "
               "git commit --amend --no-edit --reset-author --allow-empty")
 SHELLCHECK_COMMAND = "shellcheck scripts/*.sh scripts/git-hooks/pre-push"  # the CI step, word for word
+ACTIONLINT = "actionlint"
+ACTIONLINT_CONTROL = "actionlint-control"
+ACTIONLINT_COMMAND = "actionlint"  # the CI step, word for word (no arguments: every file of .github/workflows)
+# The bite control of CI's static-checks job, mirrored: the bad fixture must exit 1 and name the property, the near
+# miss must pass. tests/unit/test_ci_gates.py checks that the CI step carries the same paths and finding text.
+ACTIONLINT_BAD_FIXTURE = "tests/fixtures/actionlint/bad-workflow.yml"
+ACTIONLINT_NEAR_MISS_FIXTURE = "tests/fixtures/actionlint/near-miss-workflow.yml"
+ACTIONLINT_FINDING = 'property "oss" is not defined in object type'
+ACTIONLINT_PINNED_VERSION = "1.7.12"  # what CI runs; CONTRIBUTING.md says a local version may differ
 # Variables git sets for hooks. A gate must find its repository from its own cwd, not from the pushing clone.
 SCRUBBED_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
 
@@ -226,13 +237,56 @@ def shell_files(root: Path) -> list[str]:
 
 
 def shellcheck_result(root: Path, env: Mapping[str, str], ref: str = "") -> Result:
-    """CI's shellcheck step (the commit-subjects job). SKIPPED with the reason when shellcheck is not installed or
+    """CI's shellcheck step (the static-checks job). SKIPPED with the reason when shellcheck is not installed or
     the checkout has no shell scripts: then that CI step stays NOT RUN. The version of shellcheck matters: CI uses
     the one ubuntu-latest ships (0.9.x at the time of writing); a newer local one may accept what CI rejects."""
     files = shell_files(root)
     if not files:
         return Result(SHELLCHECK, SKIPPED, 0.0, "no shell scripts in this checkout", SHELLCHECK_COMMAND, ref)
     return run_gate(Gate(SHELLCHECK, ("shellcheck", *files)), root, env, ref)
+
+
+def actionlint_result(root: Path, env: Mapping[str, str], ref: str = "") -> Result:
+    """CI's actionlint step (the static-checks job): `actionlint` with no arguments lints every workflow file.
+    SKIPPED with the reason, never PASS, when actionlint is not installed. Without shellcheck on PATH actionlint
+    skips the `run:` blocks, so a PASS here can be weaker than CI's; the version may differ from CI's pin."""
+    result = run_gate(Gate(ACTIONLINT, (ACTIONLINT_COMMAND,)), root, env, ref)
+    if result.status == SKIPPED:
+        result.detail = (f"actionlint is not on PATH (CI runs v{ACTIONLINT_PINNED_VERSION}; install it as "
+                         "CONTRIBUTING.md says to lint the workflows here)")
+    return result
+
+
+def actionlint_control_result(root: Path, env: Mapping[str, str], ref: str = "") -> Result:
+    """CI's bite control of actionlint: the bad fixture must exit 1 with the finding, the near-miss fixture must exit
+    0. FAIL when actionlint accepts the bad fixture (it stopped finding things). SKIPPED when it is not installed."""
+    bad = Gate(ACTIONLINT_CONTROL, (ACTIONLINT_COMMAND, ACTIONLINT_BAD_FIXTURE))
+    near = Gate(ACTIONLINT_CONTROL, (ACTIONLINT_COMMAND, ACTIONLINT_NEAR_MISS_FIXTURE))
+    command = f"{bad.command} (must fail); {near.command} (must pass)"
+    argv_bad, argv_near = resolve_argv(bad), resolve_argv(near)
+    if argv_bad is None or argv_near is None:
+        return Result(ACTIONLINT_CONTROL, SKIPPED, 0.0, f"actionlint is not on PATH (CI runs v{ACTIONLINT_PINNED_VERSION})",
+                      command, ref)
+    started = time.perf_counter()
+    try:
+        red = _run(argv_bad, root, env)
+        green = _run(argv_near, root, env)
+    except subprocess.TimeoutExpired:
+        return Result(ACTIONLINT_CONTROL, FAIL, time.perf_counter() - started,
+                      f"timed out after {GATE_TIMEOUT_SECONDS} s", command, ref)
+    except OSError as exc:
+        return Result(ACTIONLINT_CONTROL, FAIL, time.perf_counter() - started, f"could not start: {exc}", command, ref)
+    seconds = time.perf_counter() - started
+    problems = []
+    if red.returncode != 1:
+        problems.append(f"the bad fixture exited {red.returncode}, expected 1 (problems found)")
+    if ACTIONLINT_FINDING not in red.stdout + red.stderr:
+        problems.append(f"the output for the bad fixture lacks the finding: {ACTIONLINT_FINDING}")
+    if green.returncode != 0:
+        problems.append(f"the near-miss fixture exited {green.returncode}, expected 0\n{_tail(green.stdout + green.stderr)}")
+    if problems:
+        return Result(ACTIONLINT_CONTROL, FAIL, seconds, "\n".join(problems), command, ref)
+    return Result(ACTIONLINT_CONTROL, PASS, seconds, "", command, ref)
 
 
 def ref_exists(root: Path, ref: str, env: Mapping[str, str]) -> bool:
@@ -523,6 +577,8 @@ def run_hook(stdin_text: str, root: Path = ROOT) -> list[Result]:
             with detached_worktree(root, ref.local_sha, env) as tmp:
                 results.extend(run_gate(g, tmp, env, label) for g in STATIC_GATES)
                 results.append(shellcheck_result(tmp, env, label))
+                results.append(actionlint_result(tmp, env, label))
+                results.append(actionlint_control_result(tmp, env, label))
                 if base:
                     results.append(run_gate(commit_subject_gate(base, ref.local_sha), tmp, env, label))
                 else:
@@ -542,6 +598,8 @@ def run_local(args: argparse.Namespace, root: Path = ROOT) -> list[Result]:
     results = [merge_conflict_result(root, env)]
     results.extend(run_gate(g, root, env) for g in STATIC_GATES)
     results.append(shellcheck_result(root, env))
+    results.append(actionlint_result(root, env))
+    results.append(actionlint_control_result(root, env))
     if base:
         results.append(run_gate(commit_subject_gate(base, "HEAD"), root, env))
     else:
@@ -567,11 +625,12 @@ NOT_RUN_REASONS: tuple[tuple[str, str], ...] = (
     ("supply-chain", "report-only SBOM, licence, vulnerability and SAST scans; not run locally"),
 )
 # job id -> the gates that run it here. A job counts as run only when EVERY one of its gates PASSed or FAILed: the
-# commit-subjects job also has the shellcheck step, so a run without shellcheck must still say NOT RUN for it. The
-# static-checks job is exactly the STATIC_GATES (a SKIPPED one keeps it NOT RUN).
+# static-checks job also has the shellcheck, actionlint and actionlint bite-control steps, so a run without those
+# tools must still say NOT RUN for it (a SKIPPED gate keeps the job NOT RUN). Its "Install actionlint" step is not a
+# gate: the local tool comes from the package manager.
 LOCALLY_RUN_JOBS: dict[str, tuple[str, ...]] = {
-    "commit-subjects": ("commit-subjects", SHELLCHECK),
-    "static-checks": tuple(g.name for g in STATIC_GATES),
+    "commit-subjects": ("commit-subjects",),
+    "static-checks": (*(g.name for g in STATIC_GATES), SHELLCHECK, ACTIONLINT, ACTIONLINT_CONTROL),
 }
 
 

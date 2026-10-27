@@ -19,7 +19,7 @@
 # shard runs with one pytest-xdist worker per logical CPU: 3 shards on windows-latest (Windows jobs do not use the
 # macOS slots), 2 on each macOS. Together the shards of an OS run every test of the old single job, and every shard
 # job is the same (install, pytest, JUnit upload). The G1 static checks (ruff, mypy for darwin and win32, the secret
-# scan) run once, in their own job on ubuntu-latest, so no shard carries extra work and the split can be even. The
+# scan, shellcheck, actionlint) run once, in their own job on ubuntu-latest, so no shard carries extra work and the split can be even. The
 # real trusted-suite verifier run has its own job on macos-latest. The required check names of the main ruleset,
 # "backend [G1,G2] (<os>)", are aggregator jobs on ubuntu-latest that need the static job and every backend job of
 # their OS and pass only when each of them ended in success (skipped or cancelled is never a pass). Each shard uploads
@@ -74,6 +74,49 @@ jobs:
         run: python -m mypy --platform win32
       - name: G1 static — secret + PII scan (blueprints, contracts, docs)
         run: python scripts/secret_scan.py
+      # shellcheck is preinstalled on ubuntu-latest. The shell scripts are the macOS bootstrap and dev helpers, the
+      # local test runner and the pre-push hook; a quoting slip in them fails here instead of on the owner's machine.
+      # It lives in this job (not in the pull-request-only commit-subjects job) so that it runs on main as well.
+      - name: G1 static — shellcheck (scripts/*.sh and the pre-push hook)
+        run: shellcheck scripts/*.sh scripts/git-hooks/pre-push
+      # actionlint lints the workflows themselves (expressions, contexts, matrix keys, and, through the preinstalled
+      # shellcheck, every `run:` block). The release is pinned by version and by the SHA-256 of its linux_amd64
+      # tarball (taken from that release's checksums file): the download is compared before anything is extracted,
+      # and a mismatch fails the step. No third-party action, no package manager. Bumping the version means bumping
+      # the checksum in the same change (tests/unit/test_ci_gates.py checks both are present and compared).
+      - name: Install actionlint (pinned release, SHA-256 verified before extraction)
+        shell: bash
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+        run: |
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          dir="${RUNNER_TEMP}/actionlint"
+          mkdir -p "$dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --retry 3 \
+            --output "${dir}/${archive}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  ${dir}/${archive}" | sha256sum --check --strict -
+          tar -xzf "${dir}/${archive}" -C "$dir" actionlint
+          echo "$dir" >> "$GITHUB_PATH"
+          "${dir}/actionlint" -version
+      # No arguments: actionlint lints every file of .github/workflows (and nothing else, so the bite-control
+      # fixtures below, which are bad on purpose, are not linted here).
+      - name: G1 static — actionlint
+        run: actionlint
+      # Bite control: a linter that silently stopped finding things would stay green forever. The first fixture uses
+      # ${{ matrix.oss }} where the matrix key is `os`: actionlint must exit 1 AND name the property; the second
+      # fixture is the same workflow spelled correctly and must pass. This runs in CI on every run, not in pytest.
+      - name: G1 static — actionlint bite control (known-bad fixture red, near miss green)
+        run: |
+          status=0
+          output=$(actionlint tests/fixtures/actionlint/bad-workflow.yml 2>&1) || status=$?
+          printf '%s\n' "$output"
+          if [ "$status" -ne 1 ]; then echo "bite control: expected exit status 1 for the bad fixture, got ${status}"; exit 1; fi
+          if ! grep -qF 'property "oss" is not defined in object type' <<< "$output"; then
+            echo "bite control: the finding for matrix.oss is missing from the output"; exit 1
+          fi
+          actionlint tests/fixtures/actionlint/near-miss-workflow.yml
 
   backend-shards-windows-latest:
     name: backend shard ${{ matrix.shard }}/${{ matrix.shards }} [G2] (${{ matrix.os }})
@@ -223,7 +266,8 @@ jobs:
         run: |
           status=0
           count=0
-          for entry in $RESULTS; do
+          read -r -a entries <<< "$RESULTS"
+          for entry in "${entries[@]}"; do
             count=$((count + 1))
             if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
           done
@@ -247,7 +291,8 @@ jobs:
         run: |
           status=0
           count=0
-          for entry in $RESULTS; do
+          read -r -a entries <<< "$RESULTS"
+          for entry in "${entries[@]}"; do
             count=$((count + 1))
             if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
           done
@@ -270,7 +315,8 @@ jobs:
         run: |
           status=0
           count=0
-          for entry in $RESULTS; do
+          read -r -a entries <<< "$RESULTS"
+          for entry in "${entries[@]}"; do
             count=$((count + 1))
             if [ "${entry#*=}" = "success" ]; then echo "PASS  ${entry}"; else echo "FAIL  ${entry} (only success passes)"; status=1; fi
           done
@@ -412,7 +458,7 @@ jobs:
   # format and no AI attribution in the message, author or committer (backend/aeos/core/attribution.py). Needs the
   # full history (fetch-depth: 0 here only) to walk base..head and to find the baseline below which nothing is
   # checked. Stdlib only (the script puts backend/ on sys.path itself), so there is no Python setup step. Not run for pushes to main: those arrive through merged pull requests.
-  # The same cheap ubuntu job also lints the shell scripts (second step).
+  # (shellcheck used to be a second step here; it is a step of static-checks now, so main runs it too.)
   commit-subjects:
     name: commit subjects [G1]
     if: github.event_name == 'pull_request'
@@ -428,10 +474,6 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python3 scripts/commit_subject.py "$BASE_SHA..$HEAD_SHA"
-      # shellcheck is preinstalled on ubuntu-latest. The shell scripts are the macOS bootstrap and dev helpers, the
-      # local test runner and the pre-push hook; a quoting slip in them fails here instead of on the owner's machine.
-      - name: G1 static — shellcheck (scripts/*.sh and the pre-push hook)
-        run: shellcheck scripts/*.sh scripts/git-hooks/pre-push
 
   supply-chain:
     name: supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)

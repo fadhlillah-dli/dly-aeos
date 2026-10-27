@@ -122,6 +122,67 @@ def test_every_type_of_the_rule_is_accepted():
         assert cs.check_subject(f"{kind}(scope): description") is None
 
 
+# ------------------------------------------------------------------ --subject: a pull request title
+# The title becomes the merge-commit body and the squash subject, so it gets the commit-subject rules (same functions,
+# no copy). AI samples are assembled from parts so that the repository-wide hygiene scan finds nothing in this file.
+_PR_TRAILER = "Co-authored-by"
+_PR_ADDR = "noreply" + "@" + "anthropic.com"
+
+
+def _subject_main(subject: str, capsys: pytest.CaptureFixture[str]) -> tuple[int, str]:
+    code = cs.main(["--subject", subject])
+    return code, capsys.readouterr().out
+
+
+def test_a_valid_pull_request_title_passes(capsys: pytest.CaptureFixture[str]):
+    code, out = _subject_main("ci: lint the workflows with actionlint", capsys)
+    assert code == 0 and "1 subject checked" in out and "FAIL" not in out
+
+
+def test_a_title_that_is_not_a_conventional_commits_subject_fails_with_the_reason(capsys: pytest.CaptureFixture[str]):
+    code, out = _subject_main("wip", capsys)
+    assert code == 1
+    assert "FAIL 'wip'" in out and "expected 'type(scope)?!?: description' with type" in out and out.isascii()
+    long_code, long_out = _subject_main("feat: " + "x" * 100, capsys)
+    assert long_code == 1 and "characters (maximum 100)" in long_out
+
+
+def test_an_attribution_in_a_pull_request_title_fails_inline_and_as_a_trailer(capsys: pytest.CaptureFixture[str]):
+    trailer_in_body = f"feat: add a thing\n\n{_PR_TRAILER}: Some Bot <{_PR_ADDR}>"
+    inline = f"feat: add a thing {_PR_TRAILER}: Some Bot <{_PR_ADDR}>"
+    for title in (trailer_in_body, inline):
+        code, out = _subject_main(title, capsys)
+        assert code == 1 and "AI attribution in the message" in out, title
+        assert _PR_ADDR not in out and out.isascii()  # the guard's reasons never echo the address
+    # the format passes and only the attribution is reported for the inline form
+    assert cs.check_subject(inline) is None and cs.subject_reasons(inline)
+    code, out = _subject_main("feat: the generated client is regenerated in CI", capsys)
+    assert code == 0, out  # prose that mentions generation is not an attribution
+
+
+@pytest.mark.parametrize("subject", ["feat: add a thing", "fix(core): keep inherited ACLs", "Update README", "feat: ",
+                                     "Revert \"feat: x\"", "Revert \"not conventional\"", ""])
+def test_the_title_check_gives_the_commit_subject_verdict(subject: str, capsys: pytest.CaptureFixture[str]):
+    """One rule for commits and titles: --subject agrees with check_subject on every sample."""
+    code, _ = _subject_main(subject, capsys)
+    assert (code == 0) is (cs.check_subject(subject) is None)
+
+
+def test_the_subject_mode_needs_exactly_one_of_a_range_or_a_subject(capsys: pytest.CaptureFixture[str]):
+    for argv in ([], ["main..HEAD", "--subject", "feat: x"]):
+        with pytest.raises(SystemExit) as raised:
+            cs.main(argv)
+        assert raised.value.code == 2
+    capsys.readouterr()
+
+
+def test_a_subject_that_starts_with_a_dash_is_taken_as_text_not_as_an_option():
+    """The workflow passes --subject="$PR_TITLE": a title such as '-x' must fail the check, not break the usage."""
+    proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "commit_subject.py"), "--subject=-x"],
+                          capture_output=True, text=True, encoding="utf-8", check=False, timeout=60)
+    assert proc.returncode == 1 and "FAIL '-x'" in proc.stdout
+
+
 # ------------------------------------------------------------------ ranges, merges, baseline
 def test_merge_commits_are_exempt_and_other_commits_are_checked(repo: Path):
     base = _commit(repo, "feat: root")
@@ -367,27 +428,36 @@ def test_tests_run_in_parallel_only_when_xdist_is_importable(monkeypatch: pytest
 
 
 # ------------------------------------------------------------------ drift guard
-def _ci_commands(workflow_text: str, job_prefix: str, step_prefixes: tuple[str, ...]) -> list[str]:
+def _ci_commands(workflow_text: str, job_prefix: str, step_prefixes: tuple[str, ...],
+                 skip: tuple[str, ...] = ()) -> list[str]:
     jobs = yaml.safe_load(workflow_text)["jobs"]
     job = next(j for jid, j in jobs.items() if jid.startswith(job_prefix))
     commands: list[str] = []
     for step in job["steps"]:
-        if str(step.get("name", "")).startswith(step_prefixes):
+        name = str(step.get("name", ""))
+        if name.startswith(step_prefixes) and not any(word in name for word in skip):
             commands += [line.strip() for line in step["run"].splitlines() if line.strip()]
     return commands
 
 
+# The bite control of the actionlint step is a script of its own, mirrored by gates.actionlint_control_result and
+# checked in tests/unit/test_ci_gates.py; the other G1 steps are one command each and must equal gates.py's, word for word.
+BITE_CONTROL = ("bite control",)
+
+
 def _drift(workflow_text: str) -> tuple[list[str], list[str]]:
     """(G1 commands in ci.yml, the static gates of scripts/gates.py), then the same for the frontend job."""
-    return (_ci_commands(workflow_text, "static-checks", ("G1 static",)) + _ci_commands(
+    return (_ci_commands(workflow_text, "static-checks", ("G1 static",), skip=BITE_CONTROL) + _ci_commands(
         workflow_text, "frontend", ("G1 static", "G3 product tests")),
-        [g.command for g in gates.STATIC_GATES + gates.FRONTEND_GATES])
+        [g.command for g in gates.STATIC_GATES] + [gates.SHELLCHECK_COMMAND, gates.ACTIONLINT_COMMAND]
+        + [g.command for g in gates.FRONTEND_GATES])
 
 
 def test_gates_py_runs_exactly_the_g1_commands_of_ci_yml():
     in_ci, in_gates = _drift(CI_TEXT)
     assert in_ci == ["python -m ruff check backend tests scripts", "python -m mypy --platform darwin",
-                     "python -m mypy --platform win32", "python scripts/secret_scan.py", "npx tsc -b --noEmit", "npm test"]
+                     "python -m mypy --platform win32", "python scripts/secret_scan.py",
+                     "shellcheck scripts/*.sh scripts/git-hooks/pre-push", "actionlint", "npx tsc -b --noEmit", "npm test"]
     assert in_ci == in_gates, "scripts/gates.py and the G1 steps of ci.yml diverged: change both together"
 
 
@@ -407,6 +477,8 @@ def test_the_guard_reads_the_one_static_job_and_no_shard_job_repeats_a_g1_comman
     ("python scripts/secret_scan.py", "python scripts/secret_scan.py --strict"),
     ("python -m ruff check backend tests scripts", "python -m ruff check backend tests"),
     ("python -m mypy --platform win32", "python -m mypy --platform linux"),
+    ("shellcheck scripts/*.sh scripts/git-hooks/pre-push", "shellcheck scripts/*.sh"),
+    ("run: actionlint\n", "run: actionlint -ignore 'property'\n"),
 ])
 def test_the_drift_guard_catches_a_changed_ci_command(old: str, new: str):
     in_ci, in_gates = _drift(CI_TEXT.replace(old, new))
