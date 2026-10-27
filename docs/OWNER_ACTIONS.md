@@ -524,22 +524,27 @@ Peran* → agent card → *Periksa prasyarat* / *Aktifkan*.
 
 ### 1.12 Approve the pins [once per platform, through a reviewed PR]
 
-**Status.** `darwin_arm64` (the M4) is done (2026-10-27, owner decision of 2026-10-27 delegated as D13).
-`windows_amd64` and `darwin_amd64` (the i9) stay NOT_RECORDED until those machines.
+**Status.** Reviewed on `darwin_arm64` (the M4), 2026-10-27, under the owner decision of 2026-10-27 delegated as
+D13. The `approved_pin` values (`openbao` 2.7.1, `opencode` 1.19.3) have no per-platform form, so they apply on every
+platform, Windows and the i9 included. Digests and signers are per platform: a digest per `<os>_<arch>`, a signer
+per OS. The `claude-code` `darwin` signer `Q6L2SF6YDW` is recorded (read on the M4; the i9 confirms it with the
+`codesign` line below). No digest is recorded yet: the `darwin_arm64` OpenBao digest is deferred (below), and the
+`windows` signer and every `windows_amd64` and `darwin_amd64` value stay NOT_RECORDED until those machines.
 
 **Rule: pin what protects without blocking a routine update.** Pin a value only when drift from it is caught without
-blocking a capability on a routine update. `tests/unit/test_inventory_pins.py` checks this rule.
+blocking a capability on a routine update, or when it records the pin the runtime already holds (so it adds no new
+block). `tests/unit/test_inventory_pins.py` checks this rule.
 
 | Component | Pin | Why |
 |---|---|---|
 | `claude-code` | publisher only: `signature.approved_signer` `darwin: Q6L2SF6YDW` | Claude Code updates itself often, so a version or digest pin would drift on every update. The publisher pin survives updates, and an unsigned or foreign-signed binary is BLOCKED (`claude.binary`). |
-| `opencode` | none in the manifest; the worker runtime keeps its built-in default pin 1.19.3 | Drift from the 1.19.3 pin fails `worker.opencode`, which blocks `CAN_RUN_WORKER` (master §38). A manifest pin would change nothing. OpenCode updates itself, so turn its self-update off on each machine (below). No tool schema hash has been observed yet. |
+| `opencode` | `approved_pin: "1.19.3"`, equal to the worker runtime default (`PINNED_VERSION`) | The runtime already holds 1.19.3, and drift from it fails `worker.opencode`, which blocks `CAN_RUN_WORKER` (master §38), with or without the manifest pin. So the pin changes no runtime behaviour. It makes the pin human-approved (master §07): *Tools & Repos* shows MATCH or MISMATCH and a version drift finding instead of NO_PIN or UNKNOWN. OpenCode updates itself, so turn its self-update off on each machine (below). `tool_schema_hash`: none observed yet. |
 | `openbao` | `approved_pin: "2.7.1"` | `aeos vault install` installs it, and it never updates itself. Drift is a finding, not a block. |
 | `git`, `nodejs-runtime`, `python-runtime` | none | `approved_pin` applies on every platform, but these versions differ per platform. The OS or package manager ships their security updates. |
 
 **OpenCode self-update.** A self-update of the host OpenCode (for example after you run `opencode` yourself) moves
 it off 1.19.3, and `./aeos doctor -c CAN_RUN_WORKER` then reports `OPENCODE_PIN_DRIFT` and BLOCKED. AEOS already runs
-the worker with self-update off. Turn it off for your own shell too, once per machine:
+the worker with self-update off. Turn it off for your own shell too, once per machine (on Windows, see section 5):
 
 ```zsh
 grep -qx 'export OPENCODE_DISABLE_AUTOUPDATE=1' ~/.zshrc || echo 'export OPENCODE_DISABLE_AUTOUPDATE=1' >> ~/.zshrc
@@ -548,7 +553,8 @@ opencode --version
 ```
 
 `opencode --version` must print 1.19.3. If it does not, run `npm install -g opencode-ai@1.19.3` (1.9). Move to a new
-OpenCode version only through a reviewed PR that changes the pin after the worker contract test passes on it.
+OpenCode version only through a reviewed PR that changes the pin (the manifest `approved_pin` and the runtime
+`PINNED_VERSION` together) after the worker contract test passes on it.
 
 The `openbao` digest for `darwin_arm64` is
 `sha256:50c3588e64271171cc2147bddeace8ec2b6742f94fd3fe53baa60f6d938cda0c`, but it is not recorded yet. A digest pin
@@ -559,7 +565,8 @@ PR that updates that test.
 To collect the values on another platform:
 
 For `claude-code` note `versions.observed_version` and `versions.observed_digest`; for `opencode` also the
-contract test's tool schema hash. The `codesign` line shows the macOS signer of claude-code.
+contract test's `tool_schema_hash` once it records one (none observed yet). The `codesign` line shows the macOS
+signer of claude-code.
 
 ```bash
 ./aeos inventory reconcile
@@ -592,8 +599,8 @@ git pull --ff-only
 ./aeos inventory reconcile
 ```
 
-*Tools & Repos* (`/tools`) → `openbao` must show the approved pin instead of "pin belum disetujui (UNKNOWN)", with
-no `resolved-version-mismatch` drift. `claude-code` keeps "UNKNOWN" for its version by design, and its authenticity
+*Tools & Repos* (`/tools`) → `openbao` and `opencode` must show the approved pin instead of "pin belum disetujui
+(UNKNOWN)", with no `resolved-version-mismatch` drift. `claude-code` keeps "UNKNOWN" for its version by design, and its authenticity
 is OK (`./aeos doctor -c CAN_PLAN_PERSONAL`). When the pinned OpenCode version changes, rebuild the worker image (1.6) so
 it carries the new `aeos.opencode_version` label.
 
@@ -1137,6 +1144,20 @@ pytest lines: in PowerShell write `$env:NAME="value"; <command>`, in cmd.exe `se
 * **Signer for the pin (1.12):**
   `(Get-AuthenticodeSignature (Get-Command claude.exe).Source).SignerCertificate.Subject`. The `windows` entry of
   `approved_signer`.
+* **OpenCode self-update off (1.12):** once per machine. Both forms set it for your user, for windows opened
+  afterwards (not the current one). In Command Prompt (cmd.exe):
+
+  ```cmd
+  setx OPENCODE_DISABLE_AUTOUPDATE 1
+  ```
+
+  Or in PowerShell:
+
+  ```powershell
+  [Environment]::SetEnvironmentVariable('OPENCODE_DISABLE_AUTOUPDATE','1','User')
+  ```
+
+  Then open a new window and run `opencode --version`. It must print 1.19.3.
 * **Commit identity (1.5):** edit `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` (copy `config\aeos.example.yaml` there if it
   does not exist).
 * **OpenBao:** `vault install` picks the `windows_amd64` release. The bootstrap identity is in Windows Credential

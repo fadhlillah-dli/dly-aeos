@@ -447,15 +447,19 @@ def git_repo(path: Any, files: dict[str, str], *, origin: str | None = None) -> 
 
 def manifest_with_pin(tmp_path: Any, component_id: str, pin: str) -> Any:
     """A copy of the reviewed InstallManifest in which the owner re-declares *component_id*'s approved pin
-    (the desired-state change ``aeos inventory`` loads with ``apply_manifest``)."""
+    (the desired-state change ``aeos inventory`` loads with ``apply_manifest``). The component's own
+    ``approved_pin`` line is replaced, whether the reviewed manifest leaves it null or pins it (opencode, 1.12)."""
+    import re
     from pathlib import Path
 
     from aeos.core.paths import repo_root
 
     text = (Path(repo_root()) / "install-manifest" / "manifest.yaml").read_text(encoding="utf-8")
     start = text.index(f"  - component_id: {component_id}\n")
-    old = "    approved_pin: null\n"
-    at = text.index(old, start)
+    end = text.find("\n  - component_id: ", start + 1)
+    line = re.compile(r"^    approved_pin: .*\n", re.M).search(text, start, len(text) if end < 0 else end + 1)
+    assert line is not None, f"{component_id} has no approved_pin line in the reviewed manifest"
     out = Path(tmp_path) / f"manifest-{component_id}-{pin}.yaml"
-    out.write_text(text[:at] + f'    approved_pin: "{pin}"\n' + text[at + len(old):], encoding="utf-8", newline="\n")
+    out.write_text(text[:line.start()] + f'    approved_pin: "{pin}"\n' + text[line.end():], encoding="utf-8",
+                   newline="\n")
     return out

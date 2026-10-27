@@ -24,13 +24,15 @@ sources_checked: "2026-10-17/2026-10-18"
 #   * claude-code: publisher pin only (signature.approved_signer darwin = TeamIdentifier). It updates itself
 #     often, so a version/digest pin would drift on every update; the publisher pin survives updates and BLOCKS a
 #     foreign- or un-signed binary.
-#   * opencode: no approved_pin/approved_digest here, but the worker runtime still holds its built-in default pin
-#     1.19.3 (worker_runtime/opencode.py PINNED_VERSION, used while approved_pin is null). Drift from that pin makes
-#     worker.opencode FAILED (OPENCODE_PIN_DRIFT), which BLOCKS CAN_RUN_WORKER (master §38 "Binary/version/route
-#     berubah dari pin": admission stops). A manifest pin would add no protection and changes no behaviour. So a
-#     self-update of the host OpenCode still blocks: the owner turns OpenCode self-update off on each machine
-#     (OPENCODE_DISABLE_AUTOUPDATE=1, OWNER_ACTIONS 1.12); the worker already runs with it off. No
-#     tool_schema_hash: none observed yet.
+#   * opencode: approved_pin 1.19.3, equal to the worker runtime default (worker_runtime/opencode.py PINNED_VERSION),
+#     so the version the worker is built, run and compared with does not change. What changes: the pin is now a
+#     human-approved manifest pin (master §07), so inventory shows MATCH/MISMATCH and a resolved-version-mismatch
+#     drift finding instead of NO_PIN/UNKNOWN, and the doctor quotes "install-manifest approved_pin" as its source.
+#     Drift from the pin makes worker.opencode FAILED (OPENCODE_PIN_DRIFT), which BLOCKS CAN_RUN_WORKER (master §38
+#     "Binary/version/route berubah dari pin": admission stops) - with or without this entry. So the owner turns
+#     OpenCode self-update off on each machine (OPENCODE_DISABLE_AUTOUPDATE=1, OWNER_ACTIONS 1.12); the worker
+#     already runs with it off (its generated config sets autoupdate false). No approved_digest: none reviewed.
+#     tool_schema_hash: none observed yet (the worker contract test has not recorded one).
 #   * openbao: version pin. Installed only by `aeos vault install`, never self-updating; drift is a finding, not a
 #     block. Its darwin_arm64 digest is not recorded yet: a digest pin also makes every openbao proposal need a
 #     candidate digest, which the trusted acceptance suite does not supply (OWNER_ACTIONS 1.12).
@@ -1418,9 +1420,9 @@ components:
     requirement: REQUIRED
     design_label: SELECTED_DESIGN
     bootstrap_order: 5
-    approved_pin: null
+    approved_pin: "1.19.3"
     approved_digest: null
-    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "Rilis resmi github:anomalyco/opencode. approved_pin/approved_digest sengaja kosong (keputusan 2026-10-27, OWNER_ACTIONS 1.12), tetapi worker runtime tetap memakai pin bawaan 1.19.3 (PINNED_VERSION): drift darinya membuat worker.opencode FAILED sehingga CAN_RUN_WORKER BLOCKED. Karena OpenCode memperbarui dirinya sendiri, pemilik mematikan pembaruan otomatis di tiap mesin (OPENCODE_DISABLE_AUTOUPDATE=1). tool_schema_hash belum teramati (uji kontrak worker belum mencatatnya)."}
+    distribution: {kind: release_asset, url: null, digest: null, channel: null, note: "Rilis resmi github:anomalyco/opencode. approved_pin 1.19.3 (keputusan 2026-10-27, OWNER_ACTIONS 1.12) sama dengan pin bawaan worker runtime (PINNED_VERSION), jadi perilaku runtime tidak berubah; inventaris kini menampilkan pin yang disetujui manusia dan drift-nya. Drift dari pin membuat worker.opencode FAILED sehingga CAN_RUN_WORKER BLOCKED; karena itu pemilik mematikan pembaruan otomatis OpenCode di tiap mesin (OPENCODE_DISABLE_AUTOUPDATE=1). approved_digest kosong: belum ada digest yang direview. tool_schema_hash: none observed yet (uji kontrak worker belum mencatatnya)."}
     signature: {method: unknown, available: null, verified: false, verified_at: null, result: UNKNOWN, note: "Belum diperiksa apakah rilis ditandatangani/beratestasi."}
     ports: []
     config_refs: ["settings:opencode_binary"]

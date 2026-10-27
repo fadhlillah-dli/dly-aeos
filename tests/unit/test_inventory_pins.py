@@ -212,7 +212,11 @@ def test_manifest_accepts_per_platform_digests_and_per_os_signers():
 # Version drift that BLOCKS a capability: drift from the opencode pin makes worker.opencode FAILED
 # (OPENCODE_PIN_DRIFT), a critical check of CAN_RUN_WORKER. Other version/digest drift is only an inventory finding.
 VERSION_DRIFT_BLOCKS = {"opencode": ("worker.opencode", "CAN_RUN_WORKER")}
-SELF_UPDATING = ("claude-code", "opencode")  # update themselves: a version/digest pin drifts on every update
+# The worker runtime holds this pin with or without the manifest (opencode.PINNED_VERSION, its fallback when the
+# manifest cannot be read too): the manifest records exactly it, so the pin adds no new block and the runtime
+# behaves the same either way. A new version changes both in one reviewed PR.
+RUNTIME_HELD_PIN = {"opencode": "1.19.3"}
+SELF_UPDATING = ("claude-code",)  # updates itself: a version/digest pin drifts on every update
 HOST_VERSIONED = ("git", "nodejs-runtime", "python-runtime")  # OS/package-manager builds differ per platform
 RECORDED_PLATFORMS = frozenset({"darwin_arm64"})  # windows_amd64 / darwin_amd64: NOT_RECORDED until those machines
 OBSERVED_BAO = "sha256:50c3588e64271171cc2147bddeace8ec2b6742f94fd3fe53baa60f6d938cda0c"  # owner's M4, 2026-10-27
@@ -224,9 +228,14 @@ def _pin_policy_violations(data: dict) -> list[str]:
     for c in data["components"]:
         cid = c["component_id"]
         pinned = bool(c.get("approved_pin") or c.get("approved_digest"))
-        if pinned and cid in VERSION_DRIFT_BLOCKS:
+        if cid in RUNTIME_HELD_PIN:
             check_id, cap = VERSION_DRIFT_BLOCKS[cid]
-            out.append(f"{cid}: version/digest pin, but drift from it fails {check_id} and BLOCKS {cap}")
+            held = RUNTIME_HELD_PIN[cid]
+            if c.get("approved_pin") != held:
+                out.append(f"{cid}: approved_pin {c.get('approved_pin')!r} is not the runtime-held pin {held!r}; "
+                           f"drift from the pin fails {check_id} and BLOCKS {cap}, so the manifest records that pin")
+            if c.get("approved_digest"):
+                out.append(f"{cid}: approved_digest, but no {cid} digest has been reviewed on any platform")
         elif pinned and cid in SELF_UPDATING:
             out.append(f"{cid}: version/digest pin on a self-updating tool drifts on every routine update")
         elif pinned and cid in HOST_VERSIONED:
@@ -258,18 +267,20 @@ def test_the_rule_matches_the_capability_gates():
     assert "claude.binary" in RULES[Capability.CAN_PLAN_PERSONAL].required
 
 
-def test_opencode_keeps_its_runtime_default_pin_so_self_update_is_turned_off(monkeypatch, tmp_path):
-    """The rule above reads only the manifest, but the worker runtime holds a pin of its own: with no approved_pin,
-    resolve_pin() falls back to PINNED_VERSION 1.19.3 and opencode_status flags drift from it, which worker.opencode
-    turns into FAILED / OPENCODE_PIN_DRIFT (tests/unit/test_doctor_seams.py) and CAN_RUN_WORKER BLOCKED (master §38).
-    So "no manifest pin" does not keep a self-update from blocking; 1.12 records the built-in pin and tells the owner
-    to turn OpenCode self-update off (OPENCODE_DISABLE_AUTOUPDATE=1). Red if the docs drop either again."""
+def test_opencode_manifest_pin_is_the_runtime_pin_so_self_update_is_turned_off(monkeypatch, tmp_path):
+    """The worker runtime holds a pin of its own (PINNED_VERSION 1.19.3, also its fallback when the manifest cannot be
+    read), and opencode_status flags drift from it, which worker.opencode turns into FAILED / OPENCODE_PIN_DRIFT
+    (tests/unit/test_doctor_seams.py) and CAN_RUN_WORKER BLOCKED (master §38). The reviewed manifest records that same
+    pin, so resolve_pin() now names the human-approved manifest pin (§07) and the version is unchanged. Either way a
+    self-update blocks, so 1.12 tells the owner to turn OpenCode self-update off (OPENCODE_DISABLE_AUTOUPDATE=1), on
+    Windows too (section 5). Red if the pins part, or the docs drop the pin, the switch or the rationale again."""
     import subprocess
     from pathlib import Path
 
     from aeos.worker_runtime import opencode
 
-    assert opencode.resolve_pin() == {"version": "1.19.3", "source": opencode.PIN_SOURCE_DEFAULT}
+    assert RUNTIME_HELD_PIN["opencode"] == opencode.PINNED_VERSION
+    assert opencode.resolve_pin() == {"version": "1.19.3", "source": opencode.PIN_SOURCE_MANIFEST}
     fake = tmp_path / "opencode"
     monkeypatch.setattr(opencode, "resolve_binary", lambda configured=None: fake)
     monkeypatch.setattr(opencode.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "1.20.0\n", ""))
@@ -281,17 +292,23 @@ def test_opencode_keeps_its_runtime_default_pin_so_self_update_is_turned_off(mon
     root = Path(__file__).resolve().parents[2]
     doc = (root / "docs" / "OWNER_ACTIONS.md").read_text(encoding="utf-8")
     section = doc[doc.index("### 1.12 "):doc.index("### 1.13 ")]
+    windows = doc[doc.index("## 5. Windows notes"):]
     manifest_text = (root / "install-manifest" / "manifest.yaml").read_text(encoding="utf-8")
     readme = (root / "install-manifest" / "README.md").read_text(encoding="utf-8")
     for where, text in (("OWNER_ACTIONS 1.12", section), ("manifest.yaml", manifest_text), ("README", readme)):
-        assert "1.19.3" in text and "built-in" in text, where
+        assert "1.19.3" in text and "PINNED_VERSION" in text, where
+        assert "would change nothing" not in text and "add no protection" not in text, where  # the false rationale
+        assert "tool_schema_hash" in text and "none observed yet" in text, where
+        assert "schema hash has been observed" not in text, where  # one wording for the unset tool_schema_hash
     assert "OPENCODE_DISABLE_AUTOUPDATE=1" in section and "OPENCODE_DISABLE_AUTOUPDATE=1" in manifest_text
+    assert "setx OPENCODE_DISABLE_AUTOUPDATE 1" in windows
+    assert "[Environment]::SetEnvironmentVariable('OPENCODE_DISABLE_AUTOUPDATE','1','User')" in windows
 
 
 def test_the_reviewed_manifest_follows_the_1_12_pin_rule():
     """OWNER_ACTIONS 1.12, darwin_arm64 (2026-10-27): claude-code gets only the macOS publisher pin (a foreign- or
-    un-signed binary is BLOCKED; a version pin would drift on every self-update); opencode gets no version/digest pin
-    (its runtime default pin already BLOCKS CAN_RUN_WORKER on drift, see above); openbao gets its version (installed
+    un-signed binary is BLOCKED; a version pin would drift on every self-update); opencode gets exactly its runtime-held
+    version pin and no digest (drift from that pin already BLOCKS CAN_RUN_WORKER, see above); openbao gets its version (installed
     only by `aeos vault install`, never self-updating, drift is a finding, not a block) but no digest yet, because a
     digest pin makes every openbao proposal need a candidate digest the trusted acceptance suite does not supply; git,
     Node.js and Python stay unpinned (approved_pin has no per-platform form). Other platforms stay NOT_RECORDED."""
@@ -303,16 +320,20 @@ def test_the_reviewed_manifest_follows_the_1_12_pin_rule():
     assert data["reviewed_by"] == "Fadhlillah"
     assert inventory.approved_signer("claude-code", os_name="darwin") == "Q6L2SF6YDW"
     assert inventory.approved_signer("claude-code", os_name="windows") is None
+    assert inventory.approved_pin("claude-code") is None
     for cid in ("claude-code", "opencode"):
-        assert inventory.approved_pin(cid) is None, cid
         assert inventory.approved_digest(cid, platform="darwin_arm64")["status"] == "NOT_RECORDED", cid
+    assert inventory.approved_pin("opencode") == "1.19.3"
+    assert next(c for c in data["components"] if c["component_id"] == "opencode")["tool_schema_hash"] is None
     assert inventory.approved_pin("openbao") == "2.7.1"
     for platform in ("darwin_arm64", "windows_amd64", "darwin_amd64"):
         assert inventory.approved_digest("openbao", platform=platform)["status"] == "NOT_RECORDED", platform
 
 
 @pytest.mark.parametrize(("cid", "field", "value", "finding"), [
-    ("opencode", "approved_pin", "1.19.3", "drift from it fails worker.opencode and BLOCKS CAN_RUN_WORKER"),
+    ("opencode", "approved_pin", "1.20.0", "is not the runtime-held pin '1.19.3'"),
+    ("opencode", "approved_pin", None, "approved_pin None is not the runtime-held pin"),
+    ("opencode", "approved_digest", {"darwin_arm64": OBSERVED_BAO}, "no opencode digest has been reviewed"),
     ("claude-code", "approved_pin", "2.1.303", "self-updating tool drifts on every routine update"),
     ("git", "approved_pin", "2.50.1", "this tool's version differs per platform"),
     ("openbao", "approved_digest", {"darwin_arm64": OBSERVED_BAO, "windows_amd64": WIN},
@@ -341,3 +362,23 @@ def test_a_darwin_arm64_only_digest_is_allowed_by_the_rule():
     next(c for c in data["components"] if c["component_id"] == "openbao")["approved_digest"] = {
         "darwin_arm64": OBSERVED_BAO}
     assert _pin_policy_violations(data) == []
+
+
+def test_the_seeded_opencode_pin_shows_in_inventory_with_its_drift(seeded, monkeypatch):
+    """OWNER_ACTIONS 1.12 (item opencode): the reviewed pin reaches the inventory, so /tools shows MATCH or MISMATCH
+    and a resolved-version-mismatch finding instead of NO_PIN (before: approved_pin null in the manifest)."""
+    comp = seeded.get(ComponentReference, "opencode")
+    assert comp.approved_pin == "1.19.3", "the reviewed manifest pin is not seeded"
+    record_observation(seeded, component_id="opencode", dimension="installation", status="INSTALLED",
+                       observer="test", observed_version="1.19.3")
+    seeded.commit()
+    versions = views.component_detail(seeded, "opencode", domain="PERSONAL")["versions"]
+    assert (versions["status"], versions["approved_pin"]) == ("MATCH", "1.19.3")
+    assert not [i for i in drift_mod.compute_drift(seeded, evaluated={"opencode"}) if i.key == "version"]
+    record_observation(seeded, component_id="opencode", dimension="installation", status="INSTALLED",
+                       observer="test", observed_version="1.20.0")  # a self-update moved the host OpenCode
+    seeded.commit()
+    assert views.component_detail(seeded, "opencode", domain="PERSONAL")["versions"]["status"] == "MISMATCH"
+    found = [i for i in drift_mod.compute_drift(seeded, evaluated={"opencode"}) if i.key == "version"]
+    assert len(found) == 1 and found[0].detail == {**found[0].detail, "approved_pin": "1.19.3",
+                                                   "observed_version": "1.20.0"}
