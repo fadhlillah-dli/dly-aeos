@@ -58,7 +58,7 @@ def test_fail_closed_without_any_store(settings, memory_keyring):  # noqa: F811
     h = store_health(settings)
     assert h["status"] == "BLOCKED" and h["backend"] == "none"
     cmds = [r["command"] for r in h["remedies"]]
-    assert "aeos vault install --version <X.Y.Z>" in cmds and "aeos vault start" in cmds  # no manifest pin yet
+    assert "aeos vault install" in cmds and "aeos vault start" in cmds  # the manifest pins OpenBao (1.12)
 
 
 @pytest.mark.parametrize("override", [

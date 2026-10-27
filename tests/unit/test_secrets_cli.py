@@ -402,7 +402,7 @@ def test_manifest_pin_reads_the_reviewed_manifest(tmp_path):
     (tmp_path / "install-manifest" / "manifest.yaml").write_text(
         "components:\n  - component_id: openbao\n    approved_pin: null\n", encoding="utf-8")
     assert installer.manifest_pin(tmp_path) is None
-    assert installer.manifest_pin() is None  # the repository manifest has no approved pin yet (owner decision)
+    assert installer.manifest_pin() == "2.7.1"  # the repository manifest pin (OWNER_ACTIONS 1.12, 2026-10-27)
 
 
 def _manifest_digest(monkeypatch, pin: str | None, digest: str | None) -> None:
@@ -458,7 +458,8 @@ def test_manifest_digest_is_read_and_a_malformed_one_fails_closed(tmp_path):
                     encoding="utf-8")
     with pytest.raises(installer.InstallError):
         installer.manifest_digest(tmp_path)
-    assert installer.manifest_digest() is None  # the repository manifest has no approved digest yet (owner step)
+    # the repository manifest pins openbao's version but records no digest yet (OWNER_ACTIONS 1.12)
+    assert installer.manifest_digest() is None
 
 
 def test_install_remedies_never_suggest_a_command_the_cli_refuses(settings, monkeypatch):

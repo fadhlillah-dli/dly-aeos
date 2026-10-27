@@ -120,6 +120,26 @@ def _run(argv: list[str], *, timeout: float = 30.0) -> tuple[int, str, str]:
 
 
 _SIG_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+# The last result of every real check, definitive or not, for display only (the status view). The gate never reads it:
+# an undecided result is checked again on the next call, but the page still shows why the last check blocked.
+_SIG_LAST: dict[tuple[str, str], dict[str, Any]] = {}
+
+
+def last_signature(path: Path | None, fingerprint_value: str | None = None) -> dict[str, Any] | None:
+    """The cached definitive result, else the last undecided one of this process, else None (never checked)."""
+    if path is None:
+        return None
+    key = (str(path), fingerprint_value or "")
+    return _SIG_CACHE.get(key) or _SIG_LAST.get(key)
+
+
+def _definitive(result: dict[str, Any]) -> bool:
+    """A verdict the OS gave about the binary itself: INVALID, UNSIGNED, or VALID with the observed signer. Only these
+    are cached for the process: a transient UNKNOWN (codesign/PowerShell failed to run, timed out or gave no
+    recognised answer) or a VALID report without its signer is checked again on the next call, so one failed check
+    never BLOCKS a pinned publisher for the life of the process."""
+    status = result.get("status")
+    return status in ("INVALID", "UNSIGNED") or (status == "VALID" and bool(result.get("signer")))
 
 
 def publisher_signature(path: Path | None, *, fingerprint_value: str | None = None,
@@ -127,7 +147,7 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
     """§12 "unmodified official binary": the OS code-signature report of the located binary.
 
     Windows: ``Get-AuthenticodeSignature``; macOS: ``codesign --verify`` + ``codesign -dv`` (TeamIdentifier).
-    The result is reported (and cached per fingerprint), never assumed: VALID only when the OS verifies the
+    The result is reported (a definitive one cached per fingerprint, see ``_definitive``), never assumed: VALID only when the OS verifies the
     signature; INVALID/UNSIGNED/UNKNOWN otherwise. Whether the signer is Anthropic is shown as the observed
     signer - AEOS has no pinned publisher identity, so authenticity stays UNVERIFIED without it."""
     if path is None:
@@ -174,7 +194,9 @@ def publisher_signature(path: Path | None, *, fingerprint_value: str | None = No
     else:
         result["publisher_pin"] = "NONE (install-manifest has no approved pin; authenticity UNVERIFIED)"
     if run is None:
-        _SIG_CACHE[key] = result
+        _SIG_LAST[key] = result
+        if _definitive(result):
+            _SIG_CACHE[key] = result
     return result
 
 
@@ -198,8 +220,9 @@ def _codesign_status(rc: int, verify_err: str, detail: str) -> str:
 
 
 def invocation_signature(path: Path | None, fingerprint_value: str | None) -> dict[str, Any]:
-    """The OS signature report that gates a native invocation: checked once per binary fingerprint per process
-    (``publisher_signature`` caches it), so a swapped binary is checked again before it is used."""
+    """The OS signature report that gates a native invocation: a definitive report is checked once per binary
+    fingerprint per process (``publisher_signature`` caches it), so a swapped binary is checked again before it is
+    used, and a transient failure is retried on the next invocation."""
     return publisher_signature(path, fingerprint_value=fingerprint_value)
 
 
