@@ -63,6 +63,7 @@ def _samples() -> dict[str, tuple[str, str]]:
         "vault-hvb": ("hv" + "b." + _alnum(30), "OpenBao/Vault token"),
         "pem-block": (key + "\n" + _alnum(64) + "\n" + end, "private key"),
         "pem-header-only": (key + "\n" + _alnum(32), "private key"),
+        "pgp-armored": ("-----BEGIN " + "PGP PRIVATE " + "KEY BLOCK-----\n" + _alnum(64), "private key"),
         "unseal-key": ("Unseal " + "Key 1: " + _alnum(44, "Kd8/"), "OpenBao/Vault unseal key"),
     }
 

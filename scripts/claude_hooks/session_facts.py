@@ -8,7 +8,8 @@ interpreter (no project venv, no pytest, no xdist) while ``scripts/run_tests.sh`
 ``scripts/preflight.py --facts`` with it (LESSONS L10/L17: the facts stay owned by preflight.py; this file only chooses
 the interpreter):
 
-1. ``$AEOS_GATES_PYTHON`` when it names an existing executable file;
+1. ``$AEOS_GATES_PYTHON`` when it names an existing executable file (when it is set but does not, the first fact
+   line says so, because ``scripts/run_tests.sh`` and the gates stop on it);
 2. the ``.venv`` of this checkout, then the ``.venv`` of the main checkout (a linked worktree has none of its own;
    never link one into a worktree);
 3. the interpreter that runs this launcher (the facts then say plainly that it is not the project venv).
@@ -46,9 +47,22 @@ def interpreter(root: Path = ROOT) -> str:
     return sys.executable
 
 
+def override_problem() -> str | None:
+    """A fact line when ``$AEOS_GATES_PYTHON`` is set but is no executable file, else None."""
+    override = os.environ.get("AEOS_GATES_PYTHON")
+    if override and not (os.path.isfile(override) and os.access(override, os.X_OK)):
+        text = f"gates_python_override: INVALID ({override}): scripts/run_tests.sh and the gates stop on it"
+        return text.encode("ascii", "replace").decode("ascii")
+    return None
+
+
 def main(run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run, root: Path = ROOT) -> int:
     """Always 0."""
     with contextlib.suppress(Exception):  # fail-open on anything, including a timeout
+        problem = override_problem()
+        if problem:
+            sys.stdout.write(problem + "\n")
+            sys.stdout.flush()
         proc = run([interpreter(root), str(root / "scripts" / "preflight.py"), "--facts"], capture_output=True,
                    timeout=TIMEOUT_SECONDS, check=False, cwd=str(root), stdin=subprocess.DEVNULL)
         if proc.returncode == 0 and proc.stdout:

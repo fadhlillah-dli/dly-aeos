@@ -53,7 +53,7 @@ SKIPPED_PATTERN_PREFIXES = (r"(?:hvs|s|b)\.", r"(?<![A-Za-z0-9.])r\.", "-----BEG
 # (kind, pattern) for shapes the canonical module does not define yet.
 GAPS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("AWS access key id", re.compile(r"(?<![A-Za-z0-9])ASIA[A-Z2-7]{16}(?![A-Za-z0-9])")),
-    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----")),  # BLOCK: ASCII-armored PGP
 )
 
 # Kind of a matched token, from its own leading characters (detection is done by the patterns, not by this table).

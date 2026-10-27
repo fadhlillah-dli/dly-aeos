@@ -77,6 +77,23 @@ def test_main_runs_preflight_facts_with_the_venv_python_and_passes_its_output_th
     assert capfdbinary.readouterr().out == b"project_venv: yes (fake)\n"
 
 
+def test_bite_an_invalid_override_is_reported_first_and_the_venv_facts_still_follow(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfdbinary: pytest.CaptureFixture[bytes]) -> None:
+    py = _fake_venv(tmp_path)
+    monkeypatch.setenv("AEOS_GATES_PYTHON", str(tmp_path / "gone" / "python"))
+
+    def fake_run(argv: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        assert argv[0] == str(py)
+        return subprocess.CompletedProcess(argv, 0, b"project_venv: yes (fake)\n", b"")
+
+    assert launcher.main(fake_run, tmp_path) == 0
+    out = capfdbinary.readouterr().out.decode("ascii").splitlines()
+    assert out[0].startswith("gates_python_override: INVALID (") and "run_tests.sh and the gates stop on it" in out[0]
+    assert out[1:] == ["project_venv: yes (fake)"]
+    monkeypatch.delenv("AEOS_GATES_PYTHON")
+    assert launcher.override_problem() is None  # near miss: unset is not a problem
+
+
 @pytest.mark.parametrize("failure", ["raises", "timeout", "nonzero", "empty"])
 def test_every_failure_is_silent_exit_zero(
         failure: str, tmp_path: Path, capfdbinary: pytest.CaptureFixture[bytes]) -> None:

@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 20,
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude_hooks/session_facts.py\" || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude_hooks/secret_prompt_guard.py\" || true"
+          }
+        ]
+      }
+    ]
+  }
+}
