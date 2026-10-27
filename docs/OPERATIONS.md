@@ -39,6 +39,54 @@ MCI controls and evidence contracts (§34) are derived MCI content too: they go 
 only with an owner POLICY decision on `mci_pack_mapping/<pack>` bound to the hash shown at `/decisions`.
 Compliance is never claimed (NOT-PROVEN).
 
+## Environment variables
+
+Every `AEOS_*` variable that the code in `backend/` and `scripts/` reads. `Settings` is
+`backend/aeos/core/config.py`: it takes each variable here from the environment first, then from the same key
+(lower case, without the prefix) in `aeos.yaml`, then from its default. The names are listed, never a value:
+secrets are not configuration and never go in an environment variable of this list (OpenBao and the OS credential
+store only, §26). `tests/unit/test_env_contract.py` fails when the code reads a variable that has no row here, when a
+row names a reader that does not read it, and when a row is read by nothing.
+
+| Variable | Read by | Default | Purpose |
+|---|---|---|---|
+| `AEOS_CLAUDE_BINARY` | `Settings` | unset (the `claude` binary on `PATH`) | Path of the official `claude` binary; it wins over `PATH` |
+| `AEOS_COMMIT_AUTHOR_EMAIL` | `Settings` | unset | Fallback commit e-mail for the **github** identity only; `commit_identities` wins (see "Commit identity and no AI attribution") |
+| `AEOS_COMMIT_AUTHOR_NAME` | `Settings` | unset | Fallback commit name for the **github** identity only |
+| `AEOS_COMMIT_IDENTITIES` | `Settings` | unset | JSON `{"github": {"name", "email"}, "bitbucket": {...}}`, the commit identity per code host; only in local configuration, never committed |
+| `AEOS_CONFIG` | `backend/aeos/core/config.py` | `<config dir>/aeos.yaml` | Path of the non-secret YAML settings file |
+| `AEOS_CONFLUENCE_PROJECTS_PARENT_ID` | `Settings` | unset | Id of the parent page under which project pages are created (§04); an identifier, not a secret |
+| `AEOS_DATA_DIR` | `Settings`, `scripts/dev.ps1`, `scripts/dev.sh` | OS default (see "Data locations") | Data root; must be absolute and outside the checkout. The dev scripts set a separate dev profile when it is unset |
+| `AEOS_DEV_FRONTEND_PORT` | `Settings` | `5173` | Port of the Vite dev server whose origin is allowed in dev mode; the dev scripts set it |
+| `AEOS_DEV_MODE` | `Settings` | `false` | Dev mode: allow the Vite origin, enable API docs. `aeos serve --dev` sets it for its own process |
+| `AEOS_ENVIRONMENT` | `Settings` | `local` | Environment label shown in the Control Center header |
+| `AEOS_EXTRA_ALLOWED_ORIGINS` | `Settings` | empty (JSON list) | Extra allowed origins; only loopback `http` origins with a port are accepted |
+| `AEOS_GATES_PYTHON` | `scripts/git-hooks/pre-push`, `scripts/run_tests.sh` | unset (the `.venv` of the checkout or of the main checkout, then `python3`) | Python interpreter for the pre-push gates and `scripts/run_tests.sh`; it must be an existing executable file |
+| `AEOS_HOST` | `Settings` | `127.0.0.1` | Bind address; loopback only (`127.0.0.1`, `::1`, `localhost`), anything else refuses to start |
+| `AEOS_KEYRING_SERVICE` | `Settings`, `scripts/dev.ps1`, `scripts/dev.sh` | `dly-aeos` | OS credential store service name; the dev scripts use `dly-aeos-dev`, and `aeos serve --dev` refuses the default one |
+| `AEOS_LOGIN_LOCKOUT_SECONDS` | `Settings` | `300` | Seconds a login stays locked after too many failures |
+| `AEOS_LOGIN_MAX_FAILURES` | `Settings` | `5` | Failed logins before the lockout |
+| `AEOS_MAX_ARCHIVE_MEMBERS` | `Settings` | `2000` | Most members accepted in an uploaded archive |
+| `AEOS_MAX_UPLOAD_BYTES` | `Settings` | `26214400` (25 MiB) | Largest accepted upload |
+| `AEOS_MCI_SOURCE_PATH` | `Settings` | unset (`<data>/policy/canonical/<file>`) | Absolute path of the owner-supplied canonical MCI_V2 source; a path inside the repository is refused |
+| `AEOS_MMDC_BINARY` | `Settings`, `backend/aeos/docs_engine/visuals.py` | unset (`mmdc` on `PATH`) | Path of the optional mermaid-cli renderer; without it visuals stay "pending" |
+| `AEOS_OFFICE_EXTERNAL_WORKER_ALLOWED` | `Settings` | `false` | Declared setting; no code reads its value (OFFICE stays default deny until a recorded company authorisation, §23), so setting it authorises nothing |
+| `AEOS_OPENBAO_ADDR` | `Settings`, `scripts/component_status.py` | `http://127.0.0.1:8200` | Address of the OpenBao server |
+| `AEOS_OPENBAO_BINARY` | `Settings` | unset (found in `<data>/bin` or on `PATH`) | Path of the `bao` binary; an unusable path is authoritative and reported, never skipped |
+| `AEOS_OPENCODE_BINARY` | `Settings`, `backend/aeos/worker_runtime/opencode.py` | unset (`opencode` on `PATH`) | Path of the OpenCode executable |
+| `AEOS_OPENROUTER_FREE_DAILY_LIMIT` | `Settings` | `50` | Requests per UTC day for `:free` models; 1 to 1000 (1000 only after at least 10 credits were bought) |
+| `AEOS_OPENROUTER_FREE_RPM_LIMIT` | `Settings` | `20` | Requests per minute for `:free` models; 1 to 20 |
+| `AEOS_PLATFORM_REPO_SLUG` | `Settings` | `fadhlillah-dli/dly-aeos` | `owner/name` of this platform repository, used by the delivery checks and the research seed |
+| `AEOS_PORT` | `Settings` | `8787` | Port of the control plane. `aeos serve --port` sets it for its own process |
+| `AEOS_SECURE_COOKIES` | `Settings` | `false` | Mark session cookies `Secure`; off because `http://127.0.0.1` has no TLS |
+| `AEOS_SESSION_IDLE_MINUTES` | `Settings` | `120` | Minutes without activity before a session ends |
+| `AEOS_SESSION_TTL_HOURS` | `Settings` | `12` | Longest life of a session |
+| `AEOS_TEST_DEADLINE_MIN` | `scripts/run_tests.sh` | unset (no deadline) | Minutes after which `scripts/run_tests.sh` stops the run (exit 124); same as `--deadline` |
+
+Internal hand-offs are not listed: a variable that the code sets only for a child process of its own (the
+verifier's per-run seal inputs, or the path the Doctor hands to its own PowerShell child) is not a setting the
+owner can use. `tests/unit/test_env_contract.py` keeps the ones the code also reads as exemptions with a reason.
+
 ## Backup and restore
 
 | Command | What it does |

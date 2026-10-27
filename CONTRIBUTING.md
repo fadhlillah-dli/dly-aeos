@@ -182,7 +182,7 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   OS. These are small jobs on `ubuntu-latest` that wait for the static job and every backend job of their OS. They pass only
   when each of those jobs succeeded: a failed, skipped or cancelled job fails them. The other required
   checks are real jobs: `bootstrap [G2] (<os>)`, `frontend [G1,G3]` and
-  `browser e2e + a11y smoke [G3]`. The supply-chain report is `[NO-GATE]`. Keep these names when you
+  `browser e2e + a11y smoke [G3]`. The supply-chain report, `supply-chain report [NO-GATE] (SBOM, licences, vulnerabilities, SAST)`, is `[NO-GATE]`. Keep these names when you
   change the workflow; `tests/unit/test_ci_gates.py` checks them.
 - **Changelog check.** The job `browser e2e + a11y smoke [G3]` first runs
   `python scripts/changelog.py --check` (stdlib only, a few seconds).
