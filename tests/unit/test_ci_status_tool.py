@@ -559,15 +559,25 @@ def test_the_infra_verdict_is_in_the_docstring_and_the_exit_code_differs_from_re
 
 
 # ------------------------------------------------------------------------------------------------ base-moved hint
+RUN_CREATED = "2026-01-01T09:59:00Z"  # created_at of the workflow run: the original run, unchanged by re-runs
 RUN_START = "2026-01-01T10:00:00Z"
 OLD_BASE, NEW_BASE, MID_BASE = "c" * 40, "d" * 40, "e" * 40
 HINT_LINE = f"HINT: main moved since this run (approximate {OLD_BASE[:10]}..{NEW_BASE[:10]}); update the branch, do not re-run."
+RUNS = f"{BASE}/actions/runs"
 
 
-def _hint_files(conclusion, base_commits):
+def _workflow_run(created=RUN_CREATED, suite=None, **extra):
+    run = {"id": 900, "head_sha": SHA, "event": "pull_request", "created_at": created, "pull_requests": []}
+    if suite is not None:
+        run["check_suite_id"] = suite
+    return {**run, **extra}
+
+
+def _hint_files(conclusion, base_commits, workflow_runs=None):
     runs = [check(REQUIRED[0], conclusion=conclusion, started=RUN_START), check(REQUIRED[1], rid=2, started=RUN_START)]
+    wf = [_workflow_run()] if workflow_runs is None else workflow_runs
     # newest first, as the commits API lists them; the parent of the oldest returned commit is the base of the run
-    return {**files(runs), **pr_file(SHA), f"{BASE}/commits": base_commits}
+    return {**files(runs), **pr_file(SHA), f"{BASE}/commits": base_commits, RUNS: {"workflow_runs": wf}}
 
 
 def _commit(sha, parent):
@@ -626,38 +636,101 @@ def _since(gh):
     return [q.split("since=")[1].split("&")[0] for q in gh.queries if "/commits?sha=main" in q]
 
 
-def test_hint_uses_the_earliest_check_run_start_as_the_run_time():
+class _Timeline(_Spy):
+    """The commits API for real: lists only the commits whose time is after ``since`` (string compare of UTC times)."""
+
+    def __init__(self, files, landed):
+        super().__init__(files)
+        self.landed = landed  # newest first: (time, commit)
+
+    def __call__(self, args):
+        path = args[-1]
+        if "/commits?sha=main" in path:
+            self.queries.append(path)
+            since = path.split("since=")[1].split("&")[0]
+            return json.dumps([commit for when, commit in self.landed if when > since])
+        return super().__call__(args)
+
+
+def _rerun_files(workflow_runs=None):
+    """Run 1 at 10:00 (RUN_CREATED) went RED; a full re-run started its jobs at 12:00; the judged attempts are the
+    re-run's, the first attempt of every check is still listed under filter=all."""
+    runs = [check(REQUIRED[0], conclusion="failure", rid=1, started="2026-01-01T10:00:00Z"),
+            check(REQUIRED[1], rid=2, started="2026-01-01T10:00:00Z"),
+            check(REQUIRED[0], conclusion="failure", rid=11, started="2026-01-01T12:00:00Z"),
+            check(REQUIRED[1], rid=12, started="2026-01-01T12:00:00Z")]
+    wf = [_workflow_run("2026-01-01T10:00:00Z")] if workflow_runs is None else workflow_runs
+    return {**files(runs), **pr_file(SHA), RUNS: {"workflow_runs": wf}}
+
+
+def test_a_rerun_after_main_moved_still_gets_the_hint_because_the_window_starts_at_the_original_run():
+    # violating: base C at 10:00 -> run 1 RED -> main gets D at 11:00 -> full re-run at 12:00 (same GITHUB_SHA)
+    d_at_11 = ("2026-01-01T11:00:00Z", _commit(NEW_BASE, OLD_BASE))
+    gh = _Timeline(_rerun_files(), [d_at_11])
+    code, last, text = call(["--pr", "21"], gh)
+    lines = text.strip().splitlines()
+    assert (code, last) == (1, f"CI: RED {SHA}") and lines[-2] == HINT_LINE
+    assert _since(gh) == ["2026-01-01T10:00:00Z"]  # the creation of the original run, not the re-run's 12:00
+    # near-miss: the base commit predates the original run, main did not move since then -> no hint
+    quiet = _Timeline(_rerun_files(), [("2026-01-01T09:00:00Z", _commit(NEW_BASE, OLD_BASE))])
+    code, last, text = call(["--pr", "21"], quiet)
+    assert (code, last) == (1, f"CI: RED {SHA}") and "HINT" not in text
+    assert _since(quiet) == ["2026-01-01T10:00:00Z"]
+
+
+def test_hint_window_starts_at_the_workflow_run_created_at_not_at_a_check_run_start():
     gh = _Spy(_hint_files("failure", []))
-    runs = [check(REQUIRED[0], conclusion="failure", started="2026-01-01T12:00:00Z"),
-            check(REQUIRED[1], rid=2, started=RUN_START)]
+    call(["--pr", "21"], gh)
+    assert _since(gh) == [RUN_CREATED] and RUN_START not in "".join(gh.queries)
+    assert any("actions/runs?head_sha=" + SHA + "&event=pull_request" in q for q in gh.queries)
+
+
+def test_hint_takes_the_earliest_created_at_of_the_runs_that_produced_the_judged_checks():
+    # two workflow runs of the sha; the judged checks belong to check suite 7 only
+    wf = [_workflow_run("2026-01-01T08:00:00Z", suite=5), _workflow_run("2026-01-01T09:30:00Z", suite=7),
+          _workflow_run("2026-01-01T11:30:00Z", suite=7)]
+    gh = _Spy(_hint_files("failure", [], wf))
+    runs = [{**check(REQUIRED[0], conclusion="failure", started=RUN_START), "check_suite": {"id": 7}},
+            {**check(REQUIRED[1], rid=2, started=RUN_START), "check_suite": {"id": 7}}]
     gh.files[f"{BASE}/commits/{SHA}/check-runs"] = {"total_count": 2, "check_runs": runs}
     call(["--pr", "21"], gh)
-    assert _since(gh) == [RUN_START]
-
-
-def test_hint_time_comes_from_the_latest_attempts_only_not_from_an_old_attempt():
-    # violating: the first attempt of a check started long before the judged re-run; it must not set the time
-    gh = _Spy(_hint_files("failure", []))
-    runs = [check(REQUIRED[0], conclusion="success", rid=1, started="2026-01-01T09:00:00Z"),
-            check(REQUIRED[0], conclusion="failure", rid=3, started="2026-01-01T12:00:00Z"),
-            check(REQUIRED[1], rid=2, started=RUN_START)]
-    gh.files[f"{BASE}/commits/{SHA}/check-runs"] = {"total_count": 3, "check_runs": runs}
-    code, last, _ = call(["--pr", "21"], gh)
-    assert (code, last) == (1, f"CI: RED {SHA}")
-    assert _since(gh) == [RUN_START] and "2026-01-01T09:00:00Z" not in "".join(gh.queries)
-    # near-miss: when the only run of every check is the judged one, its own start is used
-    gh2 = _Spy(_hint_files("failure", []))
-    gh2.files[f"{BASE}/commits/{SHA}/check-runs"] = {"total_count": 2, "check_runs": [
-        check(REQUIRED[0], conclusion="failure", rid=3, started="2026-01-01T12:00:00Z"),
-        check(REQUIRED[1], rid=2, started="2026-01-01T12:30:00Z")]}
+    assert _since(gh) == ["2026-01-01T09:30:00Z"]
+    # near-miss: the check runs name no suite, so every listed pull_request run of the sha counts
+    gh2 = _Spy(_hint_files("failure", [], wf))
     call(["--pr", "21"], gh2)
-    assert _since(gh2) == ["2026-01-01T12:00:00Z"]
+    assert _since(gh2) == ["2026-01-01T08:00:00Z"]
 
 
-def test_hint_says_approximate_and_ignores_a_workflow_run_pull_requests_list():
-    # the live repository returns pull_requests == [] on every run, so the line must not claim an exact range
-    moved = [_commit(NEW_BASE, MID_BASE), _commit(MID_BASE, OLD_BASE)]
-    code, last, text = call(["--pr", "21"], FakeGh(_hint_files("failure", moved)))
+@pytest.mark.parametrize("workflow_runs, fail", [
+    (None, {RUNS: "gh api actions/runs failed: HTTP 500"}),  # the call fails
+    ([], None),  # no run listed
+    ([_workflow_run(created=None)], None),  # a run without created_at
+])
+def test_without_the_run_object_the_earliest_attempt_start_is_used_and_the_hint_says_so(workflow_runs, fail):
+    moved = [_commit(NEW_BASE, OLD_BASE)]
+    gh = _Spy(_rerun_files(workflow_runs if workflow_runs is not None else []))
+    gh.fail = fail or {}
+    gh.files[f"{BASE}/commits"] = moved
+    code, last, text = call(["--pr", "21"], gh)
     hint = [ln for ln in text.splitlines() if ln.startswith("HINT:")]
-    assert len(hint) == 1 and "(approximate " in hint[0] and hint[0].endswith("do not re-run.")
-    assert text.strip().splitlines()[-1] == last
+    assert (code, last) == (1, f"CI: RED {SHA}") and len(hint) == 1
+    assert "from the first check run start because the workflow run is unavailable" in hint[0]
+    assert hint[0].endswith("do not re-run.")
+    assert any("check-runs?filter=all" in q for q in gh.queries)
+    assert _since(gh) == ["2026-01-01T10:00:00Z"]  # the first attempt, not the judged re-run at 12:00
+
+
+def test_the_normal_hint_does_not_carry_the_fallback_wording():
+    moved = [_commit(NEW_BASE, OLD_BASE)]
+    code, last, text = call(["--pr", "21"], FakeGh(_hint_files("failure", moved)))
+    assert HINT_LINE in text.splitlines() and "unavailable" not in text
+
+
+def test_hint_ignores_base_sha_of_the_workflow_run_pull_requests_list_and_prints_the_heuristic_range():
+    # the open-PR pull_requests[] is unmeasured: even when it names a base.sha, the printed range is the heuristic's
+    listed_base = "f" * 40
+    wf = [_workflow_run(pull_requests=[{"number": 21, "base": {"ref": "main", "sha": listed_base}}])]
+    moved = [_commit(NEW_BASE, MID_BASE), _commit(MID_BASE, OLD_BASE)]
+    code, last, text = call(["--pr", "21"], FakeGh(_hint_files("failure", moved, wf)))
+    assert (code, last) == (1, f"CI: RED {SHA}")
+    assert HINT_LINE in text.splitlines() and listed_base[:10] not in text

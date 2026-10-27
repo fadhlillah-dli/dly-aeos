@@ -302,11 +302,14 @@ to merge stays the owner's (see "Rules for every change"); this is how it is car
    `GITHUB_REF` is `refs/pull/<n>/merge` ([Events that trigger workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows)).
    So a re-run measures the old base again. NOT-PROVEN: that the checkout step of this workflow then really
    builds the old test merge commit was not run against the live service. When a RED pull request exists and the base
-   branch got commits after the run started, `ci_status.py --pr` prints
+   branch got commits after the original workflow run was created, `ci_status.py --pr` prints
    `HINT: main moved since this run (approximate <old>..<new>); update the branch, do not re-run.` before the verdict.
-   The range is approximate: the workflow run object does not name its base (`pull_requests[]` is empty for every
-   run of this repository), so the run start is taken from the earliest latest-attempt check run of the head, and a
-   base commit that landed between the trigger and the first job start is not seen.
+   The window starts at the workflow run's `created_at`, which a re-run does not change (the start of the latest
+   attempt is later and would miss a base commit that landed between the first run and the re-run); only when the run
+   object is unavailable the earliest check run start is used, and the line says so. The range is approximate: the
+   workflow run object's `pull_requests[]` was empty for runs of closed pull requests, and for an open pull request it
+   is unmeasured here (NOT-PROVEN), so `base.sha` is not used and the time heuristic stands in; a base commit that
+   landed between the trigger and the run creation is not seen.
 6. **One concern per pull request, merged the same day it is green.** Every open pull request costs a full run. At
    the time of writing one run starts about 16 jobs, 7 of them on macOS, and GitHub Free allows 20 concurrent jobs
    and 5 concurrent macOS jobs ([Actions limits](https://docs.github.com/en/actions/reference/limits)), so a
