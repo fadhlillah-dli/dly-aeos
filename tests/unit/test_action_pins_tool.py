@@ -82,11 +82,29 @@ def rows(out):
 
 # ------------------------------------------------------------------ the four statuses
 def test_a_pin_behind_is_an_update_row_with_the_tag(tmp_path):
-    files = {"repos/acme/tool/releases": [release("v1.2.0", "2026-09-01T10:00:00Z"), release("v1.0.0", "2026-01-01T00:00:00Z")]}
+    files = {"repos/acme/tool/releases": [release("v1.2.0", "2026-09-01T10:00:00Z"), release("v1.0.0", "2026-01-01T00:00:00Z")],
+             **tag_files("acme/tool", "v1.2.0", NEW)}
     rc, out, err = report(workflows(tmp_path, uses()), files)
     assert rc == 0
-    assert "UPDATE v1.2.0" in rows(out)["acme/tool"]
+    assert rows(out)["acme/tool"].endswith(f"{NEW}  UPDATE v1.2.0")  # the full sha of the new tag, to paste
     assert out.splitlines()[-1] == "ACTION_PINS: 1 pins, 1 updates available" and err == ""
+
+
+def test_an_update_resolves_the_commit_of_the_new_tag_including_an_annotated_one(tmp_path):
+    files = {"repos/acme/tool/releases": [release("v1.2.0", "2026-09-01T10:00:00Z")],
+             "repos/acme/tool/git/ref/tags/v1.2.0": {"object": {"type": "tag", "sha": "c" * 40}},
+             f"repos/acme/tool/git/tags/{'c' * 40}": {"object": {"type": "commit", "sha": NEW}}}
+    _, out, _ = report(workflows(tmp_path, uses()), files, "--json")
+    (pin,) = json.loads(out)["pins"]
+    assert pin["newest_sha"] == NEW and pin["status_text"] == "UPDATE v1.2.0" and pin["reason"] == ""
+
+
+def test_an_update_whose_tag_commit_cannot_be_found_stays_an_update_and_says_so(tmp_path):
+    files = {"repos/acme/tool/releases": [release("v1.2.0", "2026-09-01T10:00:00Z")]}  # no git/ref/tags/v1.2.0
+    _, out, _ = report(workflows(tmp_path, uses()), files, "--json")
+    (pin,) = json.loads(out)["pins"]
+    assert pin["status"] == "UPDATE" and pin["newest_sha"] == ""
+    assert pin["status_text"].startswith("UPDATE v1.2.0 (commit of v1.2.0 not found: ")
 
 
 def test_a_release_younger_than_14_days_is_ignored(tmp_path):
@@ -99,7 +117,8 @@ def test_a_release_younger_than_14_days_is_ignored(tmp_path):
 
 
 def test_the_14_day_edge_is_inclusive_and_drafts_and_prereleases_never_count(tmp_path):
-    files = {"repos/acme/tool/releases": [release("v1.3.0", "2026-10-13T23:59:59Z"),  # exactly 14 days: eligible
+    files = {**tag_files("acme/tool", "v1.3.0", NEW),
+             "repos/acme/tool/releases": [release("v1.3.0", "2026-10-13T23:59:59Z"),  # exactly 14 days: eligible
                                          release("v1.4.0", "2026-09-01T00:00:00Z", draft=True),
                                          release("v1.5.0", "2026-09-01T00:00:00Z", prerelease=True),
                                          release("nightly", "2026-09-01T00:00:00Z")]}
@@ -162,6 +181,7 @@ def test_a_pinned_binary_is_judged_by_version_and_shows_the_sha256(tmp_path):
     _, out, _ = report(workflows(tmp_path, text), files)
     line = rows(out)["rhysd/actionlint"]
     assert "v1.7.12" in line and SUM[:10] in line and "UPDATE v1.7.13" in line and "NODE" not in out  # no SHA256: not a pin
+    assert line.split()[-3:] == ["-", "UPDATE", "v1.7.13"]  # a binary has no commit column: its new SHA-256 is in the checksums file
     current = {"repos/rhysd/actionlint/releases": [release("v1.7.12", "2026-06-01T00:00:00Z")]}
     _, out2, _ = report(workflows(tmp_path, text), current)
     assert rows(out2)["rhysd/actionlint"].endswith("CURRENT")
@@ -180,12 +200,12 @@ def test_one_row_per_distinct_pin_with_its_files(tmp_path):
 
 
 def test_json_is_the_only_thing_on_stdout_and_the_verdict_line_goes_to_stderr(tmp_path):
-    files = {"repos/acme/tool/releases": [release("v1.2.0", "2026-09-01T00:00:00Z")]}
+    files = {"repos/acme/tool/releases": [release("v1.2.0", "2026-09-01T00:00:00Z")], **tag_files("acme/tool", "v1.2.0", NEW)}
     rc, out, err = report(workflows(tmp_path, uses()), files, "--json")
     data = json.loads(out)
     assert rc == 0 and data["summary"] == {"pins": 1, "updates": 1}
     (pin,) = data["pins"]
-    assert pin["status"] == "UPDATE" and pin["newest_tag"] == "v1.2.0" and pin["status_text"] == "UPDATE v1.2.0"
+    assert pin["status"] == "UPDATE" and pin["newest_tag"] == "v1.2.0" and pin["newest_sha"] == NEW and pin["status_text"] == "UPDATE v1.2.0"
     assert err == "ACTION_PINS: 1 pins, 1 updates available\n"
 
 

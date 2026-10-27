@@ -11,11 +11,14 @@ It reads every ``uses: owner/repo@<40-hex sha> # vX`` of ``.github/workflows/*.y
 ``BINARY_REPOS``). For each distinct pin it asks GitHub (the ``gh`` CLI, through ``scripts/ci_status.py``'s access code)
 for the newest release that was published at least 14 days before today and for the commit of that release's tag.
 
-One row per distinct pin: name, pinned tag, pinned sha (short; the SHA-256 for a binary), newest eligible tag, status.
+One row per distinct pin: name, pinned tag, pinned sha (short; the SHA-256 for a binary), newest eligible tag, the
+full commit sha of that newest tag (40 hex, ready to paste into the workflow; also JSON ``newest_sha``; ``-`` for a
+binary, whose new SHA-256 comes from the release's checksums file, and for a pin that is not an update), status.
 
   CURRENT          the pin is the newest eligible release (or newer: a release younger than 14 days is ignored), and
                    for an action the commit of the pinned tag is the pinned sha
-  UPDATE <tag>     a newer eligible release exists
+  UPDATE <tag>     a newer eligible release exists; for an action its tag commit is looked up too (when that lookup
+                   fails the row stays UPDATE and says so in brackets, with an empty newest_sha)
   UNKNOWN (why)    no version comment, a ref that is not a full sha, no eligible release, the tag does not point at the
                    pinned sha, or the GitHub lookup failed (the reason is printed)
 
@@ -83,10 +86,11 @@ class Row:
     status: str
     reason: str = ""
     files: list[str] = field(default_factory=list)
+    newest_sha: str = ""  # full commit sha of newest_tag (an UPDATE of an action only; "" otherwise)
 
     def status_text(self) -> str:
         if self.status == UPDATE:
-            return f"UPDATE {self.newest_tag}"
+            return f"UPDATE {self.newest_tag}" + (f" ({self.reason})" if self.reason else "")
         if self.status == UNKNOWN:
             return f"UNKNOWN ({self.reason})"
         return self.status
@@ -228,6 +232,11 @@ def judge(pin: Pin, lookups: Lookups, today: date) -> Row:
         pinned_v, newest_v = parse_version(pin.tag), parse_version(newest)
         if pinned_v is not None and newest_v is not None and newest_v > pinned_v:
             row.status = UPDATE
+            if pin.kind == "action":  # the owner pastes this sha into the workflow: never resolve it by hand
+                try:
+                    row.newest_sha = lookups.tag_commit(pin.repo, newest)
+                except ci_status.CiError as exc:
+                    row.reason = f"commit of {newest} not found: {str(exc)[:120]}"
             return row
         if pin.kind == "action":
             tag_sha = lookups.tag_commit(pin.repo, pin.tag)
@@ -251,10 +260,10 @@ def summary_line(rows: Sequence[Row]) -> str:
 
 
 def render_table(rows: Sequence[Row]) -> list[str]:
-    head = ("NAME", "PINNED", "SHA", "NEWEST", "STATUS")
-    body = [(r.name, r.pinned_tag, r.pinned_sha, r.newest_tag, r.status_text()) for r in rows]
-    widths = [max(len(x[i]) for x in [head, *body]) for i in range(4)]
-    return ["  ".join([*(x.ljust(w) for x, w in zip(row[:4], widths, strict=True)), row[4]]).rstrip()
+    head = ("NAME", "PINNED", "SHA", "NEWEST", "NEWEST SHA", "STATUS")
+    body = [(r.name, r.pinned_tag, r.pinned_sha, r.newest_tag, r.newest_sha or "-", r.status_text()) for r in rows]
+    widths = [max(len(x[i]) for x in [head, *body]) for i in range(5)]
+    return ["  ".join([*(x.ljust(w) for x, w in zip(row[:5], widths, strict=True)), row[5]]).rstrip()
             for row in [head, *body]]
 
 
