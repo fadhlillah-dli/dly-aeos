@@ -1145,3 +1145,30 @@ def test_probe_rows_are_marked_in_the_broker_request_list_and_carry_their_usage(
     assert all(i["run_id"] is None for i in probes)
     assert {i["kind"] for i in items} == {"FEASIBILITY_PROBE"}  # no worker call was made in this test
     assert next(i for i in probes if i["outcome"] == "OK")["prompt_tokens"] == 11
+
+
+def _registry(db, settings):
+    from aeos.doctor.checks.model_route import route_registry
+    from aeos.doctor.model import CheckContext
+    from tests.unit.test_inventory_fakes import base_runner
+
+    return route_registry(CheckContext(settings=settings, session=db, runner=base_runner(), repo=settings.data_dir,
+                                       now=utcnow()))
+
+
+def test_bite_a_public_only_free_worker_trial_makes_the_registry_ready_for_public_work(routes, settings, monkeypatch):
+    """Decision C promised that a WORKER TRIAL serves PUBLIC tasks at once, but the readiness check (and so
+    CAN_RUN_WORKER and agent-enable) judged eligibility for INTERNAL only, so a PUBLIC-only route never counted
+    (owner's Mac, 2026-10-27: '1 route APPROVED/TRIAL tetapi tidak ada yang eligible ... INTERNAL not allowed')."""
+    install_fakes(monkeypatch)
+    before = _registry(routes, settings)
+    assert before.status == "MISSING" and before.error_code == "NO_APPROVED_WORKER_ROUTE"  # near miss: nothing yet
+    _worker(routes)
+    out = _registry(routes, settings)
+    assert out.status == "CONFIGURED", out.summary
+    assert "PERSONAL/PUBLIC saja (keputusan C)" in out.summary and FREE in out.summary
+    assert "tugas INTERNAL menunggu" in out.summary
+    assert out.evidence["eligible_by_class"] == {"PUBLIC": [FREE]}
+    assert out.evidence["evaluated_for"]["data_classifications"] == ["INTERNAL", "PUBLIC"]
+    # routing itself is unchanged: an INTERNAL task still never reaches the free route
+    assert FREE not in eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL").eligible
