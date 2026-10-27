@@ -234,3 +234,58 @@ bootstrap (169 s).
 
 **Open items (record only).** 26 tests marked `integration` or `network` run in no CI job (the shards select `not
 integration and not network`; the verifier and browser jobs run only their named files). This gap predates this change.
+
+## Amendment 2026-10-27 — merge policy: merge commit only, two more required checks, settings as code
+
+**Decision** (owner, 2026-10-27: "Keputusan yang lain lakukan rekomendasi yang terbaik yang tidak mengganggu atau
+menghambat operasional (harus efesien dan efektif) tapi sesuai dengan praktek industri profesional"; the delegating
+session made these choices under it):
+
+1. **A merge commit is the only merge method.** The repository allows merge commits and neither squash nor rebase
+   merges; the ruleset on `main` lists `allowed_merge_methods: ["merge"]`. Reason: `scripts/ci_status.py --after-merge`
+   finds the CI run of the merge commit by its SHA, and release provenance (`scripts/release_check.py`, the tag on the
+   merge commit) names that commit. A squash or rebase merge writes a new commit whose SHA no pull request run has
+   tested, so the check after the merge could not say which commit it judged. The merge commit title and message
+   settings stay as they were (title from the merge message, body from the pull request title).
+2. **`commit subjects [G1]` and `pr title [G1]` are required checks** next to the eight existing ones. Before, a
+   subject or title that broke the Conventional Commits or no-attribution rule failed only a non-required job and the
+   verdict of `ci_status.py --required-only` stayed GREEN. With a merge commit the pull request title becomes the body
+   of the commit on `main`, so it needs the same gate as a commit subject. Both are `ubuntu-latest` jobs with a
+   5-minute timeout, so they add no macOS slot.
+3. **Branches are not required to be up to date (`strict_required_status_checks_policy` stays false).** Strict mode
+   would re-run the 7 macOS jobs of every open pull request after each merge, and GitHub Free has 5 concurrent macOS
+   jobs, so a few open pull requests would queue for hours (CONTRIBUTING.md "Merging", step 6). The risk strict mode
+   removes, two individually green pull requests that break `main` together, is covered after the fact:
+   `ci_status.py --after-merge` judges the merge commit and, while `main` is RED, nothing else is merged.
+4. **Head branches are deleted on merge** (`delete_branch_on_merge`): merged branches are not reused, and the local
+   `worktree.py list` already reports merged and pushed state from the remote-tracking refs.
+5. **Release tags `v*` are protected** by a tag ruleset: no deletion, no non-fast-forward update (a force push) and
+   no update at all (GitHub's `update` rule, "Restrict updates"). A published release tag is what `release_check.py`
+   and the provenance record point at; moving it silently would break both. The `update` rule is needed because
+   `git tag -f v1.2.0 <descendant> && git push -f` onto a descendant is a fast-forward, which `non_fast_forward` alone
+   allows. Creating a tag stays allowed, so a release only ever creates a tag. (Review 2026-10-27: the first version of
+   this amendment left `update` out.)
+6. **Settings as code.** `.github/repository-settings.json`, `.github/rulesets/main.json` and
+   `.github/rulesets/release-tags.json` hold the settings; `scripts/github_settings.py --check` compares them with the
+   live repository (read-only, `GITHUB_SETTINGS: OK|DRIFT|ERROR`) and `--apply --yes` writes them. It never runs in CI:
+   changing the merge gate needs the owner's login, and a workflow with that permission would be a way around the
+   gate. A change to the policy is therefore a reviewed pull request first and an `--apply` second.
+   `tests/unit/test_ci_gates.py` keeps `REQUIRED_CHECKS` equal to the contexts of `main.json` and each name equal to
+   exactly one job of one workflow, so the ruleset cannot require a check that no job reports.
+
+7. **`pr title [G1]` reports on `main` too.** `ci_status.py --after-merge` reads its required contexts from the live
+   ruleset and finds the check runs of the merge commit. `pr-title.yml` therefore also runs on a push to `main`, where
+   its job is skipped (`if: github.event_name == 'pull_request'`): a skipped check run counts as OK, exactly as for
+   `commit subjects [G1]` in `ci.yml`. Without it the context would never exist on a merge commit and the post-merge
+   verification, which replaces strict mode (item 3), could never turn GREEN. `tests/unit/test_ci_gates.py` requires
+   every required check to be reported by a workflow that runs on a push to `main`.
+
+**Unchanged:** no bypass actors, no required approvals (a single owner), pull request required, no force push or
+deletion of `main`, the status checks are those of the GitHub Actions app.
+
+**Evidence and NOT-PROVEN.** E2 on macOS arm64: unit tests with a fake API prove the comparison and the apply order
+(PATCH, PUT, POST) against fixture state; a ruleset that allows squash and a missing required context are each DRIFT
+naming `allowed_merge_methods` or the context, the identical state is OK, `--apply` without `--yes` sends nothing.
+NOT-PROVEN: that GitHub accepts the written files, in particular the `update` rule without parameters in a tag ruleset (the live `--apply` has not run), that the skipped `pr title [G1]` run appears on the first merge commit after this change, that the live state then reads
+back as OK without a server-side default making a permanent DRIFT, that the merge button then offers only a merge
+commit, and everything on Windows and macOS Intel until CI has run the tests there.
