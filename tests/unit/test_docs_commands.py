@@ -1,4 +1,4 @@
-"""Command drift: what the docs say about commands and flags must exist in the code.
+r"""Command drift: what the docs say about commands and flags must exist in the code.
 
 Scanned: CONTRIBUTING.md, README.md, docs/OPERATIONS.md, docs/OWNER_ACTIONS.md and docs/runbooks/*.md, fenced
 code blocks (every line is a command, a trailing backslash joins lines) and inline code spans.
@@ -7,7 +7,9 @@ code blocks (every line is a command, a trailing backslash joins lines) and inli
   that script. The flags are read with ``ast`` (``add_argument("--x")`` calls and ``"--x" in argv`` comparisons);
   a script is never imported or run.
 * ``aeos <command> [<subcommand>]`` must be a registered CLI command, resolved by the shared resolver in
-  ``tests/unit/docs_contract_support.py`` (the one the VS Code task test uses).
+  ``tests/unit/docs_contract_support.py`` (the one the VS Code task test uses). The program may be the launcher
+  (``./aeos``, ``.\aeos.ps1``, ``aeos.cmd``), the venv entry point (``.venv/bin/aeos``, ``.\.venv\Scripts\aeos.exe``)
+  or ``python -m aeos``.
 * ``EXEMPT`` lists a documented token that is deliberately not real, with the reason. An entry that matches
   nothing fails as stale, so the table cannot rot.
 
@@ -41,7 +43,12 @@ COMMENT = re.compile(r"\s#(?:\s.*)?$")
 CONTINUATION = ("\\", "`", "^")
 SPLIT = re.compile(r"&&|\|\||;|\|")
 SCRIPT = re.compile(r"^(?:\.[\\/])?scripts[\\/]([A-Za-z0-9_]+)\.py$")
-AEOS = re.compile(r"^(?:\.[\\/])?aeos(?:\.ps1|\.cmd)?$")
+# The launcher in the checkout root (``./aeos``, ``.\aeos.ps1``, ``aeos.cmd``), or the venv entry point
+# (``.\.venv\Scripts\aeos.exe``, ``.venv/bin/aeos``, ``/abs/path/bin/aeos``): a path whose directory is bin or Scripts.
+AEOS = re.compile(r"^(?:(?:\.[\\/])?aeos(?:\.ps1|\.cmd)?|(?:.*[\\/])?(?:bin|Scripts)[\\/]aeos(?:\.exe)?)$",
+                  re.IGNORECASE)
+# ``python -m aeos <command>``: the interpreter may be a path (``.venv/bin/python``, ``py``, ``python3.12``).
+PYTHON = re.compile(r"^(?:.*[\\/])?(?:python[\d.]*|py)(?:\.exe)?$", re.IGNORECASE)
 FLAG = re.compile(r"(?<![\w-])--[A-Za-z][\w-]*")
 ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
@@ -122,6 +129,26 @@ def _unquote(token: str) -> str:
     return token.strip("\"'")
 
 
+def aeos_args_start(tokens: list[tuple[int, str]]) -> int | None:
+    """Index of the first token after the ``aeos`` program when the command runs the CLI, else None.
+
+    Forms: the launchers and venv entry points matched by ``AEOS``, and ``python -m aeos`` (single-dash flags such
+    as ``-u`` may sit between the interpreter and ``-m``).
+    """
+    if not tokens:
+        return None
+    first = _unquote(tokens[0][1])
+    if AEOS.match(first):
+        return 1
+    if PYTHON.match(first):
+        i = 1
+        while i < len(tokens) and _unquote(tokens[i][1]).startswith("-") and _unquote(tokens[i][1]) != "-m":
+            i += 1
+        if i + 1 < len(tokens) and _unquote(tokens[i][1]) == "-m" and _unquote(tokens[i + 1][1]) == "aeos":
+            return i + 2
+    return None
+
+
 def scan(docs: Mapping[str, str], scripts_dir: Path, commands: set[str]) -> list[Finding]:
     """Every drift in ``docs`` (relative path -> markdown text) against the scripts and the CLI registry."""
     findings: list[Finding] = []
@@ -131,9 +158,10 @@ def scan(docs: Mapping[str, str], scripts_dir: Path, commands: set[str]) -> list
                 tokens = [(m.start() + offset, m.group()) for m in re.finditer(r"\S+", piece)]
                 while tokens and ENV_ASSIGN.match(tokens[0][1]):
                     tokens.pop(0)
-                if tokens and AEOS.match(_unquote(tokens[0][1])):
+                start = aeos_args_start(tokens)
+                if start is not None:
                     words = []
-                    for _, tok in tokens[1:]:
+                    for _, tok in tokens[start:]:
                         if not WORD.match(tok):
                             break
                         words.append(tok)
@@ -191,13 +219,14 @@ def test_docs_commands_flags_and_cli_exist():
 def test_docs_actually_contain_commands_to_check():
     """Guards the scanner itself: it must keep finding script flags and aeos commands in the real docs."""
     docs = _real_docs()
-    scripts = aeos_cmds = flags = 0
+    scripts = aeos_cmds = venv_cmds = flags = 0
     for doc, text in docs.items():
         for cmd in code_commands(text):
             scripts += len(re.findall(r"scripts/[A-Za-z0-9_]+\.py", cmd.text))
             flags += bool(re.search(r"scripts/[A-Za-z0-9_]+\.py[^|;&]*--[a-z]", cmd.text))
             aeos_cmds += bool(re.match(r"^(\./|\.\\)?aeos(\.ps1|\.cmd)? [a-z]", cmd.text))
-    assert scripts >= 5 and flags >= 3 and aeos_cmds >= 5, (scripts, flags, aeos_cmds)
+            venv_cmds += bool(re.search(r"(?:bin|Scripts)[\\/]aeos(?:\.exe)? [a-z]", cmd.text))
+    assert scripts >= 5 and flags >= 3 and aeos_cmds >= 5 and venv_cmds >= 2, (scripts, flags, aeos_cmds, venv_cmds)
 
 
 # --- bite tests: a violating fixture is red, a near miss is green ---------------------------------------------------
@@ -245,6 +274,30 @@ def test_bite_unknown_aeos_command_is_red_and_near_misses_are_green():
     assert len(sub) == 1 and "aeos admin nonsense" in sub[0]
     green = ("`aeos doctor`, `aeos admin create`, `aeos serve --dev`, `aeos.yaml`, `aeos <cmd>`, `./aeos`, "
              "`aeos admin <sub>`, `aeos serve [--release auto\\|active]`\n```\n.\\aeos.ps1 doctor\n```\n")
+    assert _bad(green) == []
+
+
+@pytest.mark.parametrize("command", [
+    r".\.venv\Scripts\aeos.exe no-such-cmd",
+    ".venv/bin/aeos no-such-cmd",
+    "python -m aeos no-such-cmd",
+    ".venv/bin/python -m aeos no-such-cmd",
+    "py -m aeos no-such-cmd",
+    "python -u -m aeos no-such-cmd",
+    r"gh auth token | .\.venv\Scripts\aeos.exe no-such-cmd --stdin",
+    "AEOS_X=1 .venv/bin/aeos admin nonsense",
+])
+def test_bite_venv_entry_point_and_python_m_forms_are_resolved_too(command):
+    problems = _bad(f"`{command}`\n")
+    assert len(problems) == 1 and "docs/x.md:1:" in problems[0], (command, problems)
+    assert "no-such-cmd" in problems[0] or "admin nonsense" in problems[0]
+
+
+def test_near_miss_venv_entry_point_and_python_m_with_real_commands_are_green():
+    green = (r"`.\.venv\Scripts\aeos.exe doctor`, `.venv/bin/aeos admin create`, `python -m aeos serve --dev`, "
+             r"`.venv/bin/python -m aeos doctor`, `gh auth token | .\.venv\Scripts\aeos.exe serve --stdin`, "
+             "and not the CLI: `python -m pytest no-such-cmd`, `python scripts/changelog.py --check`, "
+             "`cd backend/aeos`, `backend/aeos no-such-cmd`, `docs/bin/aeosx no-such-cmd`\n")
     assert _bad(green) == []
 
 

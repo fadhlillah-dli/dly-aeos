@@ -205,17 +205,37 @@ def _ast_rule(name: str, tree: ast.AST) -> bool:
     return False
 
 
-def _module_rule(name: str, text: str, tree: ast.AST) -> bool:
-    """A test that loads the script as a module and calls ``main([... "--check"])``: it names the script and passes
-    a literal ``"--check"`` argument."""
-    if not re.search(rf"\b{re.escape(name)}\b", text):
+def _module_rule(name: str, tree: ast.AST) -> bool:
+    """A test that loads the script as a module and calls ``main([... "--check"])``.
+
+    Both halves are read from the code (a comment or docstring does not count): (1) the file loads the script, that
+    is a string literal ``<name>.py`` (a path such as ``ROOT / "scripts" / "<name>.py"``) or an ``import <name>``;
+    (2) a call of a function named ``main`` takes a list or tuple holding a literal ``"--check"`` element. Any other
+    call or list with ``--check`` (``ruff format --check``) is not the script's."""
+    def loads_script(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return node.value == f"{name}.py"
+        if isinstance(node, ast.Import):
+            return any(a.name.split(".")[-1] == name for a in node.names)
+        if isinstance(node, ast.ImportFrom):
+            return (node.module or "").split(".")[-1] == name
+        return False
+
+    loads = any(loads_script(node) for node in ast.walk(tree))
+    if not loads:
         return False
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and any(isinstance(a, ast.Constant) and a.value == CHECK for a in node.args):
-            return True
-        if isinstance(node, (ast.List, ast.Tuple)) and any(isinstance(e, ast.Constant) and e.value == CHECK
-                                                           for e in node.elts):
-            return True
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not ((isinstance(func, ast.Name) and func.id == "main") or (isinstance(func, ast.Attribute)
+                                                                       and func.attr == "main")):
+            continue
+        args = [*node.args, *(k.value for k in node.keywords)]
+        for arg in args:
+            if isinstance(arg, (ast.List, ast.Tuple)) and any(isinstance(e, ast.Constant) and e.value == CHECK
+                                                              for e in arg.elts):
+                return True
     return False
 
 
@@ -239,7 +259,7 @@ def _callers(root: Path, name: str) -> list[str]:
         if name not in text:
             continue
         tree = ast.parse(text, filename=rel)
-        if _text_rule(name, text) or _ast_rule(name, tree) or _module_rule(name, text, tree):
+        if _text_rule(name, text) or _ast_rule(name, tree) or _module_rule(name, tree):
             found.append(rel)
     return found
 
@@ -316,12 +336,30 @@ def test_near_miss_each_kind_of_caller_makes_it_green(tmp_path):
         "gates": {"gates": 'GATE = ("python", "scripts/orphan.py", "--check")\n'},
         "test subprocess": {"test": "import sys\nfrom pathlib import Path\nR = Path('.')\n"
                                     "args = [sys.executable, str(R / 'scripts' / 'orphan.py'), '--check']\n"},
-        "test module": {"test": "def test_x(orphan):\n    # drives scripts/orphan.py in process\n"
-                                "    assert orphan.main(['--check']) == 0\n"},
+        "test module": {"test": "import importlib.util\nfrom pathlib import Path\n"
+                                "spec = importlib.util.spec_from_file_location('o', Path('.') / 'scripts' / 'orphan.py')\n"
+                                "def test_x(orphan):\n    assert orphan.main(['--check']) == 0\n"},
+        "test imported module": {"test": "import orphan\ndef test_x():\n    assert orphan.main(['x', '--check']) == 0\n"},
     }
     for label, kwargs in cases.items():
         root = _repo(tmp_path / label.replace(" ", "_"), **kwargs)
         assert reachability_problems(root, {}) == [], label
+
+
+def test_bite_a_comment_and_an_unrelated_check_literal_do_not_count_as_a_caller(tmp_path):
+    """The reviewed hole: the script name only in a comment, plus ``ruff format --check`` in some other call."""
+    cases = {
+        "comment plus ruff": "# orphan helper is documented elsewhere\nimport subprocess\n"
+                             "subprocess.run(['ruff', 'format', '--check', '.'])\n",
+        "name in a docstring": '"""orphan.py is described here."""\ndef test_x(ci):\n    ci.main(["--check"])\n',
+        "loaded but check passed to another call": "from pathlib import Path\nP = Path('scripts') / 'orphan.py'\n"
+                                                   "import subprocess\nsubprocess.run('ruff', '--check')\n",
+        "loaded but main has no check": "from pathlib import Path\nP = Path('scripts') / 'orphan.py'\n"
+                                        "def test_x(m):\n    m.main(['--dry-run'])\n    other = ['--check']\n",
+    }
+    for label, test in cases.items():
+        problems = reachability_problems(_repo(tmp_path / label.replace(" ", "_"), test=test), {})
+        assert len(problems) == 1 and "scripts/orphan.py" in problems[0], (label, problems)
 
 
 def test_exemptions_need_a_reason_and_must_match_something(tmp_path):

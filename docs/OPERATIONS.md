@@ -50,6 +50,8 @@ row names a reader that does not read it, and when a row is read by nothing.
 
 | Variable | Read by | Default | Purpose |
 |---|---|---|---|
+| `AEOS_CANDIDATE_BUILD` | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a candidate build. If it is set and non-empty, human-only operations (controller promotion, live restore, release acceptance exception) are refused (`refuse_worker_context`, §09, §40). A worker or candidate build carries it; the owner never sets it |
+| `AEOS_CAPABILITY_TOKEN` | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a process that holds a worker capability token (the name is listed, never a value). If it is set and non-empty, human-only operations (controller promotion, live restore, release acceptance exception) are refused (`refuse_worker_context`, §09, §40). A worker or candidate build carries it; the owner never sets it |
 | `AEOS_CLAUDE_BINARY` | `Settings` | unset (the `claude` binary on `PATH`) | Path of the official `claude` binary; it wins over `PATH` |
 | `AEOS_COMMIT_AUTHOR_EMAIL` | `Settings` | unset | Fallback commit e-mail for the **github** identity only; `commit_identities` wins (see "Commit identity and no AI attribution") |
 | `AEOS_COMMIT_AUTHOR_NAME` | `Settings` | unset | Fallback commit name for the **github** identity only |
@@ -78,10 +80,17 @@ row names a reader that does not read it, and when a row is read by nothing.
 | `AEOS_OPENROUTER_FREE_RPM_LIMIT` | `Settings` | `20` | Requests per minute for `:free` models; 1 to 20 |
 | `AEOS_PLATFORM_REPO_SLUG` | `Settings` | `fadhlillah-dli/dly-aeos` | `owner/name` of this platform repository, used by the delivery checks and the research seed |
 | `AEOS_PORT` | `Settings` | `8787` | Port of the control plane. `aeos serve --port` sets it for its own process |
+| `AEOS_RUN_ID` | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a worker run; the worker runtime also writes it as the run marker of every child it starts. If it is set and non-empty, human-only operations (controller promotion, live restore, release acceptance exception) are refused (`refuse_worker_context`, §09, §40). A worker or candidate build carries it; the owner never sets it |
+| `AEOS_SANDBOX` | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present inside a worker sandbox. If it is set and non-empty, human-only operations (controller promotion, live restore, release acceptance exception) are refused (`refuse_worker_context`, §09, §40). A worker or candidate build carries it; the owner never sets it |
 | `AEOS_SECURE_COOKIES` | `Settings` | `false` | Mark session cookies `Secure`; off because `http://127.0.0.1` has no TLS |
 | `AEOS_SESSION_IDLE_MINUTES` | `Settings` | `120` | Minutes without activity before a session ends |
 | `AEOS_SESSION_TTL_HOURS` | `Settings` | `12` | Longest life of a session |
+| `AEOS_TASK_ID` | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a process working on a task. If it is set and non-empty, human-only operations (controller promotion, live restore, release acceptance exception) are refused (`refuse_worker_context`, §09, §40). A worker or candidate build carries it; the owner never sets it |
 | `AEOS_TEST_DEADLINE_MIN` | `scripts/run_tests.sh` | unset (no deadline) | Minutes after which `scripts/run_tests.sh` stops the run (exit 124); same as `--deadline` |
+| `AEOS_WORKER_RUN_ID` | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a worker run. If it is set and non-empty, human-only operations (controller promotion, live restore, release acceptance exception) are refused (`refuse_worker_context`, §09, §40). A worker or candidate build carries it; the owner never sets it |
+
+The six worker-context markers (`AEOS_CANDIDATE_BUILD`, `AEOS_CAPABILITY_TOKEN`, `AEOS_RUN_ID`, `AEOS_SANDBOX`,
+`AEOS_TASK_ID`, `AEOS_WORKER_RUN_ID`) are read as a guard, not as settings: the owner never sets them.
 
 Internal hand-offs are not listed: a variable that the code sets only for a child process of its own (the
 verifier's per-run seal inputs, or the path the Doctor hands to its own PowerShell child) is not a setting the

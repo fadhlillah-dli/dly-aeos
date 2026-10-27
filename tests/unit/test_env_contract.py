@@ -13,10 +13,12 @@ Derived from the code (no import, no execution), with evidence per name:
 Every name read must have a row in the "Environment variables" table of ``docs/OPERATIONS.md`` (name, read by,
 default, purpose) whose "read by" cell names each reader (``Settings`` or the file path), or an entry in ``EXEMPT``
 with a reason. A row that nothing reads and an exemption that matches nothing fail as stale. Names only: a value
-is never documented here. Writes (``os.environ["X"] = ...``, an ``AEOS_`` key of an ``env`` dict) are collected as
-evidence but do not need a row: a variable that is only written is a hand-off to a child process, and is
-documented only if some reader (``Settings``) takes it from the owner too. Markers that other processes read
-through ``psutil`` (for example ``AEOS_RUN_ID``) are not environment reads of this process and are out of scope.
+is never documented here. A key that is a loop variable over a module-level tuple of names
+(``[k for k in WORKER_CONTEXT_ENV if os.environ.get(k)]``) reads every name of the tuple. Writes
+(``os.environ["X"] = ...``, an ``AEOS_`` key of an ``env`` dict) are collected as evidence but do not need a row: a
+variable that is only written is a hand-off to a child process, and is documented only if some reader
+(``Settings``) takes it from the owner too. A marker that this process only writes into a child's environment
+needs no row either, even when another process reads it through ``psutil``.
 """
 
 from __future__ import annotations
@@ -78,44 +80,74 @@ def _is_environ(node: ast.AST) -> bool:
                                                                            and node.id == "environ")
 
 
-def _python_usage(tree: ast.AST, label: str, usage: Usage) -> None:
-    consts = {t.id: n.value.value for n in getattr(tree, "body", []) if isinstance(n, ast.Assign)
-              and isinstance(n.value, ast.Constant) and isinstance(n.value.value, str)
-              for t in n.targets if isinstance(t, ast.Name)}
+def _str_seq(node: ast.AST | None) -> list[str] | None:
+    """The strings of a literal tuple / list / set of string constants, else None."""
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)) and node.elts and all(
+            isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts):
+        return [str(e.value) for e in node.elts if isinstance(e, ast.Constant)]
+    return None
 
-    def key(node: ast.AST | None) -> str | None:
+
+def _python_usage(tree: ast.AST, label: str, usage: Usage) -> None:
+    # module-level NAME = "AEOS_X" (one name) and NAMES = ("AEOS_X", "AEOS_Y") (a sequence of names)
+    consts: dict[str, list[str]] = {}
+    for n in getattr(tree, "body", []):
+        if isinstance(n, ast.Assign):
+            if isinstance(n.value, ast.Constant) and isinstance(n.value.value, str):
+                values: list[str] | None = [n.value.value]
+            else:
+                values = _str_seq(n.value)
+            if values is not None:
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        consts[t.id] = values
+    # loop variables: ``for k in NAMES`` and ``[... for k in NAMES ...]`` read every name of the sequence. A loop
+    # variable belongs to the function (or module) that holds the loop, so two functions may reuse ``k``.
+    scope_of: dict[ast.AST, ast.AST] = {}
+    loops: dict[tuple[ast.AST, str], list[str]] = {}
+
+    def assign_scopes(node: ast.AST, scope: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            scope_of[child] = scope
+            assign_scopes(child, child if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+                          else scope)
+
+    assign_scopes(tree, tree)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and isinstance(node.target, ast.Name):
+            seq = _str_seq(node.iter) or (consts.get(node.iter.id) if isinstance(node.iter, ast.Name) else None)
+            if seq:
+                loops.setdefault((scope_of.get(node, tree), node.target.id), []).extend(seq)
+
+    def keys(node: ast.AST | None) -> list[str]:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+            return [node.value]
         if isinstance(node, ast.Name):
-            return consts.get(node.id)
-        return None
+            return [*consts.get(node.id, []), *loops.get((scope_of.get(node, tree), node.id), [])]
+        return []
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Subscript) and _is_environ(node.value):
-            name = key(node.slice)
-            if name:
+            for name in keys(node.slice):
                 (usage.read if isinstance(node.ctx, ast.Load) else usage.write)(name, label)
         elif isinstance(node, ast.Call) and node.args:
             func = node.func
-            name = key(node.args[0])
-            if not name:
-                continue
             environ_call = (isinstance(func, ast.Attribute) and _is_environ(func.value)
                             and func.attr in {"get", "pop", "setdefault"})
             getenv_call = (isinstance(func, ast.Attribute) and func.attr == "getenv") or (
                 isinstance(func, ast.Name) and func.id == "getenv")
             if environ_call or getenv_call:
-                usage.read(name, label)
+                for name in keys(node.args[0]):
+                    usage.read(name, label)
         elif isinstance(node, ast.Compare) and any(isinstance(op, (ast.In, ast.NotIn)) for op in node.ops):
             if any(_is_environ(c) for c in node.comparators):
-                name = key(node.left)
-                if name:
+                for name in keys(node.left):
                     usage.read(name, label)
         elif isinstance(node, ast.Dict):
             for k in node.keys:
-                name = key(k)
-                if name and NAME.fullmatch(name):
-                    usage.write(name, label)
+                for name in keys(k):
+                    if NAME.fullmatch(name):
+                        usage.write(name, label)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "$env:" in node.value:
             for m in PS_ENV.finditer(node.value):
                 usage.read(m.group(1).upper(), label)
@@ -367,3 +399,44 @@ def test_shell_and_powershell_reads_but_not_assignments_or_comments(tmp_path):
     }
     usage = collect(_tree(tmp_path, shell=shell))
     assert set(usage.reads) == {"AEOS_BRACED", "AEOS_PLAIN", "AEOS_PS_READ"}, usage.reads
+
+
+MARKERS = ('import os\nMARKERS = ("AEOS_MARK_ONE", "AEOS_MARK_TWO")\n'
+           'def guard():\n    return [k for k in MARKERS if os.environ.get(k)]\n')
+ROWS_MARKERS = ("| `AEOS_MARK_ONE` | `backend/aeos/x.py` | unset | one |\n"
+                "| `AEOS_MARK_TWO` | `backend/aeos/x.py` | unset | two |\n")
+
+
+def test_bite_a_loop_variable_over_a_module_tuple_reads_every_name(tmp_path):
+    """The reviewed hole: ``[k for k in WORKER_CONTEXT_ENV if os.environ.get(k)]`` read six names the collector missed."""
+    red = problems(_tree(tmp_path / "red", MARKERS), {})
+    assert len(red) == 2 and "AEOS_MARK_ONE" in red[0] and "AEOS_MARK_TWO" in red[1], red
+    assert problems(_tree(tmp_path / "green", MARKERS, ROWS_MARKERS), {}) == []
+    one_row = problems(_tree(tmp_path / "one", MARKERS, ROWS_MARKERS.splitlines(keepends=True)[0]), {})
+    assert len(one_row) == 1 and "AEOS_MARK_TWO" in one_row[0]
+
+
+def test_every_loop_form_over_a_tuple_or_literal_sequence_is_found(tmp_path):
+    py = ('import os\nNAMES = ["AEOS_LIST_A", "AEOS_LIST_B"]\n'
+          'for key in NAMES:\n    os.environ.get(key)\n'
+          'for name in ("AEOS_LITERAL_A",):\n    os.getenv(name)\n'
+          'x = {n: os.environ[n] for n in ("AEOS_DICT_A",)}\n'
+          'y = [n for n in NAMES if n in os.environ]\n')
+    assert set(collect(_tree(tmp_path, py)).reads) == {"AEOS_LIST_A", "AEOS_LIST_B", "AEOS_LITERAL_A", "AEOS_DICT_A"}
+
+
+def test_near_miss_loops_over_non_aeos_or_unresolvable_sequences_and_writes_need_no_row(tmp_path):
+    py = ('import os\nOTHER = ("HOME", "PATH")\n'
+          'def a():\n    for k in OTHER:\n        os.environ.get(k)\n'
+          'def b():\n    for k in dynamic():\n        os.environ.get(k)\n'
+          'def c():\n    for k in ("AEOS_ONLY_WRITTEN_LOOP",):\n        os.environ[k] = "1"\n'
+          'def d(k):\n    return os.environ.get(k)\n')
+    assert problems(_tree(tmp_path, py), {}) == []
+
+
+def test_the_worker_context_markers_are_collected_from_the_real_code():
+    markers = {"AEOS_RUN_ID", "AEOS_WORKER_RUN_ID", "AEOS_TASK_ID", "AEOS_CAPABILITY_TOKEN", "AEOS_SANDBOX",
+               "AEOS_CANDIDATE_BUILD"}
+    reads = collect(ROOT).reads
+    assert markers <= set(reads)
+    assert all("backend/aeos/operations/_util.py" in reads[m] for m in markers)
