@@ -4,20 +4,27 @@ Also the CI shard option ``--shard K/N`` (see the section at the end of this fil
 
 from __future__ import annotations
 
+import errno
 import hashlib
+import ipaddress
 import json
 import math
 import os
 import re
+import socket
 import sqlite3
 import statistics
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+import keyring
 import pytest
 from fastapi.testclient import TestClient
+from keyring.backend import KeyringBackend
+from keyring.errors import PasswordDeleteError
 from sqlalchemy.orm import Session
 
 from aeos.core import config as config_mod
@@ -245,6 +252,158 @@ def secrets_memory() -> Iterator[object]:
     set_provider_override(p)
     yield p
     set_provider_override(None)
+
+
+# ------------------------------------------------------------------ hermetic secret stores (LESSONS L20)
+# On the owner's Mac a real OpenBao listens on loopback and its AppRole login lives in the macOS Keychain, so a test
+# that resolved a secret used the owner's real GitHub token against the live API (CI has neither and stayed green).
+
+
+class HermeticKeyring(KeyringBackend):
+    """The OS keyring every test sees: in memory and empty, like a fresh CI runner's credential store. Not
+    named fail/null, so the product treats it as an available store (as it does Windows Credential Manager)."""
+
+    priority = 0.5  # type: ignore[assignment]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.store: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service: str, username: str) -> str | None:
+        return self.store.get((service, username))
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.store[(service, username)] = password
+
+    def delete_password(self, service: str, username: str) -> None:
+        if self.store.pop((service, username), None) is None:
+            raise PasswordDeleteError("not in the test keyring")
+
+
+def _is_loopback(host: object) -> bool:
+    text = str(host).strip("[]").split("%", 1)[0].lower()
+    if text == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped.is_loopback or ip.ipv4_mapped.is_unspecified
+    return ip.is_loopback or ip.is_unspecified
+
+
+def real_vault_ports() -> frozenset[int]:
+    """Loopback ports a real OpenBao of this machine can listen on: the default ``openbao_addr``, the
+    ``AEOS_OPENBAO_ADDR`` variable and the host's aeos.yaml, read when the session starts (before the ``settings``
+    fixture isolates them). Only loopback counts: the product refuses any other vault address."""
+    addrs = [str(config_mod.Settings.model_fields["openbao_addr"].default), os.environ.get("AEOS_OPENBAO_ADDR", "")]
+    try:
+        addrs.append(config_mod.Settings().openbao_addr)
+    except Exception:  # noqa: BLE001 - an unreadable host config adds no address; the default stays blocked
+        pass
+    ports: set[int] = set()
+    for addr in addrs:
+        parts = urlsplit(addr)
+        if parts.hostname and _is_loopback(parts.hostname):
+            ports.add(parts.port or (443 if parts.scheme == "https" else 80))
+    return frozenset(ports)
+
+
+class SecretGuard:
+    """Makes the real secret stores unreachable from the test process (AGENTS.md invariant 12, LESSONS L20).
+
+    Blocks: (a) the real OS keyring (macOS Keychain, Windows Credential Manager, Secret Service), replaced by an
+    empty ``HermeticKeyring``, so the AppRole login of the owner's vault is never found; (b) a real OpenBao: a
+    socket connect to a loopback address on one of ``vault_ports`` is refused as on a machine without a vault (this
+    covers httpx, urllib and asyncio, which all end in ``socket.connect``); (c) the provider's process cache (an
+    OpenBao client and token from before the guard). Default result: ``get_secret`` raises
+    ``Blocked(SECRET_STORE_UNAVAILABLE)``, the CI behaviour.
+
+    Out of scope, with the reason: GITHUB_TOKEN/GH_TOKEN, the gh CLI and netrc (the product never reads a credential
+    from them: secrets come only from the provider, and httpx 0.28 applies netrc only with an explicit
+    ``NetRCAuth``); git credential helpers (the broker and the verifier run git with ``credential.helper=``
+    reset); child processes (the containment probe reads a fixed probe name, never a stored value; the UI smoke
+    server gets its own free vault port and a random keyring service).
+
+    Opting in: ``secrets_memory`` (or ``set_provider_override``) supplies values; a test that needs keyring contents
+    sets them on the active keyring or installs its own backend (``keyring.set_keyring``); a fake vault runs on a
+    free port or behind respx/MockTransport, neither of which opens a socket to a guarded port."""
+
+    def __init__(self, vault_ports: frozenset[int]) -> None:
+        self.vault_ports = vault_ports
+        self.keyring = HermeticKeyring()
+        self._saved: tuple[Any, Any, Any] | None = None
+
+    def refuses(self, address: object) -> bool:
+        if not isinstance(address, tuple) or len(address) < 2:
+            return False
+        try:
+            port = int(address[1])
+        except (TypeError, ValueError):
+            return False
+        return port in self.vault_ports and _is_loopback(address[0])
+
+    def install(self) -> None:
+        if self._saved is not None:
+            return
+        guard, connect, connect_ex = self, socket.socket.connect, socket.socket.connect_ex
+
+        def guarded_connect(sock: socket.socket, address: Any) -> None:
+            if guard.refuses(address):
+                raise ConnectionRefusedError(errno.ECONNREFUSED, f"tests never reach a real OpenBao (port {address[1]})")
+            connect(sock, address)
+
+        def guarded_connect_ex(sock: socket.socket, address: Any) -> int:
+            return errno.ECONNREFUSED if guard.refuses(address) else connect_ex(sock, address)
+
+        self._saved = (keyring.get_keyring(), connect, connect_ex)
+        keyring.set_keyring(self.keyring)
+        socket.socket.connect = guarded_connect  # type: ignore[method-assign,assignment]
+        socket.socket.connect_ex = guarded_connect_ex  # type: ignore[method-assign,assignment]
+        _reset_secret_provider_cache()
+
+    def uninstall(self) -> None:
+        if self._saved is None:
+            return
+        previous, connect, connect_ex = self._saved
+        self._saved = None
+        socket.socket.connect = connect  # type: ignore[method-assign]
+        socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
+        keyring.set_keyring(previous)
+        _reset_secret_provider_cache()
+
+
+def _reset_secret_provider_cache() -> None:
+    from aeos.secrets.provider import reset_provider_cache
+
+    reset_provider_cache()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _hermetic_secret_stores() -> Iterator[SecretGuard]:
+    """The SecretGuard is active for the whole session, before any module- or test-scoped fixture runs."""
+    guard = SecretGuard(real_vault_ports())
+    guard.install()
+    try:
+        yield guard
+    finally:
+        guard.uninstall()
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_secrets_per_test(_hermetic_secret_stores: SecretGuard) -> Iterator[HermeticKeyring]:
+    """Each test starts with an empty keyring, no provider override and no cached vault client or token; a keyring
+    backend the test installed is replaced again afterwards."""
+    from aeos.secrets.provider import set_provider_override
+
+    kr = _hermetic_secret_stores.keyring = HermeticKeyring()
+    keyring.set_keyring(kr)
+    set_provider_override(None)
+    _reset_secret_provider_cache()
+    yield kr
+    keyring.set_keyring(kr)
+    _reset_secret_provider_cache()
 
 
 def make_app(settings: config_mod.Settings, include: list[str] | None = None):

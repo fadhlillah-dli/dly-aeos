@@ -522,13 +522,15 @@ def test_memory_cap_stops_the_worker(settings, setup, monkeypatch):
     """§21 'batas waktu/resource' / §25 'process/resource/time cap' on the process sandbox."""
     monkeypatch.setattr(executor, "USAGE_CHECK_SECONDS", 0.2)  # sample the tree more often; the cap is unchanged
     make, _ = setup
-    run_id, task_id = make("hog", task={"limits": {"timeout_seconds": 60, "max_memory_mb": 80}})
-    t0 = time.monotonic()
+    # L15/L19: at load average ~25 this run took 62.6 s, so a 60 s task timeout raced the cap. The timeout is now far
+    # above any load, so only the memory cap can stop the worker. No wall-time bound: the hog exits by itself after
+    # about 140 s, so a cap that never fires shows up as a wrong stop_reason, not as a hang.
+    run_id, task_id = make("hog", task={"limits": {"timeout_seconds": 3600, "max_memory_mb": 80}})
     res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
-    assert time.monotonic() - t0 < 50
     assert res["stop_reason"] == "RESOURCE_LIMIT" and run.outcome_code == "RESOURCE_LIMIT", res
     assert run.usage_summary["resource_peak"]["rss_bytes"] > 0 and run.caps["resource_limits"]["max_memory_mb"] == 80
+    assert run.caps["timeout_seconds_effective"] == 3600  # the timeout could not have stopped this run
     assert not processes.is_alive(run.pid, run.pid_create_time)
 
 

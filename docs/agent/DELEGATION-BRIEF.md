@@ -54,8 +54,12 @@ RULES (lesson ids in brackets)
 15. Single owner [L17]. This prompt names the one owner (module, script and branch) of every tool the
     task touches: OWNERS: <tool -> owner>. Extend the owner's tool; never build a second checker beside
     it. A tool with no named owner is a question to the delegating session, not a license to build.
-16. Machine load [L19]. At most 2 full-suite runs at once on the owner's Mac. Time or compare speed only
-    on a quiet machine (load average below the core count) and write the load average next to the numbers.
+16. Machine load [L19]. One full suite at a time with -n logical on the owner's Mac; a second concurrent
+    suite only with -n at most half the logical CPUs. Record the load average with any timing.
+17. Hermetic secrets [L20]. Tests never reach the owner's real secret stores: the SecretGuard in
+    tests/conftest.py hides the OS keyring and a real OpenBao from every test; a test that needs a secret
+    installs a fake (secrets_memory, its own keyring, a vault on a free port). Never query the real vault,
+    OpenBao, Keychain or keyring to check anything; all proof is by tests with fakes.
 
 REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results
 (violating fixture red, near-miss fixture green), NOT-PROVEN items.
