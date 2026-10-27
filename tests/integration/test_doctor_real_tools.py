@@ -30,7 +30,8 @@ def test_real_host_runtime_and_repository_checks(settings, db):
 
 
 @pytest.mark.skipif(shutil.which("claude") is None, reason="official Claude Code not installed")
-def test_real_claude_binary_and_native_auth_probe(settings, db):
+def test_real_claude_binary_and_native_auth_probe(settings, db, real_claude_cli):
+    """Reads the owner's real Claude Code login (OS credential store): owner opt-in only (real_claude_cli)."""
     report = run_doctor(settings, db, groups=["CLAUDE_NATIVE"], runner=SystemProbeRunner())
     by_id = {r.check_id: r for r in report.results}
     assert by_id["claude.binary"].status == "VERIFIED"

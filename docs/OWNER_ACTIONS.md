@@ -1048,7 +1048,7 @@ The `main` ruleset is CONFIGURED ([ADR-0115](decisions/ADR-0115-public-repositor
   then `./aeos delivery capabilities --record`.
 * **Option 2.** Add `aeos-probe/**` to the ruleset's branch targets. Store a low-privilege token with
   `./aeos secrets set <ref>`, then run
-  `DLY_AEOS_LIVE_BYPASS_REPO=<your-login>/dly-aeos DLY_AEOS_LIVE_BYPASS_BRANCH=aeos-probe/<name> DLY_AEOS_LIVE_BYPASS_TOKEN_REF=<ref> .venv/bin/python -m pytest tests/acceptance/test_delivery.py::test_provider_enforces_human_only_merge_on_the_real_repository -q`.
+  `DLY_AEOS_REAL_SECRETS=1 DLY_AEOS_LIVE_BYPASS_REPO=<your-login>/dly-aeos DLY_AEOS_LIVE_BYPASS_BRANCH=aeos-probe/<name> DLY_AEOS_LIVE_BYPASS_TOKEN_REF=<ref> .venv/bin/python -m pytest tests/acceptance/test_delivery.py::test_provider_enforces_human_only_merge_on_the_real_repository -q`.
 
 Optional fork check: allow fork PR workflows with no write token and no secrets. From a second account, open a
 fork PR that prints only env-var names, keep the run URL and close it unmerged. Hand the run URL to the builder.

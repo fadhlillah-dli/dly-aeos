@@ -318,7 +318,8 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
 * **Provider enforcement test (M4):** after your own bypass attempt (or the opt-in live test
   `tests/acceptance/test_delivery.py::test_provider_enforces_human_only_merge_on_the_real_repository`
   with `DLY_AEOS_LIVE_BYPASS_REPO`, `DLY_AEOS_LIVE_BYPASS_BRANCH=aeos-probe/<name>`,
-  `DLY_AEOS_LIVE_BYPASS_TOKEN_REF`), `aeos delivery enforcement --repo <owner/name> --branch <branch>` reads
+  `DLY_AEOS_LIVE_BYPASS_TOKEN_REF`, plus `DLY_AEOS_REAL_SECRETS=1` so the test may read that token from your vault;
+  without it the test is skipped), `aeos delivery enforcement --repo <owner/name> --branch <branch>` reads
   GitHub's rule suites (token needs `Administration: read`) and records PROVIDER_ENFORCEMENT_TEST evidence only
   for a change refused by an ACTIVE ruleset; `aeos delivery capabilities --record` then shows enforcement
   VERIFIED for that ruleset until it changes (STALE). `--attest "<what was refused>"` stores an untrusted

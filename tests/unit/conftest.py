@@ -1,26 +1,18 @@
 """Unit-test isolation from the developer's machine.
 
-A developer machine that runs DLY AEOS has a real OpenBao on the default loopback address and its AppRole
-credentials in the real OS keyring (macOS Keychain, Windows Credential Manager). Without these fixtures a unit
-test that reads the secret store logs in to that vault, and the result depends on the machine instead of the
-code (CI has neither). Integration tests (tests/integration) are not affected.
+The real secret stores (OS keyring, a real OpenBao on loopback) are blocked for every test by the SecretGuard in
+tests/conftest.py (LESSONS L20). Here every unit test additionally gets its own empty ``MemoryKeyring`` that it can
+fill, and the developer's OpenCode install is hidden on request.
 """
 
 from __future__ import annotations
 
-import socket
 from collections.abc import Iterator
-from typing import Any
-from urllib.parse import urlparse
 
 import keyring
 import pytest
 
-from aeos.core.config import Settings
 from tests.unit.test_routing_fakes import MemoryKeyring
-
-_OPENBAO_DEFAULT = urlparse(Settings.model_fields["openbao_addr"].default)
-_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
 @pytest.fixture(autouse=True)
@@ -34,21 +26,6 @@ def _isolated_os_keyring() -> Iterator[MemoryKeyring]:
         yield kr
     finally:
         keyring.set_keyring(previous)
-
-
-@pytest.fixture(autouse=True)
-def _no_real_openbao(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A real TCP connection to the default OpenBao address is refused, as on a machine without a vault. Tests
-    that mock the address (respx, fake runners) never open a socket and are unaffected."""
-    real = socket.create_connection
-
-    def guarded(address: tuple[str, int], *args: Any, **kwargs: Any) -> socket.socket:
-        host, port = address[0], int(address[1])
-        if port == _OPENBAO_DEFAULT.port and host in _LOOPBACK:
-            raise ConnectionRefusedError(f"unit tests never reach a real OpenBao at {host}:{port}")
-        return real(address, *args, **kwargs)
-
-    monkeypatch.setattr(socket, "create_connection", guarded)
 
 
 @pytest.fixture
