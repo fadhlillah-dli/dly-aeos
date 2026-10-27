@@ -78,7 +78,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 * L17 Every delegated brief names the single owner of each tool it touches; a second checker is not built.
 * L18 A job cancelled because no runner acquired it is infrastructure: re-run it (`ci_status.py` says INFRA), do not debug code.
 * L19 One full suite at a time with -n logical on the owner's Mac; a second concurrent suite only with -n at most half the logical CPUs. Record the load average with any timing.
-* L20 Tests never reach the owner's real secret stores: the SecretGuard in tests/conftest.py hides the OS keyring and a real OpenBao from every test; a test that needs a secret installs a fake (secrets_memory, its own keyring, a vault on a free port). Never query the real vault or keyring to check anything.
+* L20 Tests never reach the owner's real secret stores: the SecretGuard in tests/conftest.py hides the OS keyring (also from sandboxed child processes), a real OpenBao and the owner's real Claude Code login from every test; a test that needs a secret installs a fake (secrets_memory, its own keyring, a vault on a free port, a fake claude), and only the real_claude_cli fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault or keyring to check anything.
 
 ## Table 2 - Proven methods
 

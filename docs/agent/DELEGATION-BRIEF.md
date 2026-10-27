@@ -57,8 +57,10 @@ RULES (lesson ids in brackets)
 16. Machine load [L19]. One full suite at a time with -n logical on the owner's Mac; a second concurrent
     suite only with -n at most half the logical CPUs. Record the load average with any timing.
 17. Hermetic secrets [L20]. Tests never reach the owner's real secret stores: the SecretGuard in
-    tests/conftest.py hides the OS keyring and a real OpenBao from every test; a test that needs a secret
-    installs a fake (secrets_memory, its own keyring, a vault on a free port). Never query the real vault,
+    tests/conftest.py hides the OS keyring (also from sandboxed child processes), a real OpenBao and the
+    owner's real Claude Code login from every test; a test that needs a secret installs a fake
+    (secrets_memory, its own keyring, a vault on a free port, a fake claude); only the real_claude_cli
+    fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault,
     OpenBao, Keychain or keyring to check anything; all proof is by tests with fakes.
 
 REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results

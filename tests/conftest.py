@@ -11,9 +11,11 @@ import json
 import math
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import statistics
+import subprocess
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
@@ -310,6 +312,38 @@ def real_vault_ports() -> frozenset[int]:
     return frozenset(ports)
 
 
+def exe_key(path: str | os.PathLike[str]) -> str:
+    """One spelling per executable file: symlinks, ``~`` and case (Windows) resolved."""
+    return os.path.normcase(os.path.realpath(os.path.expanduser(os.fspath(path))))
+
+
+def real_claude_binaries() -> frozenset[str]:
+    """The owner's real Claude Code, as PATH, the ``AEOS_CLAUDE_BINARY`` variable and the host's aeos.yaml resolve
+    it when the session starts. Its login (OAuth credential) lives in the OS credential store, which
+    ``claude auth status`` reads. A fake ``claude`` a test writes elsewhere is a different file."""
+    found: list[str | None] = [shutil.which("claude"), shutil.which("claude.exe"), os.environ.get("AEOS_CLAUDE_BINARY")]
+    try:
+        found.append(config_mod.Settings().claude_binary)
+    except Exception:  # noqa: BLE001 - an unreadable host config adds no path; PATH and the variable still count
+        pass
+    return frozenset(exe_key(p) for p in found if p)
+
+
+# keyring reads this file from XDG_CONFIG_HOME (macOS, Linux) or LOCALAPPDATA (Windows), both inside a sandbox home
+SANDBOX_KEYRING_CONFIGS = (Path(".config", "python_keyring", "keyringrc.cfg"),
+                           Path("AppData", "Local", "Python Keyring", "keyringrc.cfg"))
+NULL_KEYRING = "keyring.backends.null.Keyring"
+
+
+def write_sandbox_keyring_config(home: Path) -> None:
+    """A child started with the sandbox environment (which drops every KEYRING variable) uses the null keyring:
+    the keyring API answers "no password" and never reaches the OS credential store."""
+    for rel in SANDBOX_KEYRING_CONFIGS:
+        cfg = home / rel
+        cfg.parent.mkdir(parents=True, exist_ok=True)
+        cfg.write_text(f"[backend]\ndefault-keyring={NULL_KEYRING}\n", encoding="utf-8")
+
+
 class SecretGuard:
     """Makes the real secret stores unreachable from the test process (AGENTS.md invariant 12, LESSONS L20).
 
@@ -317,23 +351,35 @@ class SecretGuard:
     empty ``HermeticKeyring``, so the AppRole login of the owner's vault is never found; (b) a real OpenBao: a
     socket connect to a loopback address on one of ``vault_ports`` is refused as on a machine without a vault (this
     covers httpx, urllib and asyncio, which all end in ``socket.connect``); (c) the provider's process cache (an
-    OpenBao client and token from before the guard). Default result: ``get_secret`` raises
-    ``Blocked(SECRET_STORE_UNAVAILABLE)``, the CI behaviour.
+    OpenBao client and token from before the guard); (d) the OS keyring of a sandboxed child process: every
+    ``SandboxDirs.create`` also writes a keyring config selecting the null backend into the sandbox home, so the
+    containment probe and worker children never query the macOS Keychain or Windows Credential Manager; (e) the
+    owner's real Claude Code (``claude_binaries``), whose ``auth status`` reads its login from the OS credential
+    store: starting it raises ``FileNotFoundError`` before any process exists, as if the binary had vanished, so
+    every caller takes its "cannot run" path (a fake ``claude`` elsewhere still runs). Default result:
+    ``get_secret`` raises ``Blocked(SECRET_STORE_UNAVAILABLE)``, the CI behaviour.
 
     Out of scope, with the reason: GITHUB_TOKEN/GH_TOKEN, the gh CLI and netrc (the product never reads a credential
     from them: secrets come only from the provider, and httpx 0.28 applies netrc only with an explicit
     ``NetRCAuth``); git credential helpers (the broker and the verifier run git with ``credential.helper=``
-    reset); child processes (the containment probe reads a fixed probe name, never a stored value; the UI smoke
-    server gets its own free vault port and a random keyring service).
+    reset); OpenCode (every probe runs it with the sandbox environment, so its auth.json resolves inside the
+    sandbox home); the verifier's children (``scrubbed_env`` already selects the null keyring). Not covered: a child
+    process outside a sandbox that runs its own Python and its own keyring lookup; the one known is the UI smoke server
+    (integration only): it gets an absent ``claude``, a free vault port and a random keyring service name, but its
+    keyring lookups still reach the OS keyring API, under a name no owner entry has.
 
     Opting in: ``secrets_memory`` (or ``set_provider_override``) supplies values; a test that needs keyring contents
     sets them on the active keyring or installs its own backend (``keyring.set_keyring``); a fake vault runs on a
-    free port or behind respx/MockTransport, neither of which opens a socket to a guarded port."""
+    free port or behind respx/MockTransport, neither of which opens a socket to a guarded port; a test that must run
+    the owner's real Claude Code requests the ``real_claude_cli`` fixture, which skips unless the owner set
+    ``DLY_AEOS_REAL_CLAUDE=1`` (or ``DLY_AEOS_LIVE_CLAUDE=1``)."""
 
-    def __init__(self, vault_ports: frozenset[int]) -> None:
+    def __init__(self, vault_ports: frozenset[int], claude_binaries: frozenset[str] = frozenset()) -> None:
         self.vault_ports = vault_ports
+        self.claude_binaries = claude_binaries
+        self.allow_real_claude = False
         self.keyring = HermeticKeyring()
-        self._saved: tuple[Any, Any, Any] | None = None
+        self._saved: tuple[Any, ...] | None = None
 
     def refuses(self, address: object) -> bool:
         if not isinstance(address, tuple) or len(address) < 2:
@@ -343,6 +389,25 @@ class SecretGuard:
         except (TypeError, ValueError):
             return False
         return port in self.vault_ports and _is_loopback(address[0])
+
+    def refuses_exec(self, args: Any, executable: Any = None, env: Mapping[str, str] | None = None,
+                     shell: bool = False) -> bool:
+        """True when ``subprocess.Popen(args, ...)`` would start the owner's real Claude Code."""
+        if self.allow_real_claude or not self.claude_binaries:
+            return False
+        program = executable
+        if program is None:
+            if isinstance(args, (str, bytes, os.PathLike)):
+                program = os.fsdecode(args).split()[0] if shell and os.fsdecode(args).split() else args
+            elif args:
+                program = args[0]
+        if not program:
+            return False
+        text = os.fsdecode(program)
+        if not os.path.dirname(text):
+            path = (env if env is not None else os.environ).get("PATH")
+            text = shutil.which(text, path=path) or text
+        return exe_key(text) in self.claude_binaries
 
     def install(self) -> None:
         if self._saved is not None:
@@ -357,19 +422,42 @@ class SecretGuard:
         def guarded_connect_ex(sock: socket.socket, address: Any) -> int:
             return errno.ECONNREFUSED if guard.refuses(address) else connect_ex(sock, address)
 
-        self._saved = (keyring.get_keyring(), connect, connect_ex)
+        from aeos.worker_runtime import processes
+
+        popen_init = subprocess.Popen.__init__
+        sandbox_create = processes.SandboxDirs.__dict__["create"]
+
+        def guarded_popen_init(popen: subprocess.Popen[Any], args: Any, *rest: Any, **kw: Any) -> None:
+            executable = kw.get("executable", rest[1] if len(rest) > 1 else None)
+            if guard.refuses_exec(args, executable, kw.get("env"), bool(kw.get("shell"))):
+                raise FileNotFoundError(errno.ENOENT, "tests never run the owner's real Claude Code (its login is in "
+                                        "the OS credential store; opt in with the real_claude_cli fixture)")
+            popen_init(popen, args, *rest, **kw)
+
+        def guarded_sandbox_create(cls: type[processes.SandboxDirs], root: Path) -> processes.SandboxDirs:
+            dirs = sandbox_create.__func__(cls, root)
+            write_sandbox_keyring_config(dirs.home)
+            return dirs
+
+        self._saved = (keyring.get_keyring(), connect, connect_ex, popen_init, sandbox_create)
         keyring.set_keyring(self.keyring)
         socket.socket.connect = guarded_connect  # type: ignore[method-assign,assignment]
         socket.socket.connect_ex = guarded_connect_ex  # type: ignore[method-assign,assignment]
+        subprocess.Popen.__init__ = guarded_popen_init  # type: ignore[method-assign,assignment]
+        processes.SandboxDirs.create = classmethod(guarded_sandbox_create)  # type: ignore[method-assign,assignment]
         _reset_secret_provider_cache()
 
     def uninstall(self) -> None:
         if self._saved is None:
             return
-        previous, connect, connect_ex = self._saved
+        from aeos.worker_runtime import processes
+
+        previous, connect, connect_ex, popen_init, sandbox_create = self._saved
         self._saved = None
         socket.socket.connect = connect  # type: ignore[method-assign]
         socket.socket.connect_ex = connect_ex  # type: ignore[method-assign]
+        subprocess.Popen.__init__ = popen_init  # type: ignore[method-assign]
+        processes.SandboxDirs.create = sandbox_create  # type: ignore[method-assign]
         keyring.set_keyring(previous)
         _reset_secret_provider_cache()
 
@@ -383,7 +471,7 @@ def _reset_secret_provider_cache() -> None:
 @pytest.fixture(scope="session", autouse=True)
 def _hermetic_secret_stores() -> Iterator[SecretGuard]:
     """The SecretGuard is active for the whole session, before any module- or test-scoped fixture runs."""
-    guard = SecretGuard(real_vault_ports())
+    guard = SecretGuard(real_vault_ports(), real_claude_binaries())
     guard.install()
     try:
         yield guard
@@ -404,6 +492,23 @@ def _hermetic_secrets_per_test(_hermetic_secret_stores: SecretGuard) -> Iterator
     yield kr
     keyring.set_keyring(kr)
     _reset_secret_provider_cache()
+
+
+REAL_CLAUDE_OPT_IN = ("DLY_AEOS_REAL_CLAUDE", "DLY_AEOS_LIVE_CLAUDE")
+
+
+@pytest.fixture
+def real_claude_cli(_hermetic_secret_stores: SecretGuard) -> Iterator[None]:
+    """Owner opt-in: lets this test run the owner's real Claude Code, which reads its login from the OS credential
+    store. Skips unless ``DLY_AEOS_REAL_CLAUDE=1`` (or ``DLY_AEOS_LIVE_CLAUDE=1``, which already spends a Max call)."""
+    if not any(os.environ.get(name) == "1" for name in REAL_CLAUDE_OPT_IN):
+        pytest.skip("owner opt-in: DLY_AEOS_REAL_CLAUDE=1 runs the owner's real Claude Code (its login is in the OS "
+                    "credential store)")
+    _hermetic_secret_stores.allow_real_claude = True
+    try:
+        yield
+    finally:
+        _hermetic_secret_stores.allow_real_claude = False
 
 
 def make_app(settings: config_mod.Settings, include: list[str] | None = None):

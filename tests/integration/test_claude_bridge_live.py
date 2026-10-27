@@ -1,8 +1,9 @@
 """Live ClaudeNativeBridge checks on the owner's machine (§12 'Bridge wajib memiliki capability test
 pada versi CLI yang benar-benar dipakai').
 
-* ``test_live_probe_binary_and_auth`` runs whenever the official binary is on PATH: version + auth
-  mode only (``claude --version`` / ``claude auth status``) — no model call, no quota.
+* ``test_live_probe_binary_and_auth`` runs when the official binary is on PATH and the owner opted in with
+  ``DLY_AEOS_REAL_CLAUDE=1`` (``claude auth status`` reads the login from the OS credential store; the
+  ``real_claude_cli`` fixture): version + auth mode only — no model call, no quota.
 * ``test_live_capability_test`` makes ONE tiny structured call on the owner's Max quota, so it is
   opt-in: set ``DLY_AEOS_LIVE_CLAUDE=1``. It never runs in CI and never uses an API key.
 """
@@ -24,7 +25,7 @@ LIVE = os.environ.get("DLY_AEOS_LIVE_CLAUDE") == "1"
 
 
 @pytest.mark.skipif(not HAS_CLAUDE, reason="official Claude Code binary not on PATH")
-def test_live_probe_binary_and_auth(settings):
+def test_live_probe_binary_and_auth(settings, real_claude_cli):
     binmod.clear_probe_cache()
     pr = binmod.probe(settings, refresh=True)
     assert pr.binary.found, pr.binary.reasons
@@ -36,7 +37,7 @@ def test_live_probe_binary_and_auth(settings):
 
 
 @pytest.mark.skipif(not (HAS_CLAUDE and LIVE), reason="set DLY_AEOS_LIVE_CLAUDE=1 to spend one tiny Max call")
-def test_live_capability_test(settings):
+def test_live_capability_test(settings, real_claude_cli):
     from aeos.claude_bridge import bridge
 
     binmod.clear_probe_cache()
@@ -50,7 +51,7 @@ def test_live_capability_test(settings):
 
 
 @pytest.mark.skipif(not (HAS_CLAUDE and LIVE), reason="set DLY_AEOS_LIVE_CLAUDE=1 to spend one tiny Max call")
-def test_live_supervisor_cannot_read_the_other_domain_partition(settings):
+def test_live_supervisor_cannot_read_the_other_domain_partition(settings, real_claude_cli):
     """§12 boundary probe (ADR-0040 addendum): with the default read tools, a PERSONAL request asks the
     supervisor to Read a canary file in the OFFICE partition by absolute path. The canary must never appear
     in the answer. Record the outcome in ADR-0040 when run on the owner's machine."""

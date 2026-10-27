@@ -4,17 +4,24 @@ Incident: on the owner's Mac a test resolved the owner's real GitHub token throu
 from the macOS Keychain) and called the live GitHub API; CI has no vault and stayed green. Here a sentinel "owner
 machine" stands in for that Mac: a vault on a free loopback port that serves a sentinel token, and a keyring holding
 the sentinel AppRole login. Without the guard the sentinel value IS read; with the guard the read fails exactly as on
-a machine without a vault. Nothing here touches the real keyring or a real vault.
+a machine without a vault. Two more doors of the owner's machine: a sandboxed child process (the containment probe)
+that looked up the OS keyring itself, and the owner's real Claude Code, whose ``auth status`` reads its login from the
+OS credential store. Nothing here touches the real keyring, a real vault or the real Claude Code.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import socket
+import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -24,9 +31,11 @@ import pytest
 from aeos.core import config as config_mod
 from aeos.core.errors import Blocked
 from aeos.delivery.provider import github_token
+from aeos.inventory.probes import SystemProbeRunner
 from aeos.secrets import facade
 from aeos.secrets.provider import KeyringBootstrapStore, keyring_backend, reset_provider_cache
-from tests.conftest import HermeticKeyring, SecretGuard
+from aeos.worker_runtime import processes
+from tests.conftest import NULL_KEYRING, HermeticKeyring, SecretGuard, exe_key
 
 SENTINEL_VALUE = "sentinel-owner-github-value-7f3a"  # what the owner's vault would return; never a real secret
 SENTINEL_ROLE = ("sentinel-role-id-01", "sentinel-secret-id-01")
@@ -184,3 +193,75 @@ def test_near_miss_a_test_keyring_works_and_counts_as_a_store(_hermetic_secret_s
         assert keyring.get_password("dly-aeos-test", "probe") == "fake-probe-value"
     finally:
         keyring.set_keyring(previous)
+
+
+# ------------------------------------------------------------------ sandboxed children (containment probe)
+# The child only reads its keyring configuration (environment variable, then keyringrc.cfg); it never calls a store.
+_CHILD_KEYRING = ("import keyring.core as c; k = c.load_env() or c.load_config(); "
+                  "print(type(k).__module__ + '.' + type(k).__name__ if k else 'OS-KEYRING-DETECTION')")
+
+
+def _sandbox_child_keyring(root: Path) -> str:
+    """What a child started like the containment probe (sandbox environment, ``python -I``) would use as keyring."""
+    dirs = processes.SandboxDirs.create(root)
+    env = processes.build_sandbox_env(dirs, run_id="keyring-bite")
+    out = subprocess.run([sys.executable, "-I", "-c", _CHILD_KEYRING], env=env, cwd=str(dirs.root),
+                         capture_output=True, text=True, timeout=120, check=True)
+    return out.stdout.strip()
+
+
+def test_guard_gives_sandboxed_children_the_null_keyring(_hermetic_secret_stores: SecretGuard, tmp_path: Path):
+    """The sandbox environment drops every KEYRING variable, so without the guard the probe child falls through to
+    OS keyring detection (the macOS Keychain, Windows Credential Manager); with it, the sandbox home selects null."""
+    assert _sandbox_child_keyring(tmp_path / "guarded") == NULL_KEYRING
+    _hermetic_secret_stores.uninstall()
+    try:
+        assert _sandbox_child_keyring(tmp_path / "unguarded") == "OS-KEYRING-DETECTION"
+    finally:
+        _hermetic_secret_stores.install()
+    assert _sandbox_child_keyring(tmp_path / "again") == NULL_KEYRING
+
+
+# ------------------------------------------------------------------ the owner's real Claude Code
+_SENTINEL_LOGIN = "sentinel-claude-login-loggedIn"
+
+
+def test_guard_refuses_to_start_the_owner_claude(tmp_path: Path):
+    """The sentinel "real Claude Code" is this interpreter printing a sentinel login, started through the doctor's
+    probe runner. The session guard does not know it, so only the guard under test makes the difference."""
+    argv = [sys.executable, "-c", f"print('{_SENTINEL_LOGIN}')"]
+    runner = SystemProbeRunner()
+    assert runner.run(argv, timeout=120).stdout.strip() == _SENTINEL_LOGIN
+    guard = SecretGuard(frozenset(), frozenset({exe_key(sys.executable)}))
+    guard.install()
+    try:
+        res = runner.run(argv, timeout=120)
+        assert (res.returncode, res.stdout, res.error) == (None, "", "NOT_FOUND")
+        with pytest.raises(FileNotFoundError, match="tests never run the owner's real Claude Code"):
+            subprocess.run(argv, capture_output=True, check=False)
+        assert guard.refuses_exec([os.path.basename(sys.executable), "auth", "status"],
+                                  env={"PATH": os.path.dirname(sys.executable)})
+        assert guard.refuses_exec(["any-name"], executable=sys.executable)
+        # near misses: a fake claude a test writes elsewhere is another file; a test that opted in runs the real one
+        fake = tmp_path / "claude"
+        fake.write_text("", encoding="utf-8")
+        assert not guard.refuses_exec([str(fake), "auth", "status"])
+        guard.allow_real_claude = True
+        assert runner.run(argv, timeout=120).stdout.strip() == _SENTINEL_LOGIN
+        guard.allow_real_claude = False
+    finally:
+        guard.uninstall()
+    assert runner.run(argv, timeout=120).stdout.strip() == _SENTINEL_LOGIN
+
+
+def test_session_guard_knows_the_owner_claude(_hermetic_secret_stores: SecretGuard):
+    """Whatever ``claude`` PATH finds on this machine is refused (checked without starting it); CI has none."""
+    guard = _hermetic_secret_stores
+    assert subprocess.Popen.__init__.__name__ == "guarded_popen_init"
+    assert processes.SandboxDirs.create.__func__.__name__ == "guarded_sandbox_create"
+    assert guard.allow_real_claude is False
+    for name in ("claude", "claude.exe"):
+        found = shutil.which(name)
+        if found:
+            assert exe_key(found) in guard.claude_binaries
+            assert guard.refuses_exec([found, "auth", "status", "--json"])
