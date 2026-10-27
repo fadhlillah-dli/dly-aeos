@@ -364,10 +364,11 @@ class SecretGuard:
     from them: secrets come only from the provider, and httpx 0.28 applies netrc only with an explicit
     ``NetRCAuth``); git credential helpers (the broker and the verifier run git with ``credential.helper=``
     reset); OpenCode (every probe runs it with the sandbox environment, so its auth.json resolves inside the
-    sandbox home); the verifier's children (``scrubbed_env`` already selects the null keyring). Not covered: a child
-    process outside a sandbox that runs its own Python and its own keyring lookup; the one known is the UI smoke server
-    (integration only): it gets an absent ``claude``, a free vault port and a random keyring service name, but its
-    keyring lookups still reach the OS keyring API, under a name no owner entry has.
+    sandbox home); the verifier's children (``scrubbed_env`` already selects the null keyring); the UI smoke server
+    (integration only), a real uvicorn child outside any sandbox: its environment (``_isolated_env``) sets
+    ``PYTHON_KEYRING_BACKEND`` to ``NULL_KEYRING``, gets an absent ``claude``, a free vault port and a random keyring
+    service name, and ``test_ui_smoke_server_child_selects_the_null_keyring`` keeps it so. Not covered: a future child
+    process outside a sandbox that runs its own Python and its own keyring lookup without such an environment.
 
     Opting in: ``secrets_memory`` (or ``set_provider_override``) supplies values; a test that needs keyring contents
     sets them on the active keyring or installs its own backend (``keyring.set_keyring``); a fake vault runs on a

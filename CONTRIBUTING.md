@@ -250,7 +250,7 @@ is added or dropped.
 
 ### Developer tools
 
-Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the verdict):
+Three standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the verdict):
 
 - **`scripts/worktree.py`** makes git worktrees safe. `python scripts/worktree.py add <name> <branch> [<base>]`
   creates `<main checkout>-wt-<name>` on a new branch, marks it as created by the tool and prints the
@@ -280,8 +280,22 @@ Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is th
   not acquired by a runner, as when hosted macOS capacity runs out). It is infrastructure, not a code failure:
   re-run the job and never read it as RED.
 
-Both have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`): a violating
-fixture is red and a near-miss legitimate one is green. The junction test runs only on Windows.
+- **`scripts/action_pins.py`** is the monthly report of pinned versions, because a pin never moves by itself and
+  ADR-0115 allows no automatic Dependabot pull requests. `python scripts/action_pins.py --report` lists every
+  `uses: owner/repo@<40-hex sha> # vX` of `.github/workflows` and the pinned release binary of `ci.yml`
+  (`ACTIONLINT_VERSION` with `ACTIONLINT_SHA256`), asks the GitHub CLI (`gh`) for the newest release published at
+  least 14 days ago and the commit of its tag, and prints one row per pin: name, pinned tag, pinned sha (the SHA-256 for
+  a binary), newest eligible tag and `CURRENT`, `UPDATE <tag>` or `UNKNOWN (reason)`. `UNKNOWN` covers a pin without a
+  version comment, a tag that does not point at the pinned sha and a failed lookup. It always exits 0; the last line is
+  `ACTION_PINS: <n> pins, <k> updates available`. `--json` prints JSON only (the last line then goes to stderr),
+  `--today YYYY-MM-DD` replaces the date of the 14-day rule and `--workflows DIR` the workflow directory. **Run it
+  monthly.** An update is a normal pull request: the new full SHA of the release tag and the new version comment, and for a
+  binary also the new SHA-256 from that release's checksums file (bump the version and the checksum together).
+  `tests/unit/test_delivery_ci_secrets.py` fails when a pin has no version comment.
+
+Each has bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`,
+`tests/unit/test_action_pins_tool.py`): a violating fixture is red and a near-miss legitimate one is green. The junction
+test runs only on Windows.
 
 ### Rules for every change
 
