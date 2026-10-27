@@ -45,6 +45,27 @@ KV_MOUNT = "aeos"
 APPROLE_NAME = "aeos-controller"
 _SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 INTERIM_NAMESPACES = ("personal", "workers", "platform", "projects")
+# ADR-0123: what keeping the unseal key share(s) in the OS keyring leaves open (one line, no value).
+UNSEAL_KEYRING_RISK = (
+    "Residual risk: anyone who acts as your OS user on this machine can read the unseal key from the OS keyring, "
+    "as they can the AppRole credentials already there; keep an offline recovery copy."
+)
+UNSEAL_KEYRING_RISK_ID = (
+    "Risiko sisa: siapa pun yang bertindak sebagai pengguna OS Anda di mesin ini dapat membaca kunci unseal dari OS "
+    "keyring, sama seperti kredensial AppRole yang sudah ada di sana; simpan salinan pemulihan offline."
+)
+
+# AppRole credentials missing from the OS keyring: `vault init` only helps a vault that is not initialised yet; an
+# initialised one (a lost keyring) is restored from the offline recovery copy (ADR-0123, runbook "Lost keyring").
+LOST_KEYRING_COMMAND = "aeos vault import-unseal-key --with-approle"
+LOST_KEYRING_RUNBOOK = 'docs/runbooks/openbao-unseal-recovery.md, section "Lost keyring"'
+
+
+def approle_missing_command(initialized: bool | None) -> str:
+    """The command for missing AppRole credentials: ``vault init`` only when OpenBao reports not initialised."""
+    return "aeos vault init" if initialized is False else LOST_KEYRING_COMMAND
+
+
 INTERIM_RESIDUAL_RISK = (
     "Mode sementara OS keyring: tidak ada TTL/lease token, tidak ada audit device vault, tidak ada policy "
     "per namespace; nilai dapat dibaca proses lain yang berjalan sebagai pengguna OS yang sama. OFFICE tidak "
@@ -203,7 +224,8 @@ def keyring_backend() -> tuple[bool, str]:
 
 
 class KeyringBootstrapStore:
-    """OS credential store for bootstrap material only (AppRole role_id/secret_id, optional unseal).
+    """OS credential store for bootstrap material only: AppRole role_id/secret_id, the unseal key share(s)
+    (ADR-0123) and, only while a ``vault init`` stays incomplete, the root token.
 
     Windows Credential Manager / macOS Keychain / Secret Service via ``keyring``. The root token
     and unseal material are never written to config files or the repository (§26).
@@ -213,6 +235,8 @@ class KeyringBootstrapStore:
     SECRET_ID = "openbao-approle-secret-id"
     UNSEAL_PREFIX = "openbao-unseal-key-"
     UNSEAL_COUNT = "openbao-unseal-key-count"
+    ROOT_TOKEN = "openbao-root-token"
+    WRITE_PROBE = "openbao-write-probe"
 
     def __init__(self, service: str):
         self.service = service
@@ -263,16 +287,62 @@ class KeyringBootstrapStore:
         keys = [self._get(f"{self.UNSEAL_PREFIX}{i}") for i in range(int(count))]
         return [k for k in keys if k]
 
+    def unseal_key_count(self) -> int:
+        """How many unseal key shares are stored; reads only the count entry, never a key."""
+        import keyring
+
+        try:
+            count = keyring.get_password(self.service, self.UNSEAL_COUNT)
+        except Exception as exc:  # keyring.errors.KeyringError and backend errors
+            raise Blocked(f"OS keyring unavailable: {type(exc).__name__}", code="SECRET_STORE_UNAVAILABLE") from exc
+        return int(count) if count and count.isdigit() else 0
+
     def set_unseal_keys(self, keys: list[str]) -> None:
+        """Replace the stored shares: the new ones first, then the count, then any leftover old share."""
+        if not keys or any(not k for k in keys):
+            raise ValueError("no unseal key to store")
+        old = self.unseal_key_count()
         for i, k in enumerate(keys):
             self._set(f"{self.UNSEAL_PREFIX}{i}", k)
         self._set(self.UNSEAL_COUNT, str(len(keys)))
+        for i in range(len(keys), old):
+            self._delete(f"{self.UNSEAL_PREFIX}{i}")
 
     def clear_unseal_keys(self) -> None:
-        count = self._get(self.UNSEAL_COUNT)
-        for i in range(int(count) if count and count.isdigit() else 0):
+        for i in range(self.unseal_key_count()):
             self._delete(f"{self.UNSEAL_PREFIX}{i}")
         self._delete(self.UNSEAL_COUNT)
+
+    def write_probe(self) -> str | None:
+        """Write, read back and delete a random, non-secret probe entry. None when the keyring takes a write, else
+        the reason (an exception name). ``vault init`` runs it before ``sys/init`` when nothing could show the
+        material if the keyring later refused it (ADR-0123 decision 1). Only the write and the read back decide: a
+        failed delete of the probe leaves one harmless, non-secret entry and never blocks init."""
+        import contextlib
+        import uuid
+
+        import keyring
+
+        value = uuid.uuid4().hex
+        try:
+            keyring.set_password(self.service, self.WRITE_PROBE, value)
+            back = keyring.get_password(self.service, self.WRITE_PROBE)
+        except Exception as exc:  # keyring.errors.KeyringError and backend errors
+            return type(exc).__name__
+        finally:
+            with contextlib.suppress(Exception):  # the probe value is a random, non-secret marker
+                keyring.delete_password(self.service, self.WRITE_PROBE)
+        return None if back == value else "read back a different value"
+
+    def root_token(self) -> str | None:
+        """Present only while a ``vault init`` is incomplete (a complete setup revokes and removes it)."""
+        return self._get(self.ROOT_TOKEN)
+
+    def set_root_token(self, token: str) -> None:
+        self._set(self.ROOT_TOKEN, token)
+
+    def clear_root_token(self) -> None:
+        self._delete(self.ROOT_TOKEN)
 
 
 def bootstrap_store(settings: Settings) -> KeyringBootstrapStore:
@@ -323,8 +393,13 @@ class OpenBaoProvider:
     def _login(self) -> str:
         creds = self.bootstrap.approle()
         if not creds:
-            raise Blocked("OpenBao AppRole credentials are missing from the OS keyring; run `aeos vault init`",
-                          code="SECRET_STORE_UNAVAILABLE")
+            cmd = approle_missing_command(self.health().get("initialized"))
+            if cmd == LOST_KEYRING_COMMAND:
+                msg = (f"OpenBao AppRole credentials are missing from the OS keyring of an initialised vault (lost "
+                       f"keyring); restore them from your offline recovery copy: `{cmd}` ({LOST_KEYRING_RUNBOOK})")
+            else:
+                msg = f"OpenBao AppRole credentials are missing from the OS keyring; run `{cmd}`"
+            raise Blocked(msg, code="SECRET_STORE_UNAVAILABLE")
         c = self._client()
         try:
             auth = c.approle_login(*creds)
@@ -800,7 +875,7 @@ def platform_label() -> str:
 
 
 __all__ = [
-    "INTERIM_RESIDUAL_RISK", "InterimKeyringProvider", "KeyringBootstrapStore", "MemorySecretProvider",
+    "INTERIM_RESIDUAL_RISK", "UNSEAL_KEYRING_RISK", "UNSEAL_KEYRING_RISK_ID", "InterimKeyringProvider", "KeyringBootstrapStore", "MemorySecretProvider",
     "OpenBaoProvider", "SecretProvider", "Selection", "check_project_scope", "check_purpose", "get_provider",
     "interim_exception", "last_verification", "openbao_provider", "project_domain", "record_verification",
     "select_backend", "set_provider_override", "strict_ref",

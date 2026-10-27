@@ -55,6 +55,28 @@ def ensure_within(root: Path, candidate: Path) -> Path:
     return cand_r
 
 
+def is_within(path: Path, root: Path) -> bool:
+    """True when *path* is *root* or lies inside it. Besides the path comparison, the existing ancestors are compared by
+    file identity: the default macOS volume is case-insensitive and ``resolve()`` keeps the spelling it was given, so
+    ``.../Dly-Aeos/x`` must still be caught. Shared by the policy snapshot and the vault recovery export."""
+    if path == root or root in path.parents:
+        return True
+    try:
+        rs = root.stat()
+    except OSError:
+        return False
+    if not rs.st_ino:  # no file identity on this file system: the path comparison above is all there is
+        return False
+    for p in (path, *path.parents):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if (st.st_dev, st.st_ino) == (rs.st_dev, rs.st_ino):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class DataLayout:
     """All managed runtime locations under one data root."""

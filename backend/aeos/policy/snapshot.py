@@ -181,25 +181,11 @@ def _resolve_source(location: Any, root: Path | None,
 
 
 def _within_repository(path: Path, repo: Path) -> bool:
-    """True when *path* is the repository or lies inside it. Besides the path comparison (case-insensitive for
-    Windows paths), the existing ancestors are compared by file identity: the default macOS volume is
-    case-insensitive and ``resolve()`` keeps the spelling it was given, so ``.../Dly-Aeos/x`` must still be caught."""
-    if path == repo or repo in path.parents:
-        return True
-    try:
-        rs = repo.stat()
-    except OSError:
-        return False
-    if not rs.st_ino:  # no file identity on this file system: the path comparison above is all there is
-        return False
-    for p in (path, *path.parents):
-        try:
-            st = p.stat()
-        except OSError:
-            continue
-        if (st.st_dev, st.st_ino) == (rs.st_dev, rs.st_ino):
-            return True
-    return False
+    """True when *path* is the repository or lies inside it (``aeos.core.paths.is_within``: path text plus file
+    identity, so a respelled path on a case-insensitive macOS volume is still caught)."""
+    from aeos.core.paths import is_within
+
+    return is_within(path, repo)
 
 
 def mci_source_path(root: Path | None = None, settings: Settings | None = None) -> Path | None:

@@ -129,12 +129,39 @@ def secret_openbao_health(ctx: CheckContext) -> Outcome:
     if not body.get("initialized"):
         return Outcome("FAILED", "OpenBao belum diinisialisasi.", evidence=evidence, error_code="OPENBAO_NOT_INITIALIZED",
                        remedy=vault_remedy("init"), requires_destructive=True)
+    where, note = _unseal_key_note(ctx)
+    evidence["unseal_key_location"] = where
     if body.get("sealed"):
-        return Outcome("FAILED", "OpenBao sealed; secret tidak tersedia (fail closed).", evidence=evidence,
+        return Outcome("FAILED", "OpenBao sealed; secret tidak tersedia (fail closed). " + note, evidence=evidence,
                        error_code="OPENBAO_SEALED", remedy=vault_remedy("unseal"))
     return Outcome("CONNECTED", "OpenBao terjangkau, initialized dan unsealed; auth/policy/TTL belum diverifikasi oleh "
-                   "pemeriksaan ini.", evidence=evidence, component_version=body.get("version"),
+                   "pemeriksaan ini. " + note, evidence=evidence, component_version=body.get("version"),
                    target_identity="openbao@loopback")
+
+
+def _unseal_key_note(ctx: CheckContext) -> tuple[str, str]:
+    """(location, one line) for where the unseal key lives (ADR-0123). Reads only the share count, never a key."""
+    try:
+        from aeos.core.errors import AeosError
+        from aeos.secrets.provider import (
+            UNSEAL_KEYRING_RISK_ID,
+            bootstrap_store,
+            keyring_backend,
+            platform_label,
+        )
+    except (ImportError, ModuleNotFoundError):
+        return "UNKNOWN", "Lokasi kunci unseal: UNKNOWN (modul secrets belum tersedia)."
+    if not keyring_backend()[0]:
+        return "UNKNOWN", "Lokasi kunci unseal: UNKNOWN (OS keyring tidak tersedia)."
+    try:
+        count = bootstrap_store(ctx.settings).unseal_key_count()
+    except AeosError:
+        return "UNKNOWN", "Lokasi kunci unseal: UNKNOWN (OS keyring tidak terbaca)."
+    if not count:
+        return "not-stored", ("Kunci unseal: tidak disimpan di OS keyring; buka segel manual setelah restart ("
+                              + aeos_cmd("vault unseal") + ").")
+    return "os-keyring", (f"Kunci unseal: OS keyring ({platform_label()}), {count} share, auto-unseal saat serve. "
+                          + UNSEAL_KEYRING_RISK_ID)
 
 
 # Depends on the store itself (backend selection, OpenBao address/binary), not on individual references: a

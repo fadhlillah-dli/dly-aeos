@@ -57,6 +57,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 | L18 | 2026-10-27 | GitHub hosted macOS arm64 capacity cancelled a queued CI job (not acquired by a runner); it is infrastructure, re-run, never read as a code failure | environment | 1 | tool-refusal | scripts/ci_status.py | yes | Required jobs run on runners with reserved capacity |
 | L19 | 2026-10-27 | Too many full test suites ran in parallel (6 x pytest -n 4 on a 10-core Mac, load average about 45): agents stalled for 50+ minutes, timing-sensitive tests flaked and before/after speed measurements were invalid; later the same day two full suites with -n logical at once (load average about 25) pushed a memory-cap test past its wall-time bound | environment | 2 | process | - | yes | A test runner limits concurrent full-suite runs and records the load average itself |
 | L20 | 2026-10-27 | A test resolved the owner's real GitHub token through the real OpenBao (AppRole login from the macOS Keychain) and called the live GitHub API; CI has no vault, so it stayed green | secret | 1 | test | tests/conftest.py + tests/unit/test_test_isolation.py | yes | Tests run only in a sandbox that has no route to a real keyring or vault |
+| L21 | 2026-10-27 | A runbook told the owner to copy the only offline recovery copy of the vault unseal key to a USB volume and then delete it on a separate line, so the delete ran even when the copy failed (caught in review) | data-loss | 1 | test | tests/unit/test_owner_commands_paste_safe.py | no | Owner documents move files only through a command that verifies the copy itself |
 
 ## Rules (one line each; the incident is in table 1)
 
@@ -80,6 +81,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 * L18 A job cancelled because no runner acquired it is infrastructure: re-run it (`ci_status.py` says INFRA), do not debug code.
 * L19 One full suite at a time with -n logical on the owner's Mac; a second concurrent suite only with -n at most half the logical CPUs. Record the load average with any timing.
 * L20 Tests never reach the owner's real secret stores: the SecretGuard in tests/conftest.py hides the OS keyring (also from sandboxed child processes), a real OpenBao and the owner's real Claude Code login from every test; a test that needs a secret installs a fake (secrets_memory, its own keyring, a vault on a free port, a fake claude), and only the real_claude_cli fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault or keyring to check anything.
+* L21 An owner command that copies and then deletes runs the delete only in one chain after a compare: `cp SRC DST && cmp SRC DST && rm SRC`, paths quoted; never a separate `rm` line.
 
 ## Table 2 - Proven methods
 

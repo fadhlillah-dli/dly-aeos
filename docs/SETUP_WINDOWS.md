@@ -125,10 +125,16 @@ holds the bootstrap identity used to reach OpenBao.
 ```powershell
 .\aeos.ps1 vault install     # the install-manifest approved_pin; while it is null: --version X.Y.Z (reviewed)
 .\aeos.ps1 vault start
-.\aeos.ps1 vault init        # shows unseal keys ONCE on a temporary screen; type "stored" to close it
-.\aeos.ps1 vault unseal      # after every restart of OpenBao
+.\aeos.ps1 vault init        # keys into the Credential Manager AND shown ONCE on a temporary screen; type "stored"
+.\aeos.ps1 vault unseal      # after a restart; serve does it too from the Credential Manager
 ```
 
+On Windows `vault export-recovery` refuses (an owner-only ACL for the file is NOT-PROVEN), so `vault init` stores
+the unseal key share(s) in the Credential Manager and also shows the recovery material (the unseal key share(s)
+and the AppRole role_id/secret_id) once: that screen is your offline copy
+([ADR-0123](decisions/ADR-0123-openbao-unseal-key-in-os-keyring.md)). If the Credential Manager entries are lost,
+`.\aeos.ps1 vault import-unseal-key --with-approle` restores both from that copy. For a vault initialised before
+ADR-0123, `.\aeos.ps1 vault import-unseal-key` puts your existing key into the Credential Manager once.
 Store the unseal keys **offline** (password manager entry or paper), never in the repository,
 config files, chat, screenshots or the AEOS database. They are deliberately excluded from AEOS
 backups (§33). In a console, init switches on virtual terminal mode and shows them on a temporary

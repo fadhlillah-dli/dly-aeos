@@ -26,6 +26,7 @@ Procedures for specific situations are in [runbooks/](runbooks/README.md).
 | Scratch | `<data>/tmp/` (restore tests, smoke tests; removed after use) |
 | Config (non-secret) | `%LOCALAPPDATA%\DLY-AEOS\aeos.yaml` / `~/Library/Application Support/DLY-AEOS/aeos.yaml` (example: `config/aeos.example.yaml`) |
 | Canonical MCI_V2 (owner-supplied) | `<data>/policy/canonical/<file>` (or `mci_source_path` in aeos.yaml) + `<data>/policy/canonical/mci-pack-mapping.yaml`; never in the repository |
+| OpenBao unseal key, AppRole bootstrap | OS keyring service `<keyring_service>-bootstrap` (default `dly-aeos-bootstrap`): `openbao-unseal-key-<n>`, `openbao-unseal-key-count`, `openbao-approle-role-id`, `openbao-approle-secret-id`, and `openbao-root-token` only while a `vault init` is incomplete ([ADR-0123](decisions/ADR-0123-openbao-unseal-key-in-os-keyring.md)); the offline recovery copy is a file you keep outside the machine |
 
 Secrets are never in these files: OpenBao + OS credential store only (§26).
 
@@ -141,6 +142,38 @@ counts. The CLI shows the full view. OpenBao has its own recovery path
 Suggested owner cadence (decide and record it): backup + restore test before every upgrade and at a
 fixed interval; keep at least one restore-tested backup off-machine on encrypted storage; keep
 Office archives on company-approved storage only.
+
+## OpenBao unseal key (ADR-0123)
+
+The unseal key share(s) live in the OS keyring, beside the AppRole credentials, and are never printed
+([ADR-0123](decisions/ADR-0123-openbao-unseal-key-in-os-keyring.md)). No `AEOS_*` variable changes this.
+
+| Command | What it does |
+|---|---|
+| `aeos vault init` | stores every unseal key share in the OS keyring right after `sys/init` and prints where, never the values; revokes the root token (kept in the keyring only while setup is incomplete). `--show-unseal-once` keeps the former temporary-screen flow (`--plain-output` outside a terminal) |
+| `aeos serve` | before the controller starts: when OpenBao reports sealed, unseals it with the share(s) from the keyring; without a stored share it prints `OpenBao is sealed. Next: aeos vault unseal` and starts as before |
+| `aeos vault unseal [--from-keyring]` | sealed: the share(s) from the keyring, otherwise a hidden prompt; `--from-keyring` fails instead of prompting |
+| `aeos vault import-unseal-key [--shares N] [--replace] [--with-approle]` | one-time migration: the share(s) from a hidden prompt (entered twice, never argv) into the keyring; `--with-approle` also restores the AppRole role_id/secret_id from the recovery copy after a lost keyring |
+| `aeos vault export-recovery <file>` | the stored share(s), the AppRole role_id/secret_id and a kept root token to a new owner-only (0600) file; refuses an existing path, a path in any git repository or in the data directory, and Windows (owner-only ACL NOT-PROVEN; there `aeos vault init` shows the same material once instead); prints the path only |
+| `aeos vault status` | the line `unseal key`: share count in the keyring or `not stored` (Doctor `secret.openbao_health` says the same, with the residual risk) |
+
+Audit rows, never a value: `openbao.unseal` (source `os-keyring` or `prompt`, trigger `serve` or `cli`,
+outcome, shares applied), `openbao.unseal_key_import` (count) and `openbao.recovery_export` (path, count).
+Residual risk: whoever acts as your OS user on the machine can read the unseal key, as they can the AppRole
+credentials. The recovery copy is the way back when the keyring is lost: it restores the unseal key and the AppRole
+credentials (`aeos vault import-unseal-key --with-approle`, runbook "Lost keyring"); a copy that says
+`approle: NOT in the OS keyring` restores the unseal key only.
+
+One-time migration of an install initialised before ADR-0123 (macOS, zsh, from the repository root). The
+import asks twice at a hidden prompt; paste the key from your password manager there only. Then move the
+recovery file offline and delete it from the disk, as the
+[runbook](runbooks/openbao-unseal-recovery.md) "One-time migration" shows:
+
+```bash
+./aeos vault import-unseal-key
+./aeos vault status
+./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
+```
 
 ## Controller releases (self-build zones, §09)
 
