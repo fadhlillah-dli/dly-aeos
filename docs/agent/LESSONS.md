@@ -63,7 +63,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 ## Rules (one line each; the incident is in table 1)
 
 * L1 A secret is never pasted into chat, a file in the repo, a command line or a log. Rotate on exposure.
-* L2 Commands for the owner are drafted into a file and checked with `scripts/paste_safe.py --check` before they are shown; one hidden-prompt command per block, last. The checker (and the docs test) refuses an inline `#` comment, an unquoted `[]`, `?`, `*` or `<placeholder>`, a line over 80 characters and `rm` after an unproven `cp`.
+* L2 Commands for the owner are drafted into a file and checked with `scripts/paste_safe.py --check` before they are shown; one prompting command (a password or a typed confirmation) per block, last. The checker (and the docs test) refuses an inline `#` comment, an unquoted `[]`, `?`, `*` or `<placeholder>`, a line over 80 characters and `rm` after an unproven `cp`.
 * L3 A security or readiness claim carries its E-level, the host it ran on and its NOT-PROVEN part.
 * L4 A worktree never contains a symlink or junction. Remove worktrees only with a tool that refuses links.
 * L5 Merge main into the branch and resolve the changelog before push, not after CI.

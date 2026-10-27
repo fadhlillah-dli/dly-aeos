@@ -9,8 +9,9 @@ The owner pastes commands into zsh on macOS. A pasted block breaks when:
   delete runs even when the copy failed (data-loss class, L21);
 * a physical line is longer than 80 characters: a chat view or a narrow terminal wraps it, and the paste then
   carries a newline into the middle of the command (inside quotes zsh waits at ``dquote>``);
-* a command that prompts for hidden input (a password or a key) is not the last command of its block: the lines
-  after it are typed into the prompt as the password, and two such commands in one block always fail;
+* a command that reads an answer from the terminal (a hidden password or key, or a typed confirmation such as
+  'accept', 'STOP' or 'stored') is not the last command of its block: the lines after it are typed into the prompt
+  as the answer, and two such commands in one block always fail;
 * a placeholder such as ``<your-token>`` stands outside quotes: zsh reads ``<`` as a redirection from a file.
 
 Input is Markdown (every fenced bash, sh, zsh, shell or console block, and an untagged fence whose first line starts
@@ -28,7 +29,8 @@ Exit codes: 0 every block is paste-safe, 1 findings (each printed as ``path:line
 read error. The last line is ``PASTE_SAFE: OK`` or ``PASTE_SAFE: FAIL``. Stdlib only, ASCII output.
 
 ``tests/unit/test_owner_commands_paste_safe.py`` runs this checker over every Markdown file of the repository and
-holds its bite tests; it also fails when a CLI command gains a hidden prompt that ``HIDDEN_PROMPT_COMMANDS`` lacks.
+holds its bite tests; it also fails when a CLI command gains a prompt that ``HIDDEN_PROMPT_COMMANDS`` or
+``CONFIRM_PROMPT_COMMANDS`` lacks.
 """
 
 from __future__ import annotations
@@ -61,17 +63,31 @@ GLOB_CHARS = "[]?*"
 COMMAND_START = re.compile(r"^\s*(?:[$%] )?(?:\./|\.\./|~/)?(?:aeos|pip3?|python3?|npm|npx|git|gh|cd|brew|curl|make|"
                            r"source|export|sh|bash|zsh|uv|node|pytest|ruff|mypy)(?:\s|$)")
 
-# Commands of the aeos CLI that prompt for hidden input (getpass or a hide_input prompt) without an '--as' option,
-# with the flags that skip the prompt. Every command with an '--as <admin>' option prompts for the admin password
-# and is recognised by that option. The test derives this list from backend/aeos and fails when it differs.
+# Commands of the aeos CLI that read an answer from the terminal without an '--as' option, with the flags that skip
+# every prompt of the command. Every command with an '--as <admin>' option prompts for the admin password and is
+# recognised by that option. The test derives both lists from backend/aeos and fails when they differ.
 AS_OPTION = "--as"
+# Hidden input: getpass or a hide_input prompt.
 HIDDEN_PROMPT_COMMANDS: dict[str, tuple[str, ...]] = {
     "admin create": (),
     "secrets set": ("--stdin",),
     "vault import-unseal-key": (),
     "vault unseal": ("--from-keyring",),
 }
-# A flag that skips the hidden prompt only when the command's standard input is a pipe: without one, the command
+# Visible input: a typed confirmation (typer.prompt, typer.confirm, a prompt=True option). A visible prompt reads a
+# pasted line exactly like a hidden one. 'vault init' has no skip flag: '--yes' skips 'Continue?' but not the
+# 'stored' prompt of its temporary screen (Windows, or '--show-unseal-once').
+CONFIRM_PROMPT_COMMANDS: dict[str, tuple[str, ...]] = {
+    "ops backup restore": ("--yes",),
+    "ops emergency-stop": ("--yes",),
+    "ops release accept": ("--yes",),
+    "ops release promote": ("--yes",),
+    "ops release rollback": ("--yes",),
+    "secrets delete": ("--yes",),
+    "vault init": (),
+    "vault install": ("--yes",),
+}
+# A flag that skips the prompt only when the command's standard input is a pipe: without one, the command
 # reads the rest of the paste as the value.
 PIPE_ONLY_FLAGS = frozenset({"--stdin"})
 COMMAND_WRAPPERS = ("sudo", "command", "builtin", "nohup", "exec", "env")
@@ -209,7 +225,7 @@ def paste_problems(markdown: str, *, shell: bool = False) -> list[tuple[int, str
     return out
 
 
-# ----------------------------------------------------------------------------- hidden prompts
+# ----------------------------------------------------------------------------- terminal prompts
 def _command_lines(lang: str, body: list[str], first_lineno: int) -> list[tuple[int, str]]:
     """(line number, logical command) of every command of a block: continuation lines (a trailing backslash, a
     trailing '|', '&&' or '||', an open quote) are joined; heredoc bodies, blank lines and console output are
@@ -291,8 +307,9 @@ def _words(segment: str) -> list[str]:
         return segment.split()
 
 
-def hidden_prompt(segment: str, piped: bool = False) -> str | None:
-    """What makes this simple command prompt for hidden input, or None when it does not."""
+def terminal_prompt(segment: str, piped: bool = False) -> str | None:
+    """What makes this simple command read an answer from the terminal (hidden or a typed confirmation), or None
+    when it does not."""
     words = _words(segment)
     while words and (words[0] in COMMAND_WRAPPERS or ASSIGNMENT.match(words[0])):
         words = words[1:]
@@ -302,41 +319,43 @@ def hidden_prompt(segment: str, piped: bool = False) -> str | None:
     if any(a == AS_OPTION or a.startswith(AS_OPTION + "=") for a in args):
         return f"'{AS_OPTION}' asks for the admin password"
     path = [a for a in args if not a.startswith("-")]
-    for name, skip in HIDDEN_PROMPT_COMMANDS.items():
-        parts = name.split()
-        if path[:len(parts)] != parts:
-            continue
-        if any(f in args and (piped or f not in PIPE_ONLY_FLAGS) for f in skip):
-            return None
-        return f"'aeos {name}' asks for hidden input"
+    kinds = ((HIDDEN_PROMPT_COMMANDS, "hidden input"), (CONFIRM_PROMPT_COMMANDS, "a typed confirmation"))
+    for listed, asks in kinds:
+        for name, skip in listed.items():
+            parts = name.split()
+            if path[:len(parts)] != parts:
+                continue
+            if any(f in args and (piped or f not in PIPE_ONLY_FLAGS) for f in skip):
+                return None
+            return f"'aeos {name}' asks for {asks}"
     return None
 
 
 def prompt_problems(markdown: str, *, shell: bool = False) -> list[tuple[int, str, str]]:
-    """(line number, line, problem) for every block where a hidden prompt would read pasted lines: more than one
-    prompting command in a block, or a prompting command followed by another command line."""
+    """(line number, line, problem) for every block where a prompt (hidden or a typed confirmation) would read pasted
+    lines: more than one prompting command in a block, or a prompting command followed by another command line."""
     out: list[tuple[int, str, str]] = []
     for idx, lang, body, _width in _blocks(markdown, shell):
         commands = _command_lines(lang, body, idx + 2)
         prompts: list[tuple[int, int, str]] = []  # (position in commands, line number, reason)
         for pos, (lineno, line) in enumerate(commands):
             for segment, piped in _segments(line):
-                reason = hidden_prompt(segment, piped)
+                reason = terminal_prompt(segment, piped)
                 if reason:
                     prompts.append((pos, lineno, reason))
         if len(prompts) > 1:
             lines = ", ".join(str(ln) for _p, ln, _r in prompts)
             lineno = prompts[1][1]
             out.append((lineno, body[lineno - idx - 2],
-                        f"{len(prompts)} commands in this block prompt for hidden input (lines {lines}): the paste "
-                        "types the lines after the first prompt into it as the password; give each one its own "
-                        "block, as the last line"))
+                        f"{len(prompts)} commands in this block prompt for input (lines {lines}): the paste types "
+                        "the lines after the first prompt into it as the answer; give each one its own block, as "
+                        "the last line"))
         for pos, lineno, reason in prompts:
             if pos + 1 < len(commands):
                 nxt = commands[pos + 1][0]
                 out.append((lineno, body[lineno - idx - 2],
                             f"{reason} and line {nxt} follows it in the same block: the paste types line {nxt} "
-                            "into the prompt as the password; end the block with this command (one hidden-prompt "
+                            "into the prompt as the answer; end the block with this command (one prompting "
                             "command per block, last)"))
     return out
 

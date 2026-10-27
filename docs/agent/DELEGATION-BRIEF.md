@@ -43,8 +43,8 @@ RULES (lesson ids in brackets)
 10. Owner-facing commands [L2, L13]. Run every command or script meant for the owner in zsh first,
     and dry-run it in-process against a temporary database. Paste the result with the command.
     Commands for the owner are drafted into a file and checked with scripts/paste_safe.py --check
-    before they are shown; one hidden-prompt command per block, last (no inline '#' comment, every
-    '[]', '*' and '<placeholder>' quoted, no line over 80 characters).
+    before they are shown; one prompting command (a password or a typed confirmation) per block, last
+    (no inline '#' comment, every '[]', '*' and '<placeholder>' quoted, no line over 80 characters).
 11. Diagnosis order [L14]. Input, then environment, then code. No background job without a
     deadline and a failure marker file; check the marker, not the silence. Run tests through
     scripts/run_tests.sh; zsh does not word-split a variable, so use an array, never 'set -- $var'.

@@ -368,14 +368,17 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   checked; a `.sh`, `.zsh`, `.bash` or `.txt` file, `--text` and `--shell` are plain shell text. It refuses an inline
   `#` comment, an unquoted `[ ] ? *` or `<placeholder>` (zsh reads `<` as a redirection), a line over 80 characters
   (a chat view or a narrow terminal wraps it and the paste breaks it: split it with a trailing backslash or after a
-  pipe), a command that asks for hidden input (any `aeos` command with `--as`, `admin create`, `secrets set`,
-  `vault import-unseal-key`, `vault unseal`) that is not the last line of its block, two such commands in one block,
+  pipe), a command that reads an answer from the terminal that is not the last line of its block (a password or
+  key: any `aeos` command with `--as`, `admin create`, `secrets set`, `vault import-unseal-key`, `vault unseal`; a
+  typed confirmation: `ops backup restore`, `ops emergency-stop`, `ops release accept`/`promote`/`rollback`,
+  `secrets delete` and `vault install` without `--yes`, and `vault init`), two such commands in one block,
   and an `rm` after a `cp` outside `cp SRC DST && cmp SRC DST && rm SRC`. Each finding is
   `path:line: problem and fix: line`. Exit codes: 0 OK, 1 findings, 2 usage or read error; the last line is
   `PASTE_SAFE: OK` or `PASTE_SAFE: FAIL`. A block that shows file contents opts out with
   `<!-- paste-safe: file-content -->` directly above it. `tests/unit/test_owner_commands_paste_safe.py` runs it
-  over every Markdown file of the repository and fails when a CLI command gains a hidden prompt that the
-  checker's list lacks.
+  over every Markdown file of the repository and fails when a CLI command gains a prompt that the checker's lists
+  lack. A trailing `\` continues a line only in zsh and bash: on Windows it becomes `^` in cmd.exe and a backtick
+  in PowerShell (`docs/OWNER_ACTIONS.md` section 5).
 
 The tools have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`,
 `tests/unit/test_github_settings.py`, `tests/unit/test_action_pins_tool.py`,

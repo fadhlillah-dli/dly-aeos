@@ -127,10 +127,18 @@ delete it from the disk). After a restart of OpenBao, `serve` or `vault unseal` 
 ([ADR-0123](decisions/ADR-0123-openbao-unseal-key-in-os-keyring.md); `vault init --show-unseal-once` keeps the
 former flow).
 
+`vault install` and `vault init` ask before they change anything, so each one ends its own block:
+
 ```bash
 ./aeos vault install
+```
+
+```bash
 ./aeos vault start
 ./aeos vault init
+```
+
+```bash
 ./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ./aeos vault unseal
 ```

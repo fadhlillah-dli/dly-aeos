@@ -230,10 +230,19 @@ recovery copy to a new owner-only file and prints only its path. `doctor -g SECR
 `secret.openbao_*` checks passing and says where the unseal key lives, and `doctor --functional -g SECRET` must
 show `secret.keyring` VERIFIED (allow the Keychain prompt for the dly-aeos service only).
 
+`vault install` shows its plan and asks before it changes anything, and `vault init` asks `Continue?`; each one
+ends its own block, so a pasted line is never read as the answer.
+
 ```bash
 ./aeos vault install --version "<X.Y.Z>"
+```
+
+```bash
 ./aeos vault start
 ./aeos vault init
+```
+
+```bash
 ./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ./aeos vault status --verify
 ./aeos doctor -g SECRET
@@ -736,7 +745,8 @@ Optional but needed for `recovery.config_rollback`: promote the first controller
 ([runbook](runbooks/controller-upgrade-rollback.md)).
 
 The first `release build` answers RELEASE_NOT_ACCEPTED when no trusted CI PASS is recorded for the commit; the
-`release accept` line records it. Note the `release_id` printed by the second build.
+`release accept` line records it. `release accept` asks you to type `accept` and `release promote` to type
+`promote`, so each one ends its block (a pasted line would be read as the confirmation).
 
 ```bash
 (cd frontend && npm ci && npm run build)
@@ -744,7 +754,17 @@ The first `release build` answers RELEASE_NOT_ACCEPTED when no trusted CI PASS i
 ./aeos ops release accept --commit "$(git rev-parse HEAD)" \
   --operator "<admin>" \
   --reason "GitHub Actions CI green on main for this commit"
+```
+
+Then build again and note the `release_id` it prints:
+
+```bash
 ./aeos ops release build --ref HEAD
+```
+
+Promote that release:
+
+```bash
 ./aeos ops release promote "<release_id>" --operator "<admin>" \
   --reason "first release"
 ```
@@ -1160,7 +1180,8 @@ keys in the OFFICE override. Or run:
   --rationale "<what the company approved>"
 ```
 
-Keep the single quotes around values with commas: Windows PowerShell splits them otherwise. Once the
+Keep the single quotes around values with commas: Windows PowerShell splits them otherwise. In PowerShell, end
+each continued line with a backtick instead of `\` ([section 5](#5-windows-notes)). Once the
 authorisation exists, OFFICE targets, data classes and identities fail closed until they are recorded.
 
 Next, make each approved route OFFICE-eligible with
@@ -1241,12 +1262,19 @@ Windows stays a supported host. Everything above applies, with these differences
 | `./aeos <command>` | `aeos <command>` | `.\aeos.ps1 <command>` |
 | `.venv/bin/python ...` | `.venv\Scripts\python.exe ...` | `.\.venv\Scripts\python.exe ...` |
 | `~/Library/Application Support/DLY-AEOS` | `%LOCALAPPDATA%\DLY-AEOS` | `$env:LOCALAPPDATA\DLY-AEOS` |
+| `\` at the end of a line (the command goes on) | `^` at the end of the line | `` ` `` (backtick) at the end of the line |
+
+Long commands above are split over several lines, each but the last ending with `\`. Neither Windows shell reads
+that `\` as "the command goes on": both pass it as an argument and run the next line as a new command. Before you
+paste such a command, replace each line-ending `\` with `^` (cmd.exe) or a backtick (PowerShell), with nothing
+after it, not even a space, or join the lines into one.
 
 In cmd.exe, `.\aeos.ps1` opens in an editor instead of running. Use `aeos`, which runs `aeos.cmd`. If PowerShell
 blocks scripts, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once. Environment variables for the
 pytest lines: in PowerShell write `$env:NAME="value"; <command>`, in cmd.exe `set NAME=value` first.
 
-* **Docker:** `winget install -e --id Docker.DockerDesktop`, then start it. The `docker build` lines are the same.
+* **Docker:** `winget install -e --id Docker.DockerDesktop`, then start it. The `docker build` lines are the same,
+  with the line endings of the table above.
   The container boundary was proven on the Windows build host in a throw-away data directory. Your real data
   directory still needs its own `aeos worker containment --kind container` report.
 * **Claude Code:** `winget install --id Anthropic.ClaudeCode -e`. To remove `ANTHROPIC_API_KEY`, run

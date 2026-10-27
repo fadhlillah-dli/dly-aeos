@@ -4,9 +4,9 @@ The rules live in one place, ``scripts/paste_safe.py`` (single owner, L10/L17); 
 runs it over every Markdown file of the repository, and holds its bite tests: a violating fixture is red for the
 right reason (its own message) and a near-miss legitimate fixture is green. Rules: no ``#`` comment, no unquoted
 glob character, no ``rm`` after a ``cp`` outside ``cp && cmp && rm``, no line longer than 80 characters, a command
-that prompts for hidden input is the only one of its block and its last line, and no ``<placeholder>`` outside
-quotes. The list of CLI commands with a hidden prompt is derived from ``backend/aeos`` here and compared with the
-checker's list.
+that reads an answer from the terminal (a hidden password or a typed confirmation) is the only one of its block and
+its last line, and no ``<placeholder>`` outside quotes. The lists of CLI commands with a hidden prompt and with a
+typed confirmation are derived from ``backend/aeos`` here and compared with the checker's lists.
 """
 
 from __future__ import annotations
@@ -86,6 +86,36 @@ def test_recovery_runbook_moves_the_copy_with_a_guarded_chain():
     move = [b for b in blocks if "cp " in b and "rm " in b]
     assert len(move) == 1 and "&& cmp " in move[0] and "&& rm " in move[0], move
     assert "/Volumes/AEOS-RECOVERY/" in move[0] and "your own encrypted volume" in text  # the name is the owner's
+
+
+OWNER_ACTIONS = "docs/OWNER_ACTIONS.md"
+WINDOWS_NOTES = "## 5. Windows notes"
+
+
+def windows_continuation_problems(text: str) -> list[str]:
+    """OWNER_ACTIONS says every command applies on Windows with the differences of its section 5: when a shell block
+    continues a line with a trailing backslash, section 5 must map it to '^' (cmd.exe) and a backtick (PowerShell),
+    which is how those shells continue a line."""
+    continued = [line for _idx, _lang, body in shell_fences(text) for line in body if line.rstrip().endswith("\\")]
+    notes = text.split(WINDOWS_NOTES, 1)[1] if WINDOWS_NOTES in text else ""
+    if continued and not ("`^`" in notes and "backtick" in notes):
+        return [f"{len(continued)} shell line(s) end with a backslash continuation but '{WINDOWS_NOTES}' does not map "
+                "it to '^' (cmd.exe) and a backtick (PowerShell)"]
+    return []
+
+
+def test_windows_notes_map_the_line_continuation():
+    assert windows_continuation_problems((ROOT / OWNER_ACTIONS).read_text(encoding="utf-8")) == []
+
+
+def test_bite_windows_notes_without_the_continuation_mapping_are_red():
+    block = _block("docker build --build-arg V=1 \\\n  -t img sandbox/")
+    red = windows_continuation_problems(block + f"\n{WINDOWS_NOTES}\n\nThe docker build lines are the same.\n")
+    assert red == [f"1 shell line(s) end with a backslash continuation but '{WINDOWS_NOTES}' does not map it to "
+                   "'^' (cmd.exe) and a backtick (PowerShell)"]
+    mapped = f"\n{WINDOWS_NOTES}\n\n| `\\` | `^` | `` ` `` (backtick) |\n"
+    assert windows_continuation_problems(block + mapped) == []
+    assert windows_continuation_problems(_block("docker build -t img sandbox/") + f"\n{WINDOWS_NOTES}\n") == []
 
 
 def test_scanner_covers_the_owner_documents():
@@ -366,7 +396,7 @@ ADMIN = '"<admin>"'
 def test_two_as_commands_in_one_block_are_red():
     body = f"./aeos policy adrs --load\n./aeos policy decide --as {ADMIN}\n./aeos routes set-pool r --as {ADMIN}"
     found = prompt_problems(_block(body))
-    assert any("2 commands in this block prompt for hidden input (lines 4, 5)" in p for _, _, p in found), found
+    assert any("2 commands in this block prompt for input (lines 4, 5)" in p for _, _, p in found), found
 
 
 def test_an_as_command_followed_by_another_line_is_red():
@@ -390,6 +420,17 @@ def test_an_as_command_followed_by_another_line_is_red():
         ("./aeos policy decide --as=admin\n./aeos doctor", "'--as' asks for the admin password"),
         ("FOO=1 aeos routes activate r --as admin \\\n  --mode TRIAL\n./aeos doctor", "'--as' asks"),
         ("$ ./aeos policy decide --as admin\nPassword for admin:\n$ ./aeos doctor", "'--as' asks"),
+        # typed confirmations read a pasted line like a password (review finding on docs/OWNER_ACTIONS.md 1.14)
+        ('./aeos ops release accept --commit "$C" --operator "$A" \\\n  --reason "ci green"\n'
+         "./aeos ops release build --ref HEAD", "'aeos ops release accept' asks for a typed confirmation"),
+        ('./aeos ops release promote "$R" --operator "$A"\n./aeos ops release list',
+         "'aeos ops release promote' asks for a typed confirmation"),
+        ('./aeos ops release rollback --operator "$A"\n./aeos doctor', "'aeos ops release rollback' asks"),
+        ('./aeos ops backup restore "$B"\n./aeos doctor -g RECOVERY', "'aeos ops backup restore' asks"),
+        ('./aeos ops emergency-stop --reason "leak"\n./aeos doctor', "'aeos ops emergency-stop' asks"),
+        ("./aeos secrets delete workers/x\n./aeos secrets status", "'aeos secrets delete' asks"),
+        ('./aeos vault install --version "$V"\n./aeos vault start', "'aeos vault install' asks"),
+        ("./aeos vault init --yes --show-unseal-once\n./aeos vault status", "'aeos vault init' asks"),
     ],
 )
 def test_a_hidden_prompt_command_that_is_not_last_is_red(body, fragment):
@@ -408,10 +449,26 @@ def test_a_hidden_prompt_command_that_is_not_last_is_red(body, fragment):
         "./aeos doctor --assume x\n./aeos serve",
         "git log --as\n./aeos doctor",
         f"$ ./aeos policy decide --as {ADMIN}\nPassword for admin:\nRecorded.",
+        './aeos ops release build --ref HEAD\n./aeos ops release accept --commit "$C" --operator "$A" \\\n'
+        '  --reason "ci green"',
+        './aeos ops release accept --commit "$C" --operator "$A" --reason "ci" --yes\n./aeos ops release build',
+        './aeos ops backup restore-test "$B"\n./aeos doctor -g RECOVERY',
+        "./aeos vault start\n./aeos vault init",
+        "./aeos secrets delete workers/x --yes\n./aeos secrets status",
     ],
 )
 def test_one_hidden_prompt_command_as_the_last_line_is_green(body):
     assert prompt_problems(_block(body, "console" if body.startswith("$") else "bash")) == [], body
+
+
+def test_the_release_block_of_the_review_finding_is_red_and_its_split_is_green():
+    accept = ('./aeos ops release accept --commit "$(git rev-parse HEAD)" \\\n  --operator "<admin>" \\\n'
+              '  --reason "GitHub Actions CI green on main for this commit"')
+    old = _block(f"./aeos ops release build --ref HEAD\n{accept}\n./aeos ops release build --ref HEAD")
+    found = check_markdown(old)
+    assert [ln for ln, _, _ in found] == [4], found
+    assert "line 7 follows it in the same block" in found[0][2] and "as the answer" in found[0][2]
+    assert check_markdown(_block(f"./aeos ops release build --ref HEAD\n{accept}")) == []
 
 
 def test_a_hidden_prompt_inside_a_heredoc_body_is_not_a_command():
@@ -490,10 +547,14 @@ def test_check_output_is_ascii(tmp_path, capsys):
     assert code == 1 and all(line.isascii() for line in out)
 
 
-# ------------------------------------------- the hidden-prompt list follows the CLI
-def _hidden_prompt_functions(source_root: Path, package: str) -> set[tuple[str, str]]:
-    """(module, function) of every function under source_root/package that reaches getpass.getpass or a
-    hide_input=True prompt, directly or through a function it calls by name (same module or imported by name)."""
+# ------------------------------------------- the prompt lists follow the CLI
+VISIBLE_PROMPT_CALLS = frozenset({("typer", "prompt"), ("typer", "confirm"), ("click", "prompt"), ("click", "confirm")})
+
+
+def _prompt_functions(source_root: Path, package: str) -> tuple[set[tuple[str, str]], set[tuple[str, str]]]:
+    """(hidden, visible): (module, function) of every function under source_root/package that reaches a hidden prompt
+    (getpass.getpass or a hide_input=True prompt) or a visible one (typer/click prompt or confirm without
+    hide_input, input()), directly or through a function it calls by name (same module or imported by name)."""
     defs: dict[tuple[str, str], ast.AST] = {}
     imports: dict[str, dict[str, tuple[str, str]]] = {}
     for path in sorted((source_root / package).rglob("*.py")):
@@ -507,29 +568,37 @@ def _hidden_prompt_functions(source_root: Path, package: str) -> set[tuple[str, 
                 for alias in node.names:
                     imports[module][alias.asname or alias.name] = (node.module, alias.name)
 
-    def direct(fn: ast.AST) -> bool:
+    def direct(fn: ast.AST) -> set[str]:
+        kinds: set[str] = set()
         for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
             f = call.func
-            if (isinstance(f, ast.Attribute) and f.attr == "getpass") or (isinstance(f, ast.Name) and f.id == "getpass"):
-                return True
-            if any(k.arg == "hide_input" and isinstance(k.value, ast.Constant) and k.value.value is True
-                   for k in call.keywords):
-                return True
-        return False
+            getpass = (isinstance(f, ast.Attribute) and f.attr == "getpass") or (
+                isinstance(f, ast.Name) and f.id == "getpass")
+            if getpass or any(k.arg == "hide_input" and isinstance(k.value, ast.Constant) and k.value.value is True
+                              for k in call.keywords):
+                kinds.add("hidden")
+            elif (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                  and (f.value.id, f.attr) in VISIBLE_PROMPT_CALLS) or (isinstance(f, ast.Name) and f.id == "input"):
+                kinds.add("visible")
+        return kinds
 
     def callees(module: str, fn: ast.AST) -> set[tuple[str, str]]:
         return {imports[module].get(n.func.id, (module, n.func.id)) for n in ast.walk(fn)
                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
 
-    hidden = {key for key, fn in defs.items() if direct(fn)}
-    changed = True
-    while changed:
-        changed = False
-        for key, fn in defs.items():
-            if key not in hidden and callees(key[0], fn) & hidden:
-                hidden.add(key)
-                changed = True
-    return hidden
+    first = {key: direct(fn) for key, fn in defs.items()}
+    reached: dict[str, set[tuple[str, str]]] = {}
+    for kind in ("hidden", "visible"):
+        found = {key for key, kinds in first.items() if kind in kinds}
+        changed = True
+        while changed:
+            changed = False
+            for key, fn in defs.items():
+                if key not in found and callees(key[0], fn) & found:
+                    found.add(key)
+                    changed = True
+        reached[kind] = found
+    return reached["hidden"], reached["visible"]
 
 
 def _commands(command: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[str, Any]]:
@@ -540,36 +609,48 @@ def _commands(command: Any, path: tuple[str, ...] = ()) -> Iterator[tuple[str, A
         yield " ".join(path), command
 
 
-def hidden_prompt_problems(app: Any, source_root: Path, package: str,
-                           listed: Mapping[str, tuple[str, ...]]) -> list[str]:
-    """Commands that prompt for hidden input without an '--as' option must be in ``listed``; every listed entry must
-    be such a command, and its skip flags must be options of it."""
+def prompt_list_problems(app: Any, source_root: Path, package: str, hidden_listed: Mapping[str, tuple[str, ...]],
+                         confirm_listed: Mapping[str, tuple[str, ...]]) -> list[str]:
+    """Commands without an '--as' option that prompt for hidden input must be in ``hidden_listed``; those that only
+    ask for a typed confirmation must be in ``confirm_listed``. Every listed entry must be such a command, and its
+    skip flags must be options of it."""
     import typer
 
-    hidden = _hidden_prompt_functions(source_root, package)
-    found: dict[str, tuple[bool, set[str]]] = {}  # path -> (has --as, option names)
+    hidden_fns, visible_fns = _prompt_functions(source_root, package)
+    found: dict[str, tuple[str, set[str]]] = {}  # path -> (kind, option names); kind 'as', 'hidden' or 'visible'
     for path, cmd in _commands(typer.main.get_command(app)):
         options = {opt for p in cmd.params for opt in getattr(p, "opts", [])}
         cb = cmd.callback
-        prompts = (cb is not None and (cb.__module__, cb.__name__) in hidden) or any(
-            getattr(p, "hide_input", False) for p in cmd.params)
-        if prompts:
-            found[path] = (ps.AS_OPTION in options, options)
+        key = (cb.__module__, cb.__name__) if cb is not None else None
+        hidden = key in hidden_fns or any(getattr(p, "hide_input", False) for p in cmd.params)
+        visible = key in visible_fns or any(getattr(p, "prompt", None) for p in cmd.params)
+        if ps.AS_OPTION in options and (hidden or visible):
+            found[path] = ("as", options)
+        elif hidden or visible:
+            found[path] = ("hidden" if hidden else "visible", options)
     problems = [f"CLI command '{path}' prompts for hidden input but HIDDEN_PROMPT_COMMANDS in scripts/paste_safe.py "
-                f"lacks it" for path, (has_as, _o) in sorted(found.items()) if not has_as and path not in listed]
-    for path, flags in sorted(listed.items()):
-        if path not in found:
-            problems.append(f"HIDDEN_PROMPT_COMMANDS entry '{path}' is not a CLI command that prompts for hidden input")
-            continue
-        problems += [f"HIDDEN_PROMPT_COMMANDS entry '{path}': {flag} is not an option of the command"
-                     for flag in flags if flag not in found[path][1]]
+                f"lacks it" for path, (kind, _o) in sorted(found.items())
+                if kind == "hidden" and path not in hidden_listed]
+    problems += [f"CLI command '{path}' asks for a typed confirmation but CONFIRM_PROMPT_COMMANDS in "
+                 f"scripts/paste_safe.py lacks it" for path, (kind, _o) in sorted(found.items())
+                 if kind == "visible" and path not in confirm_listed]
+    for name, kind, listed in (("HIDDEN_PROMPT_COMMANDS", "hidden", hidden_listed),
+                               ("CONFIRM_PROMPT_COMMANDS", "visible", confirm_listed)):
+        what = "prompts for hidden input" if kind == "hidden" else "asks only for a typed confirmation"
+        for path, flags in sorted(listed.items()):
+            if found.get(path, ("", set()))[0] != kind:
+                problems.append(f"{name} entry '{path}' is not a CLI command that {what}")
+                continue
+            problems += [f"{name} entry '{path}': {flag} is not an option of the command"
+                         for flag in flags if flag not in found[path][1]]
     return problems
 
 
-def test_the_hidden_prompt_list_matches_the_cli():
+def test_the_prompt_lists_match_the_cli():
     from aeos.cli import app
 
-    assert hidden_prompt_problems(app, ROOT / "backend", "aeos", ps.HIDDEN_PROMPT_COMMANDS) == []
+    assert prompt_list_problems(app, ROOT / "backend", "aeos", ps.HIDDEN_PROMPT_COMMANDS,
+                                ps.CONFIRM_PROMPT_COMMANDS) == []
 
 
 FAKE_CLI = '''
@@ -584,6 +665,11 @@ def _ask() -> str:
     return getpass.getpass("Secret: ")
 
 
+def _really(what: str) -> None:
+    if typer.prompt(f"Type '{what}' to confirm") != what:
+        raise typer.Exit(1)
+
+
 @app.command("store")
 def store() -> None:
     _ask()
@@ -592,6 +678,12 @@ def store() -> None:
 @app.command("decide")
 def decide(as_user: str = typer.Option(..., "--as")) -> None:
     typer.prompt("Password", hide_input=True)
+
+
+@app.command("wipe")
+def wipe(yes: bool = typer.Option(False, "--yes")) -> None:
+    if not yes:
+        _really("wipe")
 
 
 @app.command("show")
@@ -613,15 +705,22 @@ def fake_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     return module.app
 
 
-def test_bite_a_new_hidden_prompt_missing_from_the_list_is_red(tmp_path, fake_cli):
-    problems = hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {})
+def test_bite_a_new_prompt_missing_from_the_lists_is_red(tmp_path, fake_cli):
+    problems = prompt_list_problems(fake_cli, tmp_path, "fake_paste_cli", {}, {})
     assert problems == ["CLI command 'store' prompts for hidden input but HIDDEN_PROMPT_COMMANDS in "
+                        "scripts/paste_safe.py lacks it",
+                        "CLI command 'wipe' asks for a typed confirmation but CONFIRM_PROMPT_COMMANDS in "
                         "scripts/paste_safe.py lacks it"]
 
 
-def test_bite_a_stale_entry_or_a_wrong_flag_is_red_and_the_right_list_is_green(tmp_path, fake_cli):
-    assert hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": ()}) == []  # '--as' is generic
-    stale = hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": (), "show": ()})
+def test_bite_a_stale_entry_or_a_wrong_flag_is_red_and_the_right_lists_are_green(tmp_path, fake_cli):
+    right = {"store": ()}, {"wipe": ("--yes",)}
+    assert prompt_list_problems(fake_cli, tmp_path, "fake_paste_cli", *right) == []  # '--as' is generic
+    stale = prompt_list_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": (), "show": ()}, right[1])
     assert stale == ["HIDDEN_PROMPT_COMMANDS entry 'show' is not a CLI command that prompts for hidden input"]
-    flag = hidden_prompt_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": ("--quiet",)})
+    flag = prompt_list_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": ("--quiet",)}, right[1])
     assert flag == ["HIDDEN_PROMPT_COMMANDS entry 'store': --quiet is not an option of the command"]
+    swapped = prompt_list_problems(fake_cli, tmp_path, "fake_paste_cli", {"store": (), "wipe": ()}, {})
+    assert swapped == ["CLI command 'wipe' asks for a typed confirmation but CONFIRM_PROMPT_COMMANDS in "
+                       "scripts/paste_safe.py lacks it",
+                       "HIDDEN_PROMPT_COMMANDS entry 'wipe' is not a CLI command that prompts for hidden input"]
