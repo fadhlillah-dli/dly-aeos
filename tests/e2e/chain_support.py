@@ -74,7 +74,7 @@ TRUSTED_TEST = (
 
 # ----------------------------------------------------------------------------- fake OpenCode
 FAKE_OPENCODE = r'''
-import json, os, subprocess, sys, time, urllib.error, urllib.request
+import sys
 
 def ev(obj):
     print(json.dumps(obj), flush=True)
@@ -106,6 +106,7 @@ argv = sys.argv[1:]
 if argv[:1] == ["--version"]:
     print("1.19.3")
     sys.exit(0)
+import json, os, subprocess, time, urllib.error, urllib.request  # after the --version probe: it needs none of them
 model = argv[argv.index("--model") + 1].split("/", 1)[1]
 prompt = open(argv[argv.index("--file") + 1], encoding="utf-8").read()
 cfg = json.load(open(os.environ["OPENCODE_CONFIG"], encoding="utf-8"))

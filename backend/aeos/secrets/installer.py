@@ -12,6 +12,8 @@ elevated, no package manager, no PATH changes.
 
 from __future__ import annotations
 
+import copy
+import functools
 import hashlib
 import io
 import os
@@ -90,20 +92,33 @@ def _check_host(url: str) -> None:
         raise InstallError(f"refusing download from non-official host {host!r}")
 
 
-def _manifest_entry(root: Path | None = None) -> dict[str, Any] | None:
+@functools.lru_cache(maxsize=8)
+def _openbao_component(text: str) -> dict[str, Any] | None:
+    """The ``openbao`` component of an install-manifest text. Memoised on the exact text, so a changed
+    manifest is parsed again; a text that does not parse is None (failures are never raised from here).
+    The cached dict is private to this function: callers get a copy (``_manifest_entry``)."""
     import yaml
 
-    from aeos.core.paths import repo_root
-
-    path = (root or repo_root()) / "install-manifest" / "manifest.yaml"
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, yaml.YAMLError):
+        data = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
         return None
     for comp in data.get("components") or []:
         if isinstance(comp, dict) and comp.get("component_id") == "openbao":
             return comp
     return None
+
+
+def _manifest_entry(root: Path | None = None) -> dict[str, Any] | None:
+    from aeos.core.paths import repo_root
+
+    path = (root or repo_root()) / "install-manifest" / "manifest.yaml"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    # the file is read on every call (no stale-stat window); only the YAML parse of identical text is reused
+    return copy.deepcopy(_openbao_component(text))
 
 
 def manifest_pin(root: Path | None = None) -> str | None:

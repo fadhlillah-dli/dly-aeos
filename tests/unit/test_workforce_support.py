@@ -7,6 +7,7 @@ check fail-closed behaviour simply do not install them.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import types
@@ -30,6 +31,7 @@ from aeos.models.portfolio import Project, RepositoryReference
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import AgentDefinition
 from aeos.routing.service import compute_config_hash as _route_config_hash  # real one, before any fake
+from tests.conftest import template_dir
 
 
 @dataclass
@@ -311,7 +313,10 @@ def process_sandbox_exception(db: Session, *, domain: str = "PERSONAL", allow: b
     return d
 
 
-def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
+_GIT_TEMPLATES: dict[tuple[tuple[str, str], ...], tuple[Path, str]] = {}
+
+
+def _init_git_repo_uncached(path: Path, files: dict[str, str]) -> str:
     path.mkdir(parents=True, exist_ok=True)
 
     def g(*args: str) -> str:
@@ -321,13 +326,29 @@ def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
     g("config", "user.email", "test@example.invalid")
     g("config", "user.name", "Test")
     g("config", "commit.gpgsign", "false")
-    for rel, text in (files or {"README.md": "hello\n"}).items():
+    for rel, text in files.items():
         f = path / rel
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(text, encoding="utf-8")
     g("add", "-A")
     g("commit", "-q", "-m", "init")
     return g("rev-parse", "HEAD")
+
+
+def init_git_repo(path: Path, files: dict[str, str] | None = None) -> str:
+    """One real ``git init`` + commit per distinct file set and process, then a plain directory copy per call
+    (same files, same ``init`` commit and identity; the copy is a normal ``.git`` directory, never a link)."""
+    files = files or {"README.md": "hello\n"}
+    if path.exists() and any(path.iterdir()):
+        return _init_git_repo_uncached(path, files)
+    key = tuple(sorted(files.items()))
+    if key not in _GIT_TEMPLATES:
+        template = template_dir("aeos-gittpl-")
+        _GIT_TEMPLATES[key] = (template, _init_git_repo_uncached(template, files))
+    template, sha = _GIT_TEMPLATES[key]
+    path.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(template, path, dirs_exist_ok=True)
+    return sha
 
 
 def attach_repo(db: Session, project: Project, repo: Path) -> RepositoryReference:

@@ -46,9 +46,18 @@ def normalize(path: str) -> str:
 
 
 def normalize_pattern(pattern: str) -> str:
+    if type(pattern) is not str:  # never hashed: a bad element fails exactly as before (AttributeError), not in the cache
+        return _normalize_pattern(pattern)
+    return _normalize_pattern_cached(pattern)
+
+
+def _normalize_pattern(pattern: str) -> str:
     trailing = pattern.strip().replace("\\", "/").endswith("/")
     p = normalize(pattern)
     return p + "/**" if trailing else p
+
+
+_normalize_pattern_cached = lru_cache(maxsize=1024)(_normalize_pattern)
 
 
 @lru_cache(maxsize=1024)
@@ -86,9 +95,33 @@ def matches(path: str, pattern: str, *, case_insensitive: bool = False) -> bool:
         return False
 
 
-def matches_any(path: str, patterns: list[str] | tuple[str, ...], *, case_insensitive: bool = False) -> str | None:
+@lru_cache(maxsize=64)
+def _compiled(patterns: tuple[str, ...], ci: bool) -> tuple[tuple[str, re.Pattern[str]], ...]:
+    """(pattern, regex) in order for every pattern that normalizes; a pattern that raises ScopePathError never matches."""
+    out: list[tuple[str, re.Pattern[str]]] = []
     for pat in patterns:
-        if matches(path, pat, case_insensitive=case_insensitive):
+        try:
+            out.append((pat, _regex(normalize_pattern(pat), ci)))
+        except ScopePathError:
+            continue
+    return tuple(out)
+
+
+def matches_any(path: str, patterns: list[str] | tuple[str, ...], *, case_insensitive: bool = False) -> str | None:
+    """The first pattern (in order) that ``path`` matches, else None. Same result as looping ``matches``, but the
+    path is normalized once and the patterns are compiled once per distinct pattern set."""
+    if not all(type(pat) is str for pat in patterns):
+        # not a list of plain strings: keep the exact first-match loop (what a bad element does, and when, is unchanged)
+        for pat in patterns:
+            if matches(path, pat, case_insensitive=case_insensitive):
+                return pat
+        return None
+    try:
+        norm = normalize(path)
+    except ScopePathError:
+        return None
+    for pat, rx in _compiled(tuple(patterns), case_insensitive):
+        if rx.match(norm):
             return pat
     return None
 

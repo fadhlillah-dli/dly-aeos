@@ -9,7 +9,9 @@ import json
 import math
 import os
 import re
+import sqlite3
 import statistics
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from aeos.core import config as config_mod
-from aeos.core.db import create_all, init_engine, session_factory
+from aeos.core.db import build_engine, create_all, init_engine, session_factory
 from aeos.core.enums import Domain, Role
 
 ADMIN_PW = "correct-horse-battery-staple"
@@ -51,8 +53,111 @@ def _no_os_signature_probe(monkeypatch: pytest.MonkeyPatch) -> None:
                         lambda path, fingerprint_value: {"status": "NOT_CHECKED", "reason": "test stub"})
 
 
+class _MemoArgon2:
+    """Wraps the production ``PasswordHasher`` so one test process pays each Argon2id computation (t=3, 64 MiB,
+    p=4, tens of ms) once per distinct input instead of once per test. Every value still comes from the real hasher
+    with the production parameters: ``hash`` is memoised per password (a call with an explicit salt is never
+    cached), ``verify`` per (hash, password) including the argon2 failures (re-raised as a fresh exception, never
+    the stored instance); any other exception is not cached. Everything else (``check_needs_rehash`` ...) is
+    delegated untouched."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self._hashes: dict[Any, str] = {}
+        self._verdicts: dict[tuple[Any, Any], Any] = {}
+
+    def hash(self, password: Any, *, salt: bytes | None = None) -> str:
+        if salt is not None:
+            return str(self._real.hash(password, salt=salt))
+        cached = self._hashes.get(password)
+        if cached is None:
+            cached = self._hashes[password] = self._real.hash(password)
+        return cached
+
+    def verify(self, hash: Any, password: Any) -> bool:
+        from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
+
+        key = (hash, password)
+        if key in self._verdicts:
+            verdict = self._verdicts[key]
+            if verdict is True:
+                return True
+            exc_type, args = verdict
+            raise exc_type(*args)
+        try:
+            result = bool(self._real.verify(hash, password))
+        except (VerifyMismatchError, VerificationError, InvalidHashError) as exc:
+            self._verdicts[key] = (type(exc), exc.args)
+            raise
+        if result:
+            self._verdicts[key] = True
+        return result
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _memoised_argon2() -> Iterator[None]:
+    """Fails open: if the identity module or its stock ``PasswordHasher`` is not there, nothing is wrapped."""
+    try:
+        from argon2 import PasswordHasher
+
+        import aeos.identity.passwords as pw
+    except ImportError:
+        yield
+        return
+    real = getattr(pw, "_hasher", None)
+    if type(real) is not PasswordHasher:
+        yield
+        return
+    wrapper = _MemoArgon2(real)
+    setattr(pw, "_hasher", wrapper)  # noqa: B010 - the wrapper is deliberately not a PasswordHasher
+    try:
+        yield
+    finally:
+        if getattr(pw, "_hasher", None) is wrapper:
+            setattr(pw, "_hasher", real)  # noqa: B010
+
+
+_TEMPLATE_ROOT: list[Path] = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _template_root(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Parent of the per-process git/release template repositories. It lives under pytest's own base temp
+    directory, which pytest prunes, so a killed run leaves nothing in $TMPDIR (an atexit hook never runs then)."""
+    _TEMPLATE_ROOT.append(tmp_path_factory.mktemp("aeos-templates"))
+    try:
+        yield
+    finally:
+        _TEMPLATE_ROOT.clear()
+
+
+def template_dir(prefix: str) -> Path:
+    """A new empty directory for a template repository (valid only while the pytest session runs)."""
+    if not _TEMPLATE_ROOT:
+        raise RuntimeError("template_dir() is only available inside a pytest session")
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=_TEMPLATE_ROOT[0]))
+
+
+@pytest.fixture(scope="session")
+def _template_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One migrated database per test process (per xdist worker): create_all + the append-only triggers + the
+    alembic head stamp, built once. Each test's ``settings`` gets its own copy, so every test still starts from a
+    fresh, identical database. The template file itself is never opened by a test."""
+    path = tmp_path_factory.mktemp("aeos-template") / "template.sqlite3"
+    engine = build_engine(f"sqlite:///{path.as_posix()}")
+    try:
+        create_all(engine)
+        _stamp_head(engine)
+    finally:
+        engine.dispose()
+    return path
+
+
 @pytest.fixture
-def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config_mod.Settings]:
+def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _template_db: Path) -> Iterator[config_mod.Settings]:
     monkeypatch.setenv("AEOS_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("AEOS_CONFIG", str(tmp_path / "no-config.yaml"))
     for k in list(os.environ):
@@ -72,9 +177,17 @@ def settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[config
     config_mod.reset_settings_cache()
     _reset_process_caches()
     s = config_mod.get_settings()
-    engine = init_engine(s)
-    create_all(engine)
-    _stamp_head(engine)
+    engine = init_engine(s)  # also creates the data directory layout
+    # sqlite's online backup copies the template page by page (through any WAL) into this test's new database file
+    src = sqlite3.connect(_template_db)
+    try:
+        dst = sqlite3.connect(s.layout.db_path)
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
     yield s
     engine.dispose()
     config_mod.reset_settings_cache()
@@ -87,11 +200,16 @@ _HEAD: list[str] = []
 def _stamp_head(engine) -> None:
     """Record the migration head like `aeos db upgrade` does for a create_all database (fast path)."""
     if not _HEAD:
+        from alembic.config import Config
         from alembic.script import ScriptDirectory
 
-        from aeos.core.migrate import alembic_config
+        from aeos.core.migrate import MIGRATIONS_DIR
 
-        _HEAD.append(ScriptDirectory.from_config(alembic_config()).get_current_head() or "")
+        # script_location only: `alembic_config()` would call get_settings() and read the host's AEOS_* variables and
+        # aeos.yaml, because the template is built before the `settings` fixture isolates them
+        cfg = Config()
+        cfg.set_main_option("script_location", str(MIGRATIONS_DIR))
+        _HEAD.append(ScriptDirectory.from_config(cfg).get_current_head() or "")
     if _HEAD[0]:
         with engine.begin() as conn:
             conn.exec_driver_sql("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL, "
