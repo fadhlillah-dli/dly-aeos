@@ -191,20 +191,61 @@ def _runners(job: dict) -> set[str]:
 
 # ------------------------------------------------------------------ CI in about ten minutes (ADR-0115 amendment)
 HOST_OSES = ("windows-latest", "macos-latest", "macos-26-intel")
-# The required status checks of the ruleset on main (GitHub Actions app). The ruleset is owner configuration; these
-# names must keep existing, each exactly once, and must only pass when everything they stand for passed.
+# The required status checks of the ruleset on main (GitHub Actions app): the one list that
+# .github/rulesets/main.json must equal (github_settings.py --apply writes that file to GitHub). Each name must keep
+# existing in exactly one job of ALL workflows (ci.yml, and pr-title.yml for ``pr title [G1]``), and must only pass
+# when everything it stands for passed.
 REQUIRED_CHECKS = (
     *(f"backend [G1,G2] ({o})" for o in HOST_OSES),
     *(f"bootstrap [G2] ({o})" for o in HOST_OSES),
     "browser e2e + a11y smoke [G3]",
     "frontend [G1,G3]",
+    "commit subjects [G1]",
+    "pr title [G1]",
 )
 
 
+def _other_workflow_check_names() -> list[str]:
+    """Check names of every workflow except ci.yml (whose jobs ``_workflow()`` and the callers below handle)."""
+    import yaml
+
+    names: list[str] = []
+    for path in sorted((ROOT / ".github" / "workflows").glob("*.y*ml")):
+        if path.name == "ci.yml":
+            continue
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        names += [n for job in doc["jobs"].values() for n in _check_names(job)]
+    return names
+
+
+def _all_workflow_check_names(ci_jobs: dict | None = None) -> list[str]:
+    jobs = _workflow()["jobs"] if ci_jobs is None else ci_jobs
+    return [n for job in jobs.values() for n in _check_names(job)] + _other_workflow_check_names()
+
+
+def _ruleset_required_contexts() -> list[str]:
+    ruleset = json.loads((ROOT / ".github" / "rulesets" / "main.json").read_text(encoding="utf-8"))
+    rule = next(r for r in ruleset["rules"] if r["type"] == "required_status_checks")
+    return [c["context"] for c in rule["parameters"]["required_status_checks"]]
+
+
 def test_every_required_check_of_the_main_ruleset_is_reported_by_exactly_one_job():
-    names = [n for job in _workflow()["jobs"].values() for n in _check_names(job)]
+    names = _all_workflow_check_names()
     for required in REQUIRED_CHECKS:
         assert names.count(required) == 1, (required, names.count(required))
+
+
+def _ruleset_problems(contexts: list[str]) -> list[str]:
+    problems = [f"duplicate context {c!r}" for c in sorted(set(contexts)) if contexts.count(c) > 1]
+    problems += [f"ruleset lacks required check {c!r}" for c in REQUIRED_CHECKS if c not in contexts]
+    problems += [f"ruleset requires {c!r}, which REQUIRED_CHECKS lacks" for c in contexts if c not in REQUIRED_CHECKS]
+    return problems
+
+
+def test_required_checks_equal_the_contexts_of_the_ruleset_file():
+    """REQUIRED_CHECKS and .github/rulesets/main.json are one list: a context added to one and not the other is red,
+    so a ruleset cannot require a name no workflow reports (the merge would wait for ever) nor drop a gate quietly."""
+    assert _ruleset_problems(_ruleset_required_contexts()) == []
 
 
 # Every job id of ci.yml except the shard jobs, with its name (the check-run name a ruleset or classify_check sees). The
@@ -232,7 +273,7 @@ def _job_name_problems(jobs: dict) -> list[str]:
                 for jid, name in expected.items() if jid in jobs and jobs[jid].get("name") != name]
     problems += [f"job {jid} is missing" for jid in expected if jid not in jobs]
     problems += [f"job {jid} is not pinned in JOB_NAMES" for jid in jobs if jid not in expected]
-    names = [n for job in jobs.values() for n in _check_names(job)]
+    names = _all_workflow_check_names(jobs)
     problems += [f"required check {r!r} reported {names.count(r)} times" for r in REQUIRED_CHECKS if names.count(r) != 1]
     return problems
 
@@ -260,6 +301,54 @@ def test_the_job_name_check_bites_on_a_renamed_dropped_or_unpinned_job_without_a
     extra = copy.deepcopy(jobs)
     extra["new-job"] = {"name": "new job [G1]", "runs-on": "ubuntu-latest", "steps": []}
     assert _job_name_problems(extra)
+
+
+def test_a_required_name_that_only_pr_title_yml_reports_is_found_there_and_missing_without_it(monkeypatch):
+    """Near miss: ``pr title [G1]`` is not a job of ci.yml, yet the check is green because the other workflows count.
+    Violating: the same ci.yml jobs with pr-title.yml renamed or dropped report the name 0 times."""
+    jobs = _workflow()["jobs"]
+    assert "pr title [G1]" not in [n for job in jobs.values() for n in _check_names(job)]
+    assert _job_name_problems(jobs) == []
+    monkeypatch.setattr(sys.modules[__name__], "_other_workflow_check_names", lambda: ["pr title"])
+    assert "required check 'pr title [G1]' reported 0 times" in _job_name_problems(jobs)
+
+
+def test_the_ruleset_file_and_required_checks_bite_when_they_differ():
+    contexts = _ruleset_required_contexts()
+    assert _ruleset_problems(contexts) == []
+    assert _ruleset_problems([c for c in contexts if c != "pr title [G1]"]) == [
+        "ruleset lacks required check 'pr title [G1]'"]
+    assert _ruleset_problems([*contexts, "lint"]) == ["ruleset requires 'lint', which REQUIRED_CHECKS lacks"]
+    assert _ruleset_problems([*contexts, "frontend [G1,G3]"]) == ["duplicate context 'frontend [G1,G3]'"]
+
+
+def _push_to_main_problems(workflows: dict[str, dict]) -> list[str]:
+    """Required checks that no job reports on a push to main. ``ci_status.py --after-merge`` judges the merge commit
+    against the required contexts of the live ruleset; a context without a check run there (not even a skipped one,
+    which counts as OK) stays PENDING until the deadline and every merge ends unverified."""
+    reported: set[str] = set()
+    for doc in workflows.values():
+        on = doc.get("on", doc.get(True)) or {}
+        push = on.get("push") if isinstance(on, dict) else None
+        if isinstance(on, dict) and "push" in on and (push or {}).get("branches", ["main"]) == ["main"]:
+            reported |= {n for job in doc["jobs"].values() for n in _check_names(job)}
+    return [f"required check {r!r} has no check run on a push to main" for r in REQUIRED_CHECKS if r not in reported]
+
+
+def test_every_required_check_has_a_check_run_on_the_merge_commit_on_main():
+    """Near miss: the real workflows (ci.yml and pr-title.yml both run on push to main; a job that only makes sense on
+    a pull request is skipped there by its ``if``, which is an OK check run). Violating: pr-title.yml without its push
+    trigger leaves ``pr title [G1]`` without a run on main."""
+    import copy
+
+    workflows = _workflow_files()
+    assert _push_to_main_problems(workflows) == []
+    no_push = copy.deepcopy(workflows)
+    on = no_push["pr-title.yml"].get("on", no_push["pr-title.yml"].get(True))
+    del on["push"]
+    assert _push_to_main_problems(no_push) == ["required check 'pr title [G1]' has no check run on a push to main"]
+    dropped = {k: v for k, v in workflows.items() if k != "pr-title.yml"}
+    assert _push_to_main_problems(dropped) == ["required check 'pr title [G1]' has no check run on a push to main"]
 
 
 def _aggregator(os_label: str) -> tuple[str, dict]:
@@ -755,14 +844,15 @@ PR_TITLE_JOB = "pr-title"
 
 
 def _pr_title_problems(doc: dict) -> list[str]:
-    """What is wrong with pr-title.yml (a parsed workflow), the parts that are specific to it: the five event types,
+    """What is wrong with pr-title.yml (a parsed workflow), the parts that are specific to it: the five pull_request
+    event types plus a push to main (where the job is skipped), the pull_request guard on the job,
     one ubuntu job named ``pr title [G1]`` with a 5-minute timeout and the same checkout as ci.yml without ``with:``,
     and the title reaching the script through ``env:`` only. The all-workflow rules (pins, token, timeouts) are owned
     by tests/unit/test_delivery_ci_secrets.py."""
     problems = []
     on = doc.get("on", doc.get(True)) or {}
-    if set(on) != {"pull_request"} or set(on["pull_request"]["types"]) != {
-            "opened", "edited", "synchronize", "reopened", "ready_for_review"}:
+    if set(on) != {"pull_request", "push"} or set(on["pull_request"]["types"]) != {
+            "opened", "edited", "synchronize", "reopened", "ready_for_review"} or on["push"] != {"branches": ["main"]}:
         problems.append(f"on: {on}")
     jobs = _all_jobs(doc)
     if list(jobs) != [PR_TITLE_JOB]:
@@ -774,8 +864,12 @@ def _pr_title_problems(doc: dict) -> list[str]:
         problems.append(f"runs-on {job.get('runs-on')!r} (a macOS slot is scarce, the check is platform-neutral)")
     if job.get("timeout-minutes") != 5:
         problems.append(f"timeout-minutes {job.get('timeout-minutes')!r}")
-    if "if" in job or "continue-on-error" in job or "permissions" in job:
-        problems.append("job-level if / continue-on-error / permissions")
+    # The job is skipped on the push to main so that the required context "pr title [G1]" has a (skipped, OK) check run
+    # on every merge commit: ci_status.py --after-merge would stay PENDING for ever without it.
+    if job.get("if") != "github.event_name == 'pull_request'":
+        problems.append(f"job-level if must be exactly the pull_request guard: {job.get('if')!r}")
+    if "continue-on-error" in job or "permissions" in job:
+        problems.append("job-level continue-on-error / permissions")
     steps = job["steps"]
     checkout = steps[0]
     if not str(checkout.get("uses", "")).startswith("actions/checkout@") or checkout.get("with"):
@@ -802,7 +896,7 @@ def test_pr_title_workflow_checks_the_title_as_a_commit_subject_with_the_title_o
     code_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
     assert sum("github.event.pull_request.title" in ln for ln in code_lines) == 1  # the env line, nowhere else
     assert classify_check("pr title [G1]") == ["G1"]
-    assert "pr title [G1]" not in REQUIRED_CHECKS  # adding it to a ruleset is an owner decision
+    assert "pr title [G1]" in REQUIRED_CHECKS  # required since the merge policy of ADR-0115 (2026-10-27)
     assert "pr title [G1]" not in [n for job in _workflow()["jobs"].values() for n in _check_names(job)]
 
 
@@ -818,6 +912,7 @@ def test_the_pr_title_checks_bite_on_each_unsafe_or_weakened_shape():
         return _pr_title_problems(copy_)
 
     job = lambda d: d["jobs"][PR_TITLE_JOB]  # noqa: E731
+    _on = lambda d: d.get("on", d.get(True))  # noqa: E731  (PyYAML reads the bare key `on` as True)
     assert mutated(lambda d: job(d)["steps"][1].update(run="python3 scripts/commit_subject.py --subject \"${{ github.event.pull_request.title }}\""))
     assert mutated(lambda d: job(d)["steps"][1].update(run='python3 scripts/commit_subject.py --subject "$PR_TITLE"'))
     assert mutated(lambda d: job(d)["steps"][1].update(env={}))
@@ -828,11 +923,16 @@ def test_the_pr_title_checks_bite_on_each_unsafe_or_weakened_shape():
     assert mutated(lambda d: job(d).update({"runs-on": "macos-latest"}))
     assert mutated(lambda d: job(d).update({"name": "pr title"}))
     assert mutated(lambda d: job(d).update({"if": "github.event.action == 'edited'"}))
+    assert mutated(lambda d: job(d).pop("if"))  # a push to main would run the title check on no title
+    assert mutated(lambda d: _on(d).pop("push"))  # no check run on the merge commit: --after-merge stays PENDING
+    assert mutated(lambda d: _on(d).update({"push": {"branches": ["main", "release"]}}))
+    assert mutated(lambda d: _on(d).update({"push": {"tags": ["v*"]}}))
     assert mutated(lambda d: job(d)["steps"][0].update(uses="actions/checkout@v7"))
     assert mutated(lambda d: job(d)["steps"][0].update({"with": {"ref": "main"}}))
-    assert mutated(lambda d: d.update({"on": {"pull_request": {"types": ["opened"]}}}))
-    assert mutated(lambda d: d.update({"on": {"pull_request_target": {"types": ["opened", "edited", "synchronize",
-                                                                               "reopened", "ready_for_review"]}}}))
+    assert mutated(lambda d: _on(d).update({"pull_request": {"types": ["opened"]}}))
+    assert mutated(lambda d: d.update({True: {"pull_request_target": {"types": ["opened", "edited", "synchronize",
+                                                                               "reopened", "ready_for_review"]},
+                                              "push": {"branches": ["main"]}}}))
 
 
 # The checkout and setup of every backend job (static, shards, verifier) must build the commit under test: an
