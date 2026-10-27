@@ -176,9 +176,9 @@ class RecoveryRefused(Exception):
 
 def _inside(path: Path, root: Path) -> bool:
     # one comparison for both refusals: path text plus file identity (case-insensitive macOS volume)
-    from aeos.policy.snapshot import _within_repository
+    from aeos.core.paths import is_within
 
-    return _within_repository(path, root.resolve())
+    return is_within(path, root.resolve())
 
 
 def _git_work_tree(path: Path) -> Path | None:
