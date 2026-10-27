@@ -1,7 +1,8 @@
 """CI contract: what CONTRIBUTING.md says about the CI jobs, and which scripts CI really runs with ``--check``.
 
-1. CI layout. The section ``### CI layout`` of CONTRIBUTING.md must name every job of ``.github/workflows/ci.yml``,
-   and every check name it writes in backticks must exist in ci.yml. Keyed on JOB NAMES, not job ids: the ``name:``
+1. CI layout. The section ``### CI layout`` of CONTRIBUTING.md must name every job of every workflow under
+   ``.github/workflows`` that runs on ``pull_request`` or ``push`` (ci.yml and, for example, pr-title.yml), and every
+   check name it writes in backticks must be a job of one of them. Keyed on JOB NAMES, not job ids: the ``name:``
    of a job is what GitHub reports as the check, what the ruleset on ``main`` requires and what a reader sees, so it
    is the name the prose uses. A matrix is expanded the way ``tests/unit/test_ci_gates.py`` expands it (``_check_names``);
    in the prose ``K/N`` stands for a shard such as ``2/3`` and ``<os>`` for a runner label. A backticked span is read
@@ -30,7 +31,7 @@ import yaml
 
 from aeos.core.paths import repo_root
 from tests.unit.docs_contract_support import script_flags
-from tests.unit.test_ci_gates import _check_names, _workflow
+from tests.unit.test_ci_gates import _check_names
 
 ROOT = repo_root()
 HEADING = "### CI layout"
@@ -89,6 +90,25 @@ def workflow_check_names(workflow: Mapping) -> dict[str, list[str]]:
             for job_id, job in (workflow.get("jobs") or {}).items()}
 
 
+def _runs_on_pr_or_push(workflow: Mapping) -> bool:
+    on = workflow.get("on", workflow.get(True))  # PyYAML reads the bare key `on` as True
+    triggers = [on] if isinstance(on, str) else list(on or [])
+    return any(t in ("pull_request", "push") for t in triggers)
+
+
+def checked_workflows(directory: Path | None = None) -> dict:
+    """The jobs of every workflow that runs on pull_request or push, as one ``{"jobs": ...}`` mapping. Job ids of a file
+    other than ci.yml are prefixed with its stem (``pr-title/pr-title``) so two files cannot collide."""
+    jobs: dict[str, object] = {}
+    for path in sorted((directory or ROOT / ".github" / "workflows").glob("*.y*ml")):
+        workflow = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not _runs_on_pr_or_push(workflow):
+            continue
+        for job_id, job in (workflow.get("jobs") or {}).items():
+            jobs[job_id if path.name == "ci.yml" else f"{path.stem}/{job_id}"] = job
+    return {"jobs": jobs}
+
+
 def layout_problems(workflow: Mapping, contributing: str) -> list[str]:
     section = ci_layout_section(contributing)
     if section is None:
@@ -100,12 +120,12 @@ def layout_problems(workflow: Mapping, contributing: str) -> list[str]:
     for job_id, names in jobs.items():
         for name in names:
             if not any(p.fullmatch(name) for _, p in patterns):
-                problems.append(f"ci.yml job '{job_id}' ('{name}') is not named in backticks in CONTRIBUTING.md "
+                problems.append(f"workflow job '{job_id}' ('{name}') is not named in backticks in CONTRIBUTING.md "
                                 f"'{HEADING}'")
     every = [n for names in jobs.values() for n in names]
     for doc_name, _ in patterns:
         if not any(_doc_regex(doc_name).fullmatch(n) for n in every):
-            problems.append(f"CONTRIBUTING.md '{HEADING}' names `{doc_name}`, which is no job of ci.yml")
+            problems.append(f"CONTRIBUTING.md '{HEADING}' names `{doc_name}`, which is no job of any workflow")
     return problems
 
 
@@ -114,13 +134,13 @@ def _contributing() -> str:
 
 
 def test_ci_layout_names_every_job_and_only_real_ones():
-    problems = layout_problems(_workflow(), _contributing())
+    problems = layout_problems(checked_workflows(), _contributing())
     assert not problems, "CONTRIBUTING.md CI layout drift:\n" + "\n".join(problems)
 
 
 def test_ci_layout_check_actually_sees_the_jobs():
     """Guards the check itself: the section is found and covers the jobs of the real workflow."""
-    jobs = workflow_check_names(_workflow())
+    jobs = workflow_check_names(checked_workflows())
     documented = documented_check_names(ci_layout_section(_contributing()) or "")
     assert len(jobs) >= 10 and len(documented) >= 8, (len(jobs), len(documented))
     assert "backend shard K/N [G2] (<os>)" in documented
@@ -128,7 +148,7 @@ def test_ci_layout_check_actually_sees_the_jobs():
 
 
 def test_bite_a_job_missing_from_the_prose_is_red_and_names_it():
-    workflow = _workflow()
+    workflow = checked_workflows()
     workflow["jobs"]["extra-lint"] = {"name": "extra lint [G1] (ubuntu-latest)", "runs-on": "ubuntu-latest", "steps": []}
     problems = layout_problems(workflow, _contributing())
     assert len(problems) == 1
@@ -136,7 +156,7 @@ def test_bite_a_job_missing_from_the_prose_is_red_and_names_it():
 
 
 def test_bite_a_matrix_job_without_a_name_is_keyed_on_its_id():
-    workflow = _workflow()
+    workflow = checked_workflows()
     workflow["jobs"]["unnamed-job"] = {"runs-on": "ubuntu-latest", "steps": []}
     problems = layout_problems(workflow, _contributing())
     assert len(problems) == 1 and "unnamed-job" in problems[0]
@@ -145,26 +165,40 @@ def test_bite_a_matrix_job_without_a_name_is_keyed_on_its_id():
 def test_bite_a_documented_name_that_is_no_job_is_red():
     text = _contributing().replace("`commit subjects [G1]`", "`commit subjectz [G1]`", 1)
     assert text != _contributing()
-    problems = layout_problems(_workflow(), text)
-    assert any("commit subjectz [G1]" in p and "no job of ci.yml" in p for p in problems)
+    problems = layout_problems(checked_workflows(), text)
+    assert any("commit subjectz [G1]" in p and "no job of any workflow" in p for p in problems)
     assert any("commit subjects [G1]" in p and "not named" in p for p in problems)
 
 
 def test_near_miss_prose_changes_and_untagged_code_spans_stay_green():
     text = _contributing()
-    assert layout_problems(_workflow(), text + "\n`ghost step` and `[G1]` and `ubuntu-latest` and `a [b] c`\n") == []
+    assert layout_problems(checked_workflows(), text + "\n`ghost step` and `[G1]` and `ubuntu-latest` and `a [b] c`\n") == []
     section = ci_layout_section(text) or ""
     reworded = text.replace(section, section.replace("runs ruff", "executes ruff"))
-    assert layout_problems(_workflow(), reworded) == []
+    assert layout_problems(checked_workflows(), reworded) == []
     # a tagged span OUTSIDE the section is not read, and a fenced block inside it is not either
     other = text.replace(HEADING, "### Something else\n\n`ghost [G1]`\n\n" + HEADING, 1)
-    assert layout_problems(_workflow(), other) == []
+    assert layout_problems(checked_workflows(), other) == []
     fenced = text.replace("```bash\npython -m pytest -q -n auto -m", "```bash\n`ghost [G1]`\npython -m pytest -q -n auto -m", 1)
-    assert fenced != text and layout_problems(_workflow(), fenced) == []
+    assert fenced != text and layout_problems(checked_workflows(), fenced) == []
+
+
+def test_bite_a_job_of_another_pull_request_workflow_counts_and_others_do_not(tmp_path):
+    """A second workflow that runs on pull_request is part of the layout; a dispatch-only workflow is not."""
+    (tmp_path / "ci.yml").write_text("on: [push, pull_request]\njobs:\n  a:\n    name: a [G1]\n", encoding="utf-8")
+    (tmp_path / "title.yml").write_text("on:\n  pull_request:\n    types: [edited]\njobs:\n  t:\n    name: t [G1]\n",
+                                        encoding="utf-8")
+    (tmp_path / "manual.yml").write_text("on: workflow_dispatch\njobs:\n  m:\n    name: m [G1]\n", encoding="utf-8")
+    jobs = checked_workflows(tmp_path)["jobs"]
+    assert set(jobs) == {"a", "title/t"}, jobs
+    doc = f"{HEADING}\n\n`a [G1]`\n"
+    red = layout_problems({"jobs": jobs}, doc)
+    assert red == [f"workflow job 'title/t' ('t [G1]') is not named in backticks in CONTRIBUTING.md '{HEADING}'"], red
+    assert layout_problems({"jobs": jobs}, doc + "`t [G1]`\n") == []
 
 
 def test_bite_missing_section_is_red():
-    assert layout_problems(_workflow(), "# Contributing\n") == [f"CONTRIBUTING.md has no '{HEADING}' section"]
+    assert layout_problems(checked_workflows(), "# Contributing\n") == [f"CONTRIBUTING.md has no '{HEADING}' section"]
 
 
 def test_placeholders_match_real_names_only():
