@@ -209,7 +209,8 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   `main` (the repository merges with a merge commit only), so it follows the same Conventional Commits and
   no-attribution rules.
   The title reaches the script through an environment variable, never through an expression inside `run:`. The check
-  is a required check of the ruleset on `main` (see "Merging").
+  is a required check of the ruleset on `main` (see "Merging"). The workflow also runs on a push to `main`, where the job
+  is skipped: a skipped run counts as OK and gives `ci_status.py --after-merge` the context it waits for.
 - **Verifier.** `backend verifier [G2] (macos-latest)` runs the real trusted-suite verifier test.
 - **Required names are aggregators.** The ruleset on `main` requires `backend [G1,G2] (<os>)` for each
   OS. These are small jobs on `ubuntu-latest` that wait for the static job and every backend job of their OS. They pass only

@@ -322,6 +322,35 @@ def test_the_ruleset_file_and_required_checks_bite_when_they_differ():
     assert _ruleset_problems([*contexts, "frontend [G1,G3]"]) == ["duplicate context 'frontend [G1,G3]'"]
 
 
+def _push_to_main_problems(workflows: dict[str, dict]) -> list[str]:
+    """Required checks that no job reports on a push to main. ``ci_status.py --after-merge`` judges the merge commit
+    against the required contexts of the live ruleset; a context without a check run there (not even a skipped one,
+    which counts as OK) stays PENDING until the deadline and every merge ends unverified."""
+    reported: set[str] = set()
+    for doc in workflows.values():
+        on = doc.get("on", doc.get(True)) or {}
+        push = on.get("push") if isinstance(on, dict) else None
+        if isinstance(on, dict) and "push" in on and (push or {}).get("branches", ["main"]) == ["main"]:
+            reported |= {n for job in doc["jobs"].values() for n in _check_names(job)}
+    return [f"required check {r!r} has no check run on a push to main" for r in REQUIRED_CHECKS if r not in reported]
+
+
+def test_every_required_check_has_a_check_run_on_the_merge_commit_on_main():
+    """Near miss: the real workflows (ci.yml and pr-title.yml both run on push to main; a job that only makes sense on
+    a pull request is skipped there by its ``if``, which is an OK check run). Violating: pr-title.yml without its push
+    trigger leaves ``pr title [G1]`` without a run on main."""
+    import copy
+
+    workflows = _workflow_files()
+    assert _push_to_main_problems(workflows) == []
+    no_push = copy.deepcopy(workflows)
+    on = no_push["pr-title.yml"].get("on", no_push["pr-title.yml"].get(True))
+    del on["push"]
+    assert _push_to_main_problems(no_push) == ["required check 'pr title [G1]' has no check run on a push to main"]
+    dropped = {k: v for k, v in workflows.items() if k != "pr-title.yml"}
+    assert _push_to_main_problems(dropped) == ["required check 'pr title [G1]' has no check run on a push to main"]
+
+
 def _aggregator(os_label: str) -> tuple[str, dict]:
     jobs = _workflow()["jobs"]
     return next((jid, j) for jid, j in jobs.items() if j.get("name") == f"backend [G1,G2] ({os_label})")
@@ -815,14 +844,15 @@ PR_TITLE_JOB = "pr-title"
 
 
 def _pr_title_problems(doc: dict) -> list[str]:
-    """What is wrong with pr-title.yml (a parsed workflow), the parts that are specific to it: the five event types,
+    """What is wrong with pr-title.yml (a parsed workflow), the parts that are specific to it: the five pull_request
+    event types plus a push to main (where the job is skipped), the pull_request guard on the job,
     one ubuntu job named ``pr title [G1]`` with a 5-minute timeout and the same checkout as ci.yml without ``with:``,
     and the title reaching the script through ``env:`` only. The all-workflow rules (pins, token, timeouts) are owned
     by tests/unit/test_delivery_ci_secrets.py."""
     problems = []
     on = doc.get("on", doc.get(True)) or {}
-    if set(on) != {"pull_request"} or set(on["pull_request"]["types"]) != {
-            "opened", "edited", "synchronize", "reopened", "ready_for_review"}:
+    if set(on) != {"pull_request", "push"} or set(on["pull_request"]["types"]) != {
+            "opened", "edited", "synchronize", "reopened", "ready_for_review"} or on["push"] != {"branches": ["main"]}:
         problems.append(f"on: {on}")
     jobs = _all_jobs(doc)
     if list(jobs) != [PR_TITLE_JOB]:
@@ -834,8 +864,12 @@ def _pr_title_problems(doc: dict) -> list[str]:
         problems.append(f"runs-on {job.get('runs-on')!r} (a macOS slot is scarce, the check is platform-neutral)")
     if job.get("timeout-minutes") != 5:
         problems.append(f"timeout-minutes {job.get('timeout-minutes')!r}")
-    if "if" in job or "continue-on-error" in job or "permissions" in job:
-        problems.append("job-level if / continue-on-error / permissions")
+    # The job is skipped on the push to main so that the required context "pr title [G1]" has a (skipped, OK) check run
+    # on every merge commit: ci_status.py --after-merge would stay PENDING for ever without it.
+    if job.get("if") != "github.event_name == 'pull_request'":
+        problems.append(f"job-level if must be exactly the pull_request guard: {job.get('if')!r}")
+    if "continue-on-error" in job or "permissions" in job:
+        problems.append("job-level continue-on-error / permissions")
     steps = job["steps"]
     checkout = steps[0]
     if not str(checkout.get("uses", "")).startswith("actions/checkout@") or checkout.get("with"):
@@ -878,6 +912,7 @@ def test_the_pr_title_checks_bite_on_each_unsafe_or_weakened_shape():
         return _pr_title_problems(copy_)
 
     job = lambda d: d["jobs"][PR_TITLE_JOB]  # noqa: E731
+    _on = lambda d: d.get("on", d.get(True))  # noqa: E731  (PyYAML reads the bare key `on` as True)
     assert mutated(lambda d: job(d)["steps"][1].update(run="python3 scripts/commit_subject.py --subject \"${{ github.event.pull_request.title }}\""))
     assert mutated(lambda d: job(d)["steps"][1].update(run='python3 scripts/commit_subject.py --subject "$PR_TITLE"'))
     assert mutated(lambda d: job(d)["steps"][1].update(env={}))
@@ -888,11 +923,16 @@ def test_the_pr_title_checks_bite_on_each_unsafe_or_weakened_shape():
     assert mutated(lambda d: job(d).update({"runs-on": "macos-latest"}))
     assert mutated(lambda d: job(d).update({"name": "pr title"}))
     assert mutated(lambda d: job(d).update({"if": "github.event.action == 'edited'"}))
+    assert mutated(lambda d: job(d).pop("if"))  # a push to main would run the title check on no title
+    assert mutated(lambda d: _on(d).pop("push"))  # no check run on the merge commit: --after-merge stays PENDING
+    assert mutated(lambda d: _on(d).update({"push": {"branches": ["main", "release"]}}))
+    assert mutated(lambda d: _on(d).update({"push": {"tags": ["v*"]}}))
     assert mutated(lambda d: job(d)["steps"][0].update(uses="actions/checkout@v7"))
     assert mutated(lambda d: job(d)["steps"][0].update({"with": {"ref": "main"}}))
-    assert mutated(lambda d: d.update({"on": {"pull_request": {"types": ["opened"]}}}))
-    assert mutated(lambda d: d.update({"on": {"pull_request_target": {"types": ["opened", "edited", "synchronize",
-                                                                               "reopened", "ready_for_review"]}}}))
+    assert mutated(lambda d: _on(d).update({"pull_request": {"types": ["opened"]}}))
+    assert mutated(lambda d: d.update({True: {"pull_request_target": {"types": ["opened", "edited", "synchronize",
+                                                                               "reopened", "ready_for_review"]},
+                                              "push": {"branches": ["main"]}}}))
 
 
 # The checkout and setup of every backend job (static, shards, verifier) must build the commit under test: an

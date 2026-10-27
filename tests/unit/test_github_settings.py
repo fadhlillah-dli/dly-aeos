@@ -298,7 +298,8 @@ def test_the_checked_in_files_hold_the_merge_policy():
     assert main["conditions"]["ref_name"]["include"] == ["~DEFAULT_BRANCH"]
     assert tags["target"] == "tag" and tags["enforcement"] == "active" and tags["bypass_actors"] == []
     assert tags["conditions"]["ref_name"] == {"include": ["refs/tags/v*"], "exclude": []}
-    assert sorted(r["type"] for r in tags["rules"]) == ["deletion", "non_fast_forward"]
+    assert sorted(r["type"] for r in tags["rules"]) == ["deletion", "non_fast_forward", "update"]
+    assert {"type": "update"} in tags["rules"]  # a fast-forward move of a release tag is an update, not a force push
     assert (main["name"], tags["name"]) == (MAIN_NAME, TAGS_NAME)
 
 

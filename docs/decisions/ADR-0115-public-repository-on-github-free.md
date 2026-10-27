@@ -259,10 +259,12 @@ session made these choices under it):
    `ci_status.py --after-merge` judges the merge commit and, while `main` is RED, nothing else is merged.
 4. **Head branches are deleted on merge** (`delete_branch_on_merge`): merged branches are not reused, and the local
    `worktree.py list` already reports merged and pushed state from the remote-tracking refs.
-5. **Release tags `v*` are protected** by a tag ruleset: no deletion and no non-fast-forward update (a force push).
-   A published release tag is what `release_check.py` and the provenance record point at; moving it silently would
-   break both. Creating a tag stays allowed. A fast-forward move of an existing tag is not blocked by this rule
-   (NOT-PROVEN whether GitHub's separate `update` rule fits a tag; it was not added).
+5. **Release tags `v*` are protected** by a tag ruleset: no deletion, no non-fast-forward update (a force push) and
+   no update at all (GitHub's `update` rule, "Restrict updates"). A published release tag is what `release_check.py`
+   and the provenance record point at; moving it silently would break both. The `update` rule is needed because
+   `git tag -f v1.2.0 <descendant> && git push -f` onto a descendant is a fast-forward, which `non_fast_forward` alone
+   allows. Creating a tag stays allowed, so a release only ever creates a tag. (Review 2026-10-27: the first version of
+   this amendment left `update` out.)
 6. **Settings as code.** `.github/repository-settings.json`, `.github/rulesets/main.json` and
    `.github/rulesets/release-tags.json` hold the settings; `scripts/github_settings.py --check` compares them with the
    live repository (read-only, `GITHUB_SETTINGS: OK|DRIFT|ERROR`) and `--apply --yes` writes them. It never runs in CI:
@@ -271,12 +273,19 @@ session made these choices under it):
    `tests/unit/test_ci_gates.py` keeps `REQUIRED_CHECKS` equal to the contexts of `main.json` and each name equal to
    exactly one job of one workflow, so the ruleset cannot require a check that no job reports.
 
+7. **`pr title [G1]` reports on `main` too.** `ci_status.py --after-merge` reads its required contexts from the live
+   ruleset and finds the check runs of the merge commit. `pr-title.yml` therefore also runs on a push to `main`, where
+   its job is skipped (`if: github.event_name == 'pull_request'`): a skipped check run counts as OK, exactly as for
+   `commit subjects [G1]` in `ci.yml`. Without it the context would never exist on a merge commit and the post-merge
+   verification, which replaces strict mode (item 3), could never turn GREEN. `tests/unit/test_ci_gates.py` requires
+   every required check to be reported by a workflow that runs on a push to `main`.
+
 **Unchanged:** no bypass actors, no required approvals (a single owner), pull request required, no force push or
 deletion of `main`, the status checks are those of the GitHub Actions app.
 
 **Evidence and NOT-PROVEN.** E2 on macOS arm64: unit tests with a fake API prove the comparison and the apply order
 (PATCH, PUT, POST) against fixture state; a ruleset that allows squash and a missing required context are each DRIFT
 naming `allowed_merge_methods` or the context, the identical state is OK, `--apply` without `--yes` sends nothing.
-NOT-PROVEN: that GitHub accepts the written files (the live `--apply` has not run), that the live state then reads
+NOT-PROVEN: that GitHub accepts the written files, in particular the `update` rule without parameters in a tag ruleset (the live `--apply` has not run), that the skipped `pr title [G1]` run appears on the first merge commit after this change, that the live state then reads
 back as OK without a server-side default making a permanent DRIFT, that the merge button then offers only a merge
 commit, and everything on Windows and macOS Intel until CI has run the tests there.
