@@ -283,6 +283,31 @@ Two standalone helpers in `scripts/` (stdlib only, ASCII output, last line is th
 Both have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`): a violating
 fixture is red and a near-miss legitimate one is green. The junction test runs only on Windows.
 
+#### Claude Code hooks
+
+The committed `.claude/settings.json` registers two Claude Code hooks for anyone who works on this repository with
+Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). Both are fail-open: whatever goes wrong inside
+a hook (a missing `python3`, bad input, an exception, a timeout), the session or the prompt goes on unchanged.
+
+- **SessionStart** runs `python3 scripts/preflight.py --facts` and puts the environment facts (interpreter, venv,
+  pytest, node, git, `core.hooksPath`, `gh` login status) into the session context, so nobody guesses them.
+- **UserPromptSubmit** runs `scripts/claude_hooks/secret_prompt_guard.py` (stdlib only, about 30 ms). A prompt that
+  carries a high-confidence secret shape (a provider token with a fixed prefix, a Vault/OpenBao token, an unseal key
+  line, a PEM private key header; the patterns are the ones of `aeos.core.redaction`) is blocked before it reaches the
+  model. The message, in Indonesian and English, names only the kind of secret, never the value, and says: do not paste
+  secrets into chat, store them with `./aeos secrets set`, and rotate anything already sent (AGENTS.md invariant 12:
+  a secret seen in chat is burned). A block keeps the secret from the model; Claude Code may still keep the typed text
+  in its local prompt history, which is another reason to rotate. Ordinary prose, git SHAs, UUIDs, digests and
+  placeholders such as `<your-token>` pass.
+
+To switch them off for yourself, override them in `.claude/settings.local.json` (not committed) or use `/hooks` in
+Claude Code; do not edit the committed file for a personal preference. Setting `"disableAllHooks": true` in
+`.claude/settings.local.json` turns off every hook. A copy of the guard in your user-level Claude Code settings, to
+protect your other repositories too, is optional: point the user-level `UserPromptSubmit` hook at the absolute path of
+this script (it needs the `backend/` folder of this checkout next to it, so it works only from a checkout).
+`tests/unit/test_secret_prompt_guard.py` holds the bite tests (every secret kind blocked, near misses allowed, bad
+input silent) and checks that the hook commands in `.claude/settings.json` name scripts that exist.
+
 ### Rules for every change
 
 - **NOT-PROVEN stays visible.** A pull request says what is proven, at which evidence level, and
