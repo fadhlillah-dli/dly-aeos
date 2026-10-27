@@ -216,34 +216,45 @@ image rebuild and at least weekly ([1.15](#115-recurring-owner-actions)).
 ### 1.7 OpenBao: install, init, unseal [per machine]
 
 `<X.Y.Z>` is an exact release you reviewed at github.com/openbao/openbao/releases; the installer picks
-darwin_arm64 or darwin_amd64 and shows the SHA256. `vault init` shows the unseal key(s) ONCE on a temporary
-screen; type `stored` to close it. `doctor -g SECRET` must show the `secret.openbao_*` checks passing, and
-`doctor --functional -g SECRET` must show `secret.keyring` VERIFIED (allow the Keychain prompt for the dly-aeos
-service only).
+darwin_arm64 or darwin_amd64 and shows the SHA256. `vault init` keeps the unseal key share(s) in the macOS
+Keychain (the same `dly-aeos-bootstrap` service as the AppRole credentials) and never prints them
+([ADR-0123](decisions/ADR-0123-openbao-unseal-key-in-os-keyring.md)). `vault export-recovery` writes your offline
+recovery copy to a new owner-only file and prints only its path. `doctor -g SECRET` must show the
+`secret.openbao_*` checks passing and says where the unseal key lives, and `doctor --functional -g SECRET` must
+show `secret.keyring` VERIFIED (allow the Keychain prompt for the dly-aeos service only).
 
 ```bash
 ./aeos vault install --version <X.Y.Z>
 ./aeos vault start
 ./aeos vault init
+./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ./aeos vault status --verify
 ./aeos doctor -g SECRET
 ./aeos doctor --functional -g SECRET
 ```
 
-Run `vault init` in a terminal: it shows the unseal key(s) on a temporary screen. Store them offline (password
-manager or paper), then type `stored`: the screen closes and the keys are not written to the terminal's
-scrollback. Outside a terminal it refuses unless you pass `--plain-output`. The root token is revoked when setup
-completes, so it is not shown at all; only a `setup incomplete` run shows it, and then you store it too so you
-can finish. Never paste or screenshot the `vault init` output into a chat or an AI assistant. To prove the step,
-paste only `./aeos doctor --functional -g SECRET`, which contains no secret. If an unseal key was exposed right
-after `vault init`, before any `secrets set`, reset the empty vault: `./aeos vault stop`, delete
+Move the recovery file offline right away (encrypted USB drive or your password manager entry), then delete it
+from the disk; the runbook below has the exact commands. It is the only way back if the Keychain entry is lost.
+The root token is revoked when setup completes, so none is kept anywhere; only a `setup incomplete` run keeps it,
+in the Keychain only, and the recovery copy then contains it so you can finish. Never paste or screenshot
+`vault init` output, the recovery file or a key into a chat or an AI assistant. To prove the step, paste only
+`./aeos doctor --functional -g SECRET`, which contains no secret. If an unseal key was exposed right after
+`vault init`, before any `secrets set`, reset the empty vault: `./aeos vault stop`, delete
 `~/Library/Application Support/DLY-AEOS/openbao/raft`, `./aeos vault start`, `./aeos vault init`. Once a secret
 is stored, follow the runbook below instead.
 
-After every restart, run `./aeos vault start`, then `./aeos vault unseal`. Unseal keys never go into the
-repository, a config file, chat or AEOS backups. Recovery:
-[runbooks/openbao-unseal-recovery.md](runbooks/openbao-unseal-recovery.md). Each Mac has its own vault with its
-own unseal keys.
+After a restart, run `./aeos vault start`; `./aeos serve` (or `./aeos vault unseal`) then unseals OpenBao from the
+Keychain. The residual risk, stated by Doctor too: anyone who acts as your OS user on this Mac can read the unseal
+key, as they can the AppRole credentials already there. Unseal keys never go into the repository, a config file,
+chat or AEOS backups. Each Mac has its own vault with its own unseal keys.
+
+**Already initialised before ADR-0123** (the key is only in your offline storage): migrate once with
+`./aeos vault import-unseal-key` (hidden prompt, entered twice; paste it from your password manager, never into a
+chat or the command line), then `./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"` and move that file
+offline. Step by step, with the proof that the key works:
+[runbooks/openbao-unseal-recovery.md](runbooks/openbao-unseal-recovery.md), "One-time migration". To keep the
+former flow instead (keys shown once on a temporary screen, a manual unseal after every restart), run
+`./aeos vault init --show-unseal-once`.
 
 Optional live proof on a throw-away vault:
 `DLY_AEOS_TEST_BAO="$HOME/Library/Application Support/DLY-AEOS/bin/bao" .venv/bin/python -m pytest -m integration tests/integration/test_secrets_openbao_live.py -q`.
@@ -606,8 +617,8 @@ Note the `backup_id` from `backup list`. `doctor -g RECOVERY` must show `recover
 ```
 
 The same controls are on *Riwayat & Pemulihan* (`/history`) → *Backup & pemulihan*. Copy one restore-tested
-backup to encrypted external storage. Backups exclude OpenBao data and the Keychain: the unseal keys from 1.7 are
-your recovery path for those.
+backup to encrypted external storage. Backups exclude OpenBao data and the Keychain: the offline recovery copy of
+the unseal key from 1.7 is your recovery path for those.
 
 Optional but needed for `recovery.config_rollback`: promote the first controller release
 ([runbook](runbooks/controller-upgrade-rollback.md)).

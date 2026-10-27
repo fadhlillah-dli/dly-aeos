@@ -189,7 +189,8 @@ def _mock_init(m, *, fail_approle: bool = False):
     return {"policies": policies, "role": role, "revoke": revoke, "unseals": unseals}
 
 
-INIT = ["vault", "init", "--shares", "3", "--threshold", "2", "--yes"]
+# the former show-once flow; the default (keys in the OS keyring, ADR-0123) is tested in test_vault_keyring_unseal.py
+INIT = ["vault", "init", "--shares", "3", "--threshold", "2", "--yes", "--show-unseal-once"]
 ROOT = "s." + "R" * 26
 
 
@@ -209,7 +210,8 @@ def test_vault_init_full_flow(settings, memory_keyring):  # noqa: F811
     office_policy = next(c.request for c in calls["policies"].calls if c.request.url.path.endswith("aeos-office"))
     assert "aeos/data/office/*" in json.loads(office_policy.content)["policy"]
     assert bootstrap_store(settings).approle() == ("role-" + "i" * 20, "sid-" + "j" * 20)
-    assert bootstrap_store(settings).unseal_keys() == []  # only with --store-unseal-in-keyring
+    assert bootstrap_store(settings).unseal_keys() == []  # --show-unseal-once keeps nothing in the keyring
+    assert bootstrap_store(settings).root_token() is None
 
 
 def test_vault_init_outside_a_terminal_is_refused_before_anything_changes(settings, memory_keyring):  # noqa: F811
@@ -288,7 +290,7 @@ def test_vault_unseal_from_keyring(settings, memory_keyring):  # noqa: F811
             200, json={"initialized": True, "sealed": True, "t": 2, "n": 3, "progress": 0}))
         m.put(f"{ADDR}/v1/sys/unseal").mock(side_effect=unseal)
         r = runner.invoke(app, ["vault", "unseal", "--from-keyring"])
-    assert r.exit_code == 0 and "Unsealed." in r.output and got == ["u1" * 16, "u2" * 16]
+    assert r.exit_code == 0 and "Unsealed with the key from the OS keyring" in r.output and got == ["u1" * 16, "u2" * 16]
     assert "u1u1" not in r.output
 
 

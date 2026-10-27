@@ -172,6 +172,13 @@ def serve(
             "Stop the other process or choose another port with --port / AEOS_PORT."
         )
         raise typer.Exit(2)
+    # ADR-0123: a sealed OpenBao is unsealed from the OS keyring when the key is stored there (never printed);
+    # without a stored key the controller starts as before and secret-dependent work fails closed.
+    from aeos.secrets.unseal import unseal_at_start
+
+    unseal_note = unseal_at_start(settings)
+    if unseal_note:
+        console.print(unseal_note, markup=False, highlight=False)
 
     from aeos.operations import release
 

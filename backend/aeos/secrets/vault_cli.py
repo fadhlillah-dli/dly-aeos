@@ -5,16 +5,20 @@ install  shows the plan (official release, asset, checksum, target, privilege, c
 start    generated loopback-only config, detached server, pid recorded.
 stop     stops the recorded server process.
 status   health/sealed/initialised, AppRole presence, interim mode.
-init     init + unseal + KV v2 + policies + AppRole; shows the unseal key(s) ONCE on a temporary terminal
-         screen (refused outside a terminal unless --plain-output); the root token only when setup is
-         incomplete (otherwise it is revoked).
-unseal   applies unseal keys (prompted, or from the OS keyring when the owner stored them there).
+init     init + unseal + KV v2 + policies + AppRole; keeps the unseal key share(s) in the OS keyring and never
+         prints them (ADR-0123); the root token is revoked, or kept in the keyring only while setup is incomplete.
+         --show-unseal-once: the former flow, the keys ONCE on a temporary terminal screen (refused outside a
+         terminal unless --plain-output).
+unseal   applies the unseal key(s) from the OS keyring when OpenBao is sealed, otherwise prompts (hidden).
+import-unseal-key  one-time migration: an existing unseal key from a hidden prompt into the OS keyring.
+export-recovery    the stored key(s) to a new owner-only (0600) file outside every repository; prints the path.
 """
 
 from __future__ import annotations
 
 import getpass
 import os
+import re
 import shutil
 import sys
 import time
@@ -22,7 +26,8 @@ import time
 import httpx
 import typer
 
-app = typer.Typer(help="Local OpenBao vault (install/start/stop/status/init/unseal).", no_args_is_help=True)
+app = typer.Typer(help="Local OpenBao vault (install/start/stop/status/init/unseal/import-unseal-key/"
+                       "export-recovery).", no_args_is_help=True)
 
 # Alternate screen buffer (xterm/VT): what is written there never reaches the scrollback, so the unseal
 # material cannot be copied later together with the rest of the terminal output. No erase-in-display is sent
@@ -237,6 +242,23 @@ def _verify(settings) -> int:
     return 0 if res["status"] == "VERIFIED" else 1
 
 
+def _unseal_key_location(settings) -> str:
+    """Where the unseal key lives (ADR-0123): a count and the store, never a value."""
+    from aeos.core.errors import AeosError
+    from aeos.secrets.provider import bootstrap_store, keyring_backend
+    from aeos.secrets.unseal import keyring_location
+
+    if not keyring_backend()[0]:
+        return "UNKNOWN (OS keyring unavailable)"
+    try:
+        count = bootstrap_store(settings).unseal_key_count()
+    except AeosError:
+        return "UNKNOWN (OS keyring unavailable)"
+    if not count:
+        return "not stored (unseal by hand after a restart: aeos vault unseal)"
+    return f"{count} share(s) in the {keyring_location(settings)}"
+
+
 @app.command("status")
 def status_cmd(verify: bool = typer.Option(False, "--verify", help="Also prove write/read/delete with the "
                                            "controller token (functional check)")) -> None:
@@ -252,6 +274,7 @@ def status_cmd(verify: bool = typer.Option(False, "--verify", help="Also prove w
                f"sealed={b['sealed']} version={b['version'] or 'UNKNOWN'}")
     typer.echo(f"binary           {'installed' if b['binary_installed'] else 'missing'}; server pid alive={b['server_pid_alive']}")
     typer.echo(f"approle keyring  {b['approle_in_keyring']}; login={b['login']}")
+    typer.echo(f"unseal key       {_unseal_key_location(settings)}")
     typer.echo(f"os keyring       {h['keyring']['available']} ({h['keyring']['backend']})")
     if h["interim"]["active"]:
         typer.secho(f"WARNING interim  {h['interim']['residual_risk']}", fg="yellow")
@@ -274,31 +297,38 @@ def init_cmd(
     shares: int = typer.Option(1, help="Number of unseal key shares"),
     threshold: int = typer.Option(1, help="Keys required to unseal"),
     store_unseal_in_keyring: bool = typer.Option(
-        False, "--store-unseal-in-keyring",
-        help="Also store the threshold unseal keys in the OS keyring (convenience; residual risk)"),
+        True, "--store-unseal-in-keyring/--show-unseal-once",
+        help="Default: keep the unseal key share(s) in the OS keyring, never printed; aeos serve and aeos vault "
+             "unseal unseal from there (ADR-0123). --show-unseal-once shows them once on a temporary screen instead"),
     plain_output: bool = typer.Option(
         False, "--plain-output",
-        help="Outside an interactive terminal, print the unseal key(s) to stdout (whatever captures it keeps them)"),
+        help="With --show-unseal-once outside an interactive terminal, print the unseal key(s) to stdout (whatever "
+             "captures it keeps them)"),
     yes: bool = typer.Option(False, "--yes", help="Do not ask for confirmation"),
 ) -> None:
     """Initialise OpenBao for DLY AEOS (policies + AppRole) and revoke the root token afterwards."""
     from aeos.core.redaction import register_secret
     from aeos.secrets import server
     from aeos.secrets.openbao import OpenBaoError, OpenBaoUnavailable
-    from aeos.secrets.provider import bootstrap_store, reset_provider_cache
+    from aeos.secrets.provider import UNSEAL_KEYRING_RISK, bootstrap_store, reset_provider_cache
     from aeos.secrets.setup import CONTROLLER_POLICIES, POLICY_NAMESPACES, run_init
+    from aeos.secrets.unseal import keyring_location
 
     settings = _settings()
     vt = _vt_terminal()
-    if not vt and not plain_output:
-        _err("vault init shows the unseal key(s) once, on a temporary terminal screen, and this is not an interactive "
-             "terminal. Run it in a terminal, or pass --plain-output to print them to stdout. Nothing was changed.")
+    if not store_unseal_in_keyring and not vt and not plain_output:
+        _err("vault init --show-unseal-once shows the unseal key(s) once, on a temporary terminal screen, and this is "
+             "not an interactive terminal. Run it in a terminal, or pass --plain-output to print them to stdout. "
+             "Nothing was changed.")
         raise typer.Exit(1)
+    location = keyring_location(settings)
     typer.echo("This will initialise the local OpenBao at " + settings.openbao_addr)
     typer.echo(f"  key shares/threshold : {shares}/{threshold}")
     typer.echo(f"  policies             : {', '.join(POLICY_NAMESPACES)}")
     typer.echo(f"  approle              : aeos-controller -> {', '.join(CONTROLLER_POLICIES)} (office NOT bound)")
     typer.echo("  bootstrap credentials: OS keyring service " + bootstrap_store(settings).service)
+    typer.echo("  unseal key(s)        : " + (f"{location} (never printed)" if store_unseal_in_keyring
+                                            else "shown once on a temporary terminal screen"))
     if not yes and not typer.confirm("Continue?", default=False):
         raise typer.Exit(1)
     reset = (f"reset the still empty vault: aeos vault stop, delete {server.server_dir(settings) / 'raft'}, "
@@ -315,6 +345,33 @@ def init_cmd(
     for k in res.keys:
         register_secret(k)
     register_secret(res.root_token)
+    # ADR-0123: the material is safe when the keys are in the keyring and the root token is revoked or kept there
+    if res.unseal_stored and (res.root_revoked or res.root_stored):
+        for step in res.steps:
+            typer.echo(f"  done: {step}")
+        reset_provider_cache()
+        typer.echo(f"Unseal key share(s): {len(res.keys)} stored in the {location}; never printed. aeos serve and "
+                   "aeos vault unseal unseal OpenBao from there after a restart.")
+        typer.echo("Make an offline recovery copy now, to a file outside every repository, then move it offline: "
+                   "aeos vault export-recovery <file>")
+        typer.secho(UNSEAL_KEYRING_RISK, fg="yellow")
+        if res.error:
+            _err(f"setup incomplete: {res.error}")
+            _err("The root token was NOT revoked. It is kept in the OS keyring only and was not printed; a recovery "
+                 f"copy (aeos vault export-recovery <file>) contains it to finish the setup. Otherwise {reset}.")
+            raise typer.Exit(1)
+        typer.echo("Root token revoked; the controller now uses AppRole with a 1h token TTL.")
+        return
+    if store_unseal_in_keyring:
+        _err(f"The OS keyring did not take the unseal material ({res.store_error or res.error}); it is shown once "
+             "instead.")
+        if not res.keys:
+            _err(f"init returned no unseal key: {reset}.")
+            raise typer.Exit(1)
+        if not vt and not plain_output:
+            _err("This is not an interactive terminal and --plain-output was not given, so the material cannot be "
+                 f"shown and is lost: {reset}.")
+            raise typer.Exit(1)
     # a revoked root token is useless; it is shown only while setup is incomplete and the owner still needs it
     incomplete = not res.root_revoked
     what = "the unseal key(s) and the root token" if incomplete else "the unseal key(s)"
@@ -347,45 +404,151 @@ def init_cmd(
              f"{reset}.")
         raise typer.Exit(1)
     typer.echo("Root token revoked; the controller now uses AppRole with a 1h token TTL.")
-    if res.unseal_stored:
-        typer.secho("Unseal keys are also in the OS keyring (your choice): anyone with your OS account can unseal.",
-                    fg="yellow")
     if shown is False:
         raise typer.Exit(1)
 
 
 @app.command("unseal")
-def unseal_cmd(from_keyring: bool = typer.Option(False, "--from-keyring", help="Use unseal keys stored in the OS keyring")) -> None:
-    """Unseal OpenBao after a restart."""
+def unseal_cmd(from_keyring: bool = typer.Option(
+        False, "--from-keyring", help="Use only the unseal key(s) in the OS keyring; fail instead of prompting")) -> None:
+    """Unseal OpenBao after a restart: from the OS keyring when the key is stored there (ADR-0123), else prompted."""
     from aeos.core.redaction import register_secret
+    from aeos.secrets import unseal
     from aeos.secrets.openbao import OpenBaoClient, OpenBaoError
-    from aeos.secrets.provider import bootstrap_store, reset_provider_cache
+    from aeos.secrets.provider import reset_provider_cache
 
     settings = _settings()
+    out = unseal.unseal_from_keyring(settings, trigger="cli")
+    if out.status == unseal.UNREACHABLE:
+        _err(f"unseal failed: {out.detail}")
+        raise typer.Exit(1)
+    if out.status == unseal.NOT_INITIALIZED:
+        _err("OpenBao is not initialised. Run: aeos vault init")
+        raise typer.Exit(1)
+    if out.status == unseal.ALREADY_UNSEALED:
+        typer.echo("Already unsealed.")
+        return
+    if out.status == unseal.UNSEALED:
+        reset_provider_cache()
+        typer.echo(f"Unsealed with the key from the {unseal.keyring_location(settings)}.")
+        return
+    if out.status == unseal.FAILED:
+        _err(f"unseal with the key from the OS keyring failed: {out.detail}. If the stored key is wrong, store the "
+             "right one: aeos vault import-unseal-key --replace")
+        raise typer.Exit(1)
+    if from_keyring:
+        _err("no unseal keys stored in the OS keyring" if out.status == unseal.NO_KEY_IN_KEYRING
+             else f"the unseal key(s) from the OS keyring were not enough ({out.status}: {out.detail})".rstrip())
+        raise typer.Exit(1)
+    st = out.seal or {}
     c = OpenBaoClient(settings.openbao_addr)
+    applied = 0
     try:
-        st = c.seal_status()
-        if not st.get("initialized"):
-            _err("OpenBao is not initialised. Run: aeos vault init")
-            raise typer.Exit(1)
-        if not st.get("sealed"):
-            typer.echo("Already unsealed.")
-            return
-        keys = bootstrap_store(settings).unseal_keys() if from_keyring else []
-        if from_keyring and not keys:
-            _err("no unseal keys stored in the OS keyring")
-            raise typer.Exit(1)
-        need = int(st.get("t") or 1) - int(st.get("progress") or 0)
+        need = max(int(st.get("t") or 1) - int(st.get("progress") or 0), 1)
         for i in range(need):
-            key = keys[i] if i < len(keys) else getpass.getpass(f"Unseal key {i + 1}/{need} (hidden): ")
+            key = getpass.getpass(f"Unseal key {i + 1}/{need} (hidden): ")
             register_secret(key)
             st = c.unseal(key)
+            applied += 1
             if not st.get("sealed"):
                 break
     except OpenBaoError as exc:
         _err(f"unseal failed: {exc}")
+        unseal.audit("openbao.unseal", "FAILED", {"source": "prompt", "trigger": "cli", "keys_applied": applied})
         raise typer.Exit(1) from exc
     finally:
         c.close()
     reset_provider_cache()
+    unseal.audit("openbao.unseal", "FAILED" if st.get("sealed") else "SUCCESS",
+                 {"source": "prompt", "trigger": "cli", "keys_applied": applied})
     typer.echo("Unsealed." if not st.get("sealed") else "Still sealed - more keys needed.")
+
+
+# an unseal key share is one word of base64 (keys_base64) or hex (keys); anything else is a typo or a paste accident
+_UNSEAL_KEY_SHAPE = re.compile(r"^[A-Za-z0-9+/]{16,}={0,2}$")
+
+
+@app.command("import-unseal-key")
+def import_unseal_key_cmd(
+    shares: int = typer.Option(1, "--shares", help="How many unseal key shares to enter (enter all of them, so a "
+                                                  "recovery copy is complete)"),
+    replace: bool = typer.Option(False, "--replace", help="Replace the share(s) already stored in the OS keyring"),
+) -> None:
+    """Store an existing unseal key in the OS keyring from a hidden prompt (one-time migration, ADR-0123)."""
+    from aeos.core.errors import AeosError
+    from aeos.core.redaction import register_secret
+    from aeos.secrets import unseal
+    from aeos.secrets.provider import UNSEAL_KEYRING_RISK, bootstrap_store
+
+    settings = _settings()
+    store = bootstrap_store(settings)
+    location = unseal.keyring_location(settings)
+    if not 1 <= shares <= 10:
+        _err("--shares must be between 1 and 10. Nothing stored.")
+        raise typer.Exit(2)
+    ok, backend = store.available()
+    if not ok:
+        _err(f"OS keyring unavailable ({backend}). Nothing stored.")
+        raise typer.Exit(1)
+    try:
+        existing = store.unseal_key_count()
+    except AeosError as exc:
+        _err(f"{exc.message}. Nothing stored.")
+        raise typer.Exit(1) from exc
+    if existing and not replace:
+        _err(f"{existing} unseal key share(s) are already stored in the {location}; pass --replace to overwrite "
+             "them. Nothing stored.")
+        raise typer.Exit(1)
+    keys: list[str] = []
+    try:
+        for i in range(1, shares + 1):
+            key = getpass.getpass(f"Unseal key {i}/{shares} (hidden): ").strip()
+            register_secret(key)
+            if not _UNSEAL_KEY_SHAPE.match(key):
+                _err("That is not an unseal key share (one word of at least 16 base64 or hex characters). "
+                     "Nothing stored.")
+                raise typer.Exit(1)
+            again = getpass.getpass(f"Repeat unseal key {i}/{shares} (hidden): ").strip()
+            if again != key:
+                _err("The two entries differ. Nothing stored.")
+                raise typer.Exit(1)
+            if key in keys:
+                _err("This share was entered already. Nothing stored.")
+                raise typer.Exit(1)
+            keys.append(key)
+    except (EOFError, KeyboardInterrupt) as exc:
+        _err("Input ended. Nothing stored.")
+        raise typer.Exit(1) from exc
+    try:
+        store.set_unseal_keys(keys)
+    except AeosError as exc:
+        _err(f"{exc.message}. Run the command again.")
+        unseal.audit("openbao.unseal_key_import", "FAILED", {"unseal_key_shares": len(keys)})
+        raise typer.Exit(1) from exc
+    unseal.audit("openbao.unseal_key_import", "SUCCESS", {"unseal_key_shares": len(keys), "replaced": bool(existing)})
+    typer.echo(f"Stored {len(keys)} unseal key share(s) in the {location}.")
+    typer.echo("The key is checked the next time OpenBao is sealed (aeos serve or aeos vault unseal).")
+    typer.echo("Next: aeos vault export-recovery <file outside every repository>, then move that file offline.")
+    typer.secho(UNSEAL_KEYRING_RISK, fg="yellow")
+
+
+@app.command("export-recovery")
+def export_recovery_cmd(path: str = typer.Argument(
+        ..., help="New file outside every git repository and outside the AEOS data dir; created owner-only (0600), "
+                  "never overwritten")) -> None:
+    """Write the unseal key share(s) from the OS keyring to a new owner-only file for an offline copy."""
+    from aeos.core.errors import AeosError
+    from aeos.secrets.unseal import RecoveryRefused, write_recovery_file
+
+    try:
+        target = write_recovery_file(path, _settings())
+    except RecoveryRefused as exc:
+        _err(exc.message)
+        raise typer.Exit(1) from exc
+    except AeosError as exc:
+        _err(f"{exc.message}. Nothing was written.")
+        raise typer.Exit(1) from exc
+    except OSError as exc:
+        _err(f"cannot write the recovery copy ({type(exc).__name__}). Nothing was kept.")
+        raise typer.Exit(1) from exc
+    typer.echo(str(target))

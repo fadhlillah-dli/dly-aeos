@@ -116,18 +116,22 @@ model becomes a route only through a recorded ROUTE_ACTIVATION decision. Then ru
 ## 3. OpenBao and the macOS Keychain
 
 `vault install` uses the install-manifest `approved_pin`; while that is null, add `--version X.Y.Z` (a version
-you reviewed). `brew install openbao` is an alternative. `vault init` shows the unseal keys ONCE on a
-temporary screen: store them offline, then type `stored`. Run `vault unseal` after every restart of OpenBao.
+you reviewed). `brew install openbao` is an alternative. `vault init` keeps the unseal key share(s) in the
+Keychain and never prints them; `vault export-recovery` writes your offline recovery copy (move it offline, then
+delete it from the disk). After a restart of OpenBao, `serve` or `vault unseal` unseals it from the Keychain
+([ADR-0123](decisions/ADR-0123-openbao-unseal-key-in-os-keyring.md); `vault init --show-unseal-once` keeps the
+former flow).
 
 ```bash
 ./aeos vault install
 ./aeos vault start
 ./aeos vault init
+./aeos vault export-recovery "$HOME/aeos-openbao-recovery.txt"
 ./aeos vault unseal
 ```
 
-The Keychain holds the bootstrap identity used to reach OpenBao. Unseal keys/root token never go
-into the repository, config, chat or AEOS backups (§26, §33).
+The Keychain holds the bootstrap identity used to reach OpenBao and the unseal key. Unseal keys/root token never
+go into the repository, config, chat or AEOS backups (§26, §33).
 
 **Evidence:** OpenBao shows `unsealed` in the bootstrap list / `GET /api/ops/services`; doctor secret
 checks pass. Recovery: [runbooks/openbao-unseal-recovery.md](runbooks/openbao-unseal-recovery.md).
