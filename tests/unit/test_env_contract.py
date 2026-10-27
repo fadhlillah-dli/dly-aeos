@@ -9,10 +9,19 @@ Derived from the code (no import, no execution), with evidence per name:
   ``alias`` / ``validation_alias`` (which bypasses the prefix, as pydantic-settings does).
 * Shell and PowerShell scripts under ``scripts/`` (``$AEOS_X``, ``${AEOS_X...}``, ``$env:AEOS_X``). A PowerShell
   assignment ``$env:AEOS_X = ...`` and a comment line are not reads.
+* Python source embedded in a string constant (the verifier's pytest plugin in ``verification/seal.py``): a string
+  that mentions ``AEOS_`` and ``environ`` or ``getenv`` and parses as Python is read with the same rules.
 
-Every name read must have a row in the "Environment variables" table of ``docs/OPERATIONS.md`` (name, read by,
-default, purpose) whose "read by" cell names each reader (``Settings`` or the file path), or an entry in ``EXEMPT``
-with a reason. A row that nothing reads and an exemption that matches nothing fail as stale. Names only: a value
+Out of scope (a read in one of these forms is NOT seen, so such a variable needs its row written by hand): a key
+that is not a string literal, a module-level name or a loop variable over a literal sequence (``os.environ.get(
+prefix + "X")``, an f-string); a mapping that aliases the environment (``env = os.environ`` then ``env.get``);
+embedded code that is not valid Python on its own, or that is not in a string constant; a read through a library
+(``psutil``'s ``Process.environ()``); shell variables other than ``$AEOS_X``, ``${AEOS_X...}`` and ``$env:AEOS_X``.
+
+Every name read must have a row in the "Environment variables" table of ``docs/OPERATIONS.md`` (name, source, read by,
+default, purpose) whose "read by" cell names each reader (``Settings`` or the file path) and whose "source" cell
+matches the readers (``Settings field``, ``direct read``, ``script``, joined with `` + ``), or an entry in ``EXEMPT``
+with a reason. Every operation that calls ``refuse_worker_context`` must be named in that section too. A row that nothing reads and an exemption that matches nothing fail as stale. Names only: a value
 is never documented here. A key that is a loop variable over a module-level tuple of names
 (``[k for k in WORKER_CONTEXT_ENV if os.environ.get(k)]``) reads every name of the tuple. Writes
 (``os.environ["X"] = ...``, an ``AEOS_`` key of an ``env`` dict) are collected as evidence but do not need a row: a
@@ -40,6 +49,12 @@ CONFIG = "backend/aeos/core/config.py"
 EXEMPT: dict[str, str] = {
     "AEOS_ACL_PATH": "internal hand-off: backend/aeos/doctor/checks/evidence.py passes a path to its own PowerShell "
                      "child through the environment; the owner never sets it",
+    "AEOS_VSEAL_NONCE": "internal hand-off: backend/aeos/verification/seal.py gives the per-run nonce to its own pytest "
+                        "plugin (embedded string source) through the environment; set by the controller, never by the "
+                        "owner",
+    "AEOS_VSEAL_KEYFILE": "internal hand-off: backend/aeos/verification/seal.py gives the path of the per-run key file "
+                          "to its own pytest plugin (embedded string source); set by the controller, never by the "
+                          "owner",
 }
 
 NAME = re.compile(r"AEOS_[A-Z0-9_]+")
@@ -151,6 +166,14 @@ def _python_usage(tree: ast.AST, label: str, usage: Usage) -> None:
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "$env:" in node.value:
             for m in PS_ENV.finditer(node.value):
                 usage.read(m.group(1).upper(), label)
+    for node in ast.walk(tree):  # Python source embedded in a string (a plugin handed to a child process)
+        if (isinstance(node, ast.Constant) and isinstance(node.value, str) and "AEOS_" in node.value
+                and ("environ" in node.value or "getenv" in node.value)):
+            try:
+                embedded = ast.parse(node.value)
+            except (SyntaxError, ValueError):
+                continue
+            _python_usage(embedded, label, usage)
 
 
 def _literal_names(node: ast.AST | None) -> list[str]:
@@ -247,12 +270,51 @@ def documented(markdown: str) -> dict[str, list[str]] | None:
     return rows
 
 
+def expected_source(readers: set[str]) -> str:
+    """The "Source" cell a row must carry: how the readers take the variable."""
+    kinds = []
+    if SETTINGS_LABEL in readers:
+        kinds.append("Settings field")
+    if any(r != SETTINGS_LABEL and not r.startswith("scripts/") for r in readers):
+        kinds.append("direct read")
+    if any(r.startswith("scripts/") for r in readers):
+        kinds.append("script")
+    return " + ".join(kinds)
+
+
+def section_text(markdown: str) -> str:
+    lines = markdown.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == f"## {SECTION}")
+    body = []
+    for ln in lines[start + 1:]:
+        if ln.startswith("## "):
+            break
+        body.append(ln)
+    return "\n".join(body)
+
+
+def worker_context_operations(root: Path) -> dict[str, str]:
+    """operation text -> file of every ``refuse_worker_context("<operation>")`` call under backend/."""
+    found: dict[str, str] = {}
+    for path in _files(root / "backend", {".py"}):
+        text = path.read_text(encoding="utf-8")
+        if "refuse_worker_context" not in text:
+            continue
+        for node in ast.walk(ast.parse(text, filename=str(path))):
+            if (isinstance(node, ast.Call) and node.args and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                    and ((isinstance(node.func, ast.Name) and node.func.id == "refuse_worker_context")
+                         or (isinstance(node.func, ast.Attribute) and node.func.attr == "refuse_worker_context"))):
+                found[node.args[0].value] = path.relative_to(root).as_posix()
+    return found
+
+
 def problems(root: Path, exempt: Mapping[str, str]) -> list[str]:
     usage = collect(root)
     doc_path = root / DOC
     rows = documented(doc_path.read_text(encoding="utf-8")) if doc_path.is_file() else None
     if rows is None:
-        return [f"{DOC} has no '## {SECTION}' section with a table (name, read by, default, purpose)"]
+        return [f"{DOC} has no '## {SECTION}' section with a table (name, source, read by, default, purpose)"]
     out: list[str] = []
     for name, readers in sorted(usage.reads.items()):
         where = ", ".join(sorted(readers))
@@ -264,14 +326,24 @@ def problems(root: Path, exempt: Mapping[str, str]) -> list[str]:
         if cells is None:
             out.append(f"{name}: read by {where} but has no row in the '{SECTION}' table of {DOC} (and no exemption)")
             continue
-        if "DUPLICATE" in cells or len(cells) < 4 or not all(cells[1:4]):
-            out.append(f"{name}: the {DOC} row needs exactly one row with read by, default and purpose filled in")
+        if "DUPLICATE" in cells or len(cells) < 5 or not all(cells[1:5]):
+            out.append(f"{name}: the {DOC} row needs exactly one row with source, read by, default and purpose "
+                       f"filled in")
             continue
-        missing = sorted(r for r in readers if r not in cells[1].replace("`", ""))
+        missing = sorted(r for r in readers if r not in cells[2].replace("`", ""))
         if missing:
             out.append(f"{name}: the 'read by' cell in {DOC} does not name {', '.join(missing)}")
+        want = expected_source(readers)
+        if cells[1].replace("`", "").strip() != want:
+            out.append(f"{name}: the 'source' cell in {DOC} says '{cells[1]}' but its readers ({where}) make it "
+                       f"'{want}'")
     for name in sorted(set(rows) - set(usage.reads)):
         out.append(f"{name} is documented in {DOC} but nothing in backend/ or scripts/ reads it: delete the row")
+    section = section_text(doc_path.read_text(encoding="utf-8"))
+    for operation, where_file in sorted(worker_context_operations(root).items()):
+        if operation not in section:
+            out.append(f"refuse_worker_context('{operation}') in {where_file} is not named in the '{SECTION}' section "
+                       f"of {DOC}: list it with the other human-only operations")
     for name, reason in sorted(exempt.items()):
         if not reason.strip():
             out.append(f"exemption {name} has no reason")
@@ -299,7 +371,8 @@ def test_written_only_names_are_classified_from_evidence_not_guessed():
 
 # --- bite tests on a temporary tree ----------------------------------------------------------------------------------
 
-TABLE_HEAD = "## Environment variables\n\n| Variable | Read by | Default | Purpose |\n|---|---|---|---|\n"
+TABLE_HEAD = ("## Environment variables\n\n| Variable | Source | Read by | Default | Purpose |\n"
+              "|---|---|---|---|---|\n")
 
 
 def _tree(tmp_path: Path, py: str = "", rows: str = "", shell: dict[str, str] | None = None,
@@ -317,7 +390,7 @@ def _tree(tmp_path: Path, py: str = "", rows: str = "", shell: dict[str, str] | 
 
 
 READ_NEW = 'import os\nvalue = os.environ.get("AEOS_BRAND_NEW")\n'
-ROW_NEW = "| `AEOS_BRAND_NEW` | `backend/aeos/x.py` | unset | a brand new switch |\n"
+ROW_NEW = "| `AEOS_BRAND_NEW` | direct read | `backend/aeos/x.py` | unset | a brand new switch |\n"
 
 
 def test_bite_a_new_variable_without_a_row_is_red_and_with_the_row_green(tmp_path):
@@ -327,9 +400,9 @@ def test_bite_a_new_variable_without_a_row_is_red_and_with_the_row_green(tmp_pat
 
 
 def test_bite_the_row_must_name_the_reader_and_fill_every_column(tmp_path):
-    wrong = problems(_tree(tmp_path / "a", READ_NEW, "| `AEOS_BRAND_NEW` | Settings | unset | x |\n"), {})
+    wrong = problems(_tree(tmp_path / "a", READ_NEW, "| `AEOS_BRAND_NEW` | direct read | `Settings` | unset | x |\n"), {})
     assert len(wrong) == 1 and "does not name backend/aeos/x.py" in wrong[0]
-    empty = problems(_tree(tmp_path / "b", READ_NEW, "| `AEOS_BRAND_NEW` | `backend/aeos/x.py` |  | x |\n"), {})
+    empty = problems(_tree(tmp_path / "b", READ_NEW, "| `AEOS_BRAND_NEW` | direct read | `backend/aeos/x.py` |  | x |\n"), {})
     assert len(empty) == 1 and "AEOS_BRAND_NEW" in empty[0]
 
 
@@ -403,8 +476,8 @@ def test_shell_and_powershell_reads_but_not_assignments_or_comments(tmp_path):
 
 MARKERS = ('import os\nMARKERS = ("AEOS_MARK_ONE", "AEOS_MARK_TWO")\n'
            'def guard():\n    return [k for k in MARKERS if os.environ.get(k)]\n')
-ROWS_MARKERS = ("| `AEOS_MARK_ONE` | `backend/aeos/x.py` | unset | one |\n"
-                "| `AEOS_MARK_TWO` | `backend/aeos/x.py` | unset | two |\n")
+ROWS_MARKERS = ("| `AEOS_MARK_ONE` | direct read | `backend/aeos/x.py` | unset | one |\n"
+                "| `AEOS_MARK_TWO` | direct read | `backend/aeos/x.py` | unset | two |\n")
 
 
 def test_bite_a_loop_variable_over_a_module_tuple_reads_every_name(tmp_path):
@@ -440,3 +513,65 @@ def test_the_worker_context_markers_are_collected_from_the_real_code():
     reads = collect(ROOT).reads
     assert markers <= set(reads)
     assert all("backend/aeos/operations/_util.py" in reads[m] for m in markers)
+
+
+# --- source column, embedded plugin source, human-only operations ----------------------------------------------------
+
+def test_bite_the_source_column_must_match_the_readers(tmp_path):
+    """Settings reads, a direct os.environ read in a backend file and a script read are three different sources."""
+    config = ("from pydantic_settings import BaseSettings, SettingsConfigDict\n"
+              "class Settings(BaseSettings):\n    model_config = SettingsConfigDict(env_prefix='AEOS_')\n"
+              "    port: int = 1\n")
+    py = 'import os\nvalue = os.environ.get("AEOS_PORT")\n'
+    both = "| `AEOS_PORT` | {source} | `Settings`, `backend/aeos/x.py`, `scripts/run.sh` | 1 | the port |\n"
+    shell = {"run.sh": 'echo "$AEOS_PORT"\n'}
+    red = problems(_tree(tmp_path / "red", py, both.format(source="Settings field"), shell, config), {})
+    assert len(red) == 1 and "AEOS_PORT" in red[0] and "'source' cell" in red[0], red
+    assert "Settings field + direct read + script" in red[0]
+    green = problems(_tree(tmp_path / "green", py, both.format(source="Settings field + direct read + script"), shell,
+                           config), {})
+    assert green == []
+    # a script-only variable, and a backend-only one, are not "Settings field"
+    only = problems(_tree(tmp_path / "only", READ_NEW, "| `AEOS_BRAND_NEW` | Settings field | `backend/aeos/x.py` | "
+                                                        "unset | x |\n"), {})
+    assert len(only) == 1 and "says 'Settings field'" in only[0] and "'direct read'" in only[0], only
+
+
+EMBEDDED = ('import os\nPLUGIN = r"""\nimport os\n\n\ndef _init():\n    nonce = os.environ.pop("AEOS_EMBEDDED_NONCE", "")\n'
+            '    return nonce\n"""\nENV = {"AEOS_EMBEDDED_NONCE": "x"}\n')
+
+
+def test_bite_a_read_inside_an_embedded_plugin_string_is_seen_and_a_near_miss_is_not(tmp_path):
+    red = problems(_tree(tmp_path / "red", EMBEDDED), {})
+    assert len(red) == 1 and "AEOS_EMBEDDED_NONCE" in red[0] and "backend/aeos/x.py" in red[0], red
+    assert problems(_tree(tmp_path / "ex", EMBEDDED), {"AEOS_EMBEDDED_NONCE": "internal hand-off"}) == []
+    near = ('import os\nDOC = "set AEOS_NOT_A_READ with os.environ in your shell, then restart"\n'
+            'BROKEN = "def (: os.environ.get(\\"AEOS_BROKEN_CODE\\")"\n'
+            'PLUGIN = "import os\\nx = os.path.join(\\"AEOS_PATH_PART\\")\\n"\n')
+    assert collect(_tree(tmp_path / "near", near)).reads == {}
+
+
+def test_the_real_vseal_inputs_are_read_by_the_embedded_plugin_and_exempt_as_internal():
+    reads = collect(ROOT).reads
+    for name in ("AEOS_VSEAL_NONCE", "AEOS_VSEAL_KEYFILE"):
+        assert reads[name] == {"backend/aeos/verification/seal.py"}, (name, reads.get(name))
+        assert name in EXEMPT and "never by the owner" in EXEMPT[name]
+        assert name not in (documented((ROOT / DOC).read_text(encoding="utf-8")) or {})
+
+
+def test_bite_a_human_only_operation_missing_from_the_list_is_red_and_named(tmp_path):
+    root = _tree(tmp_path / "red", 'def run():\n    refuse_worker_context("controller rollback")\n')
+    red = problems(root, {})
+    assert len(red) == 1 and "controller rollback" in red[0] and "backend/aeos/x.py" in red[0], red
+    listed = _tree(tmp_path / "green", 'from u import refuse_worker_context\n'
+                                       'def run():\n    refuse_worker_context("controller rollback")\n')
+    (listed / DOC).write_text((listed / DOC).read_text(encoding="utf-8").replace(
+        "\n## Next", "\n* `controller rollback`\n\n## Next"), encoding="utf-8")
+    assert problems(listed, {}) == []
+    other = _tree(tmp_path / "near", 'def run(action):\n    refuse_worker_context(action)\n    print("refuse_worker_context")\n')
+    assert problems(other, {}) == []  # a non-literal argument and a mention in a string are not call sites
+
+
+def test_the_real_human_only_operations_are_all_listed():
+    ops = worker_context_operations(ROOT)
+    assert set(ops) == {"release acceptance exception", "controller promotion", "controller rollback", "live restore"}

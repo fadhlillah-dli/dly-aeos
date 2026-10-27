@@ -10,7 +10,10 @@
    checked: the prose of a job may change freely.
 2. ``--check`` reachability. A script under ``scripts/`` that defines a ``--check`` flag but that nothing runs with
    it is a check that never runs. It must be invoked with ``--check`` by a workflow, by ``scripts/gates.py`` or by a
-   test under ``tests/``, or be listed in ``EXEMPT`` with a reason.
+   test under ``tests/``, or be listed in ``EXEMPT`` with a reason. A caller is read from code, never from prose: in
+   a workflow only the ``run:`` values of the parsed YAML count (a ``#`` comment does not); in ``scripts/gates.py`` and
+   in tests only string constants that are not bare docstrings, and the AST, count. A test that loads the script and
+   calls ``main([... "--check"])`` must call it on the object loaded from THAT script.
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ import ast
 import re
 from collections.abc import Mapping
 from pathlib import Path
+
+import yaml
 
 from aeos.core.paths import repo_root
 from tests.unit.docs_contract_support import script_flags
@@ -194,6 +199,36 @@ def _strings(node: ast.AST) -> list[str]:
     return [n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
 
 
+def _code_strings(tree: ast.AST) -> list[str]:
+    """String constants of a module except bare string statements (docstrings): they are prose, not commands."""
+    bare = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)}
+    return [n.value for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in bare]
+
+
+def _workflow_runs(text: str) -> list[str]:
+    """The ``run:`` strings of a workflow, from the parsed YAML (a comment is not in the parse tree)."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return []
+    runs: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "run" and isinstance(value, str):
+                    runs.append(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    return runs
+
+
 def _ast_rule(name: str, tree: ast.AST) -> bool:
     """A list/tuple that holds ``"--check"`` as an element and, somewhere inside it, the script's file name."""
     for node in ast.walk(tree):
@@ -205,36 +240,89 @@ def _ast_rule(name: str, tree: ast.AST) -> bool:
     return False
 
 
+def _script_pattern(name: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![\w-]){re.escape(name)}\.py(?!\w)")
+
+
 def _module_rule(name: str, tree: ast.AST) -> bool:
-    """A test that loads the script as a module and calls ``main([... "--check"])``.
+    """A test that loads the script as a module and calls ``main([... "--check"])`` ON THAT MODULE.
 
-    Both halves are read from the code (a comment or docstring does not count): (1) the file loads the script, that
-    is a string literal ``<name>.py`` (a path such as ``ROOT / "scripts" / "<name>.py"``) or an ``import <name>``;
-    (2) a call of a function named ``main`` takes a list or tuple holding a literal ``"--check"`` element. Any other
-    call or list with ``--check`` (``ruff format --check``) is not the script's."""
-    def loads_script(node: ast.AST) -> bool:
-        if isinstance(node, ast.Constant):
-            return node.value == f"{name}.py"
-        if isinstance(node, ast.Import):
-            return any(a.name.split(".")[-1] == name for a in node.names)
-        if isinstance(node, ast.ImportFrom):
-            return (node.module or "").split(".")[-1] == name
-        return False
+    Read from the code (a comment or docstring does not count). The names bound to the script are found by taint: a
+    string constant naming ``<name>.py``, an ``import <name>`` / ``from ... import <name>``, or a function, variable
+    or fixture assigned from an expression that holds one of those or an already bound name (so
+    ``A = S / "orphan.py"``, ``spec = ...(A)``, ``mod = ...(spec)``, ``def load(): return mod`` and
+    ``script = load()`` are all bound). The call must be ``<bound>.main([... "--check" ...])``, a bare ``main`` imported
+    from the script, or a parameter/fixture named exactly ``<name>`` in a file that loads it. A ``--check`` passed to
+    ``main`` of ANOTHER object (``cli.main(["--check"])`` beside an unrelated ``"orphan.py"`` string) is not the
+    script's. A subprocess caller (one argv list holding the script path and ``--check``) is ``_ast_rule``."""
+    pattern = _script_pattern(name)
 
-    loads = any(loads_script(node) for node in ast.walk(tree))
+    def is_script_string(node: ast.AST) -> bool:
+        return isinstance(node, ast.Constant) and isinstance(node.value, str) and bool(pattern.search(node.value))
+
+    bound: set[str] = set()      # names holding the script (path, spec, module or loader)
+    main_names: set[str] = set()  # bare names that are the script's main
+    loads = False
+    for node in ast.walk(tree):
+        if is_script_string(node):
+            loads = True
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".")[-1] == name:
+                    loads = True
+                    bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[-1] == name:
+                loads = True
+                main_names.update(a.asname or a.name for a in node.names if a.name == "main")
+            for alias in node.names:
+                if alias.name == name:
+                    loads = True
+                    bound.add(alias.asname or alias.name)
     if not loads:
         return False
+
+    def mentions(node: ast.AST) -> bool:
+        return any(is_script_string(n) or (isinstance(n, ast.Name) and n.id in bound)
+                   or (isinstance(n, ast.Attribute) and n.attr == name) for n in ast.walk(node))
+
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            targets: list[ast.AST] = []
+            value: ast.AST | None = None
+            if isinstance(node, ast.Assign):
+                targets, value = list(node.targets), node.value
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                targets, value = [node.target], node.value
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if (node.name not in bound and any(isinstance(n, ast.Return) for n in ast.walk(node))
+                        and mentions(node)):
+                    bound.add(node.name)
+                    changed = True
+                continue
+            if value is not None and mentions(value):
+                for target in targets:
+                    for n in ast.walk(target):
+                        if isinstance(n, ast.Name) and n.id not in bound:
+                            bound.add(n.id)
+                            changed = True
+
+    def holds_check(call: ast.Call) -> bool:
+        args = [*call.args, *(k.value for k in call.keywords)]
+        return any(isinstance(arg, (ast.List, ast.Tuple))
+                   and any(isinstance(e, ast.Constant) and e.value == CHECK for e in arg.elts) for arg in args)
+
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+        if not (isinstance(node, ast.Call) and holds_check(node)):
             continue
         func = node.func
-        if not ((isinstance(func, ast.Name) and func.id == "main") or (isinstance(func, ast.Attribute)
-                                                                       and func.attr == "main")):
-            continue
-        args = [*node.args, *(k.value for k in node.keywords)]
-        for arg in args:
-            if isinstance(arg, (ast.List, ast.Tuple)) and any(isinstance(e, ast.Constant) and e.value == CHECK
-                                                              for e in arg.elts):
+        if isinstance(func, ast.Name) and func.id in main_names:
+            return True
+        if isinstance(func, ast.Attribute) and func.attr == "main":
+            receiver = func.value
+            if mentions(receiver) or (isinstance(receiver, ast.Name) and receiver.id == name):
                 return True
     return False
 
@@ -243,12 +331,12 @@ def _callers(root: Path, name: str) -> list[str]:
     """Where scripts/<name>.py is run with --check: workflows, scripts/gates.py and tests (relative paths)."""
     found: list[str] = []
     for wf in sorted((root / ".github" / "workflows").glob("*.y*ml")):
-        if _text_rule(name, wf.read_text(encoding="utf-8")):
+        if any(_text_rule(name, run) for run in _workflow_runs(wf.read_text(encoding="utf-8"))):
             found.append(wf.relative_to(root).as_posix())
     gates = root / "scripts" / "gates.py"
     if gates.is_file():
-        text = gates.read_text(encoding="utf-8")
-        if _text_rule(name, text) or _ast_rule(name, ast.parse(text)):
+        tree = ast.parse(gates.read_text(encoding="utf-8"))
+        if any(_text_rule(name, s) for s in _code_strings(tree)) or _ast_rule(name, tree):
             found.append("scripts/gates.py")
     tests = root / "tests"
     for path in sorted(tests.rglob("*.py")) if tests.is_dir() else []:
@@ -259,7 +347,7 @@ def _callers(root: Path, name: str) -> list[str]:
         if name not in text:
             continue
         tree = ast.parse(text, filename=rel)
-        if _text_rule(name, text) or _ast_rule(name, tree) or _module_rule(name, tree):
+        if any(_text_rule(name, s) for s in _code_strings(tree)) or _ast_rule(name, tree) or _module_rule(name, tree):
             found.append(rel)
     return found
 
@@ -371,3 +459,78 @@ def test_exemptions_need_a_reason_and_must_match_something(tmp_path):
     assert any("does not define" in p for p in reachability_problems(root, {"plain": "manual"}))
     assert any("scripts/gone.py" in p and "does not define" in p
                for p in reachability_problems(root, {"gone": "manual", "orphan": "manual"}))
+
+
+# --- linking the loaded script to the --check call; callers read from code, not from prose ---
+
+LOADER = ("import importlib.util\nfrom pathlib import Path\n"
+          "def load(path):\n    spec = importlib.util.spec_from_file_location('m', path)\n"
+          "    mod = importlib.util.module_from_spec(spec)\n    spec.loader.exec_module(mod)\n    return mod\n"
+          "S = Path('scripts')\n")
+
+
+def _problem_for(tmp_path: Path, label: str, **kwargs) -> list[str]:
+    return reachability_problems(_repo(tmp_path / label.replace(" ", "_"), **kwargs), {})
+
+
+def test_bite_check_called_on_another_script_is_red_and_names_the_orphan(tmp_path):
+    """Reviewed hole: 'loads the script' and 'calls main with --check' were checked separately and never linked."""
+    cases = {
+        "two scripts loaded, check on the other": LOADER + "A = S / 'orphan.py'\nB = S / 'other.py'\n"
+                                                 "def test_x():\n    a = load(A)\n    b = load(B)\n"
+                                                 "    a.main(['--help'])\n    b.main(['--check'])\n",
+        "two scripts as fixtures": "A = 'scripts/orphan.py'\nB = 'scripts/other.py'\n"
+                                   "def test_x(a, b):\n    a.main(['--help'])\n    b.main(['--check'])\n",
+        "name only in a data dict": "FIXTURE = {'path': 'orphan.py'}\n"
+                                    "def test_x(cli):\n    cli.main(['--check'])\n",
+        "check on an unrelated object, script loaded": LOADER + "mod = load(S / 'orphan.py')\n"
+                                                         "def test_x(cli):\n    mod.main(['--help'])\n"
+                                                         "    cli.main(['--check'])\n",
+    }
+    for label, test in cases.items():
+        problems = _problem_for(tmp_path, label, test=test)
+        assert len(problems) == 1 and "scripts/orphan.py" in problems[0] and "--check" in problems[0], (label, problems)
+
+
+def test_near_miss_check_called_on_the_object_loaded_from_that_script_is_green(tmp_path):
+    cases = {
+        "swapped order": LOADER + "A = S / 'orphan.py'\nB = S / 'other.py'\n"
+                         "def test_x():\n    a = load(B)\n    b = load(A)\n    a.main(['--help'])\n    b.main(['--check'])\n",
+        "through a loader function": LOADER + "def orphan_script():\n    return load(S / 'orphan.py')\n"
+                                     "def test_x():\n    script = orphan_script()\n    assert script.main(['x', '--check']) == 0\n",
+        "from import": "from scripts import orphan as o\ndef test_x():\n    o.main(['--check'])\n",
+        "bare main imported": "from scripts.orphan import main\ndef test_x():\n    main(['--check'])\n",
+        "dict value loaded": LOADER + "FIXTURE = {'path': S / 'orphan.py'}\n"
+                             "def test_x():\n    cli = load(FIXTURE['path'])\n    cli.main(['--check'])\n",
+    }
+    for label, test in cases.items():
+        assert _problem_for(tmp_path, label, test=test) == [], label
+
+
+def test_bite_a_script_name_in_a_comment_is_not_a_caller(tmp_path):
+    """Reviewed hole: ``# python scripts/orphan.py --check`` counted as a caller."""
+    workflow = ("jobs:\n  a:\n    steps:\n      # python scripts/orphan.py --check\n      - run: echo hello\n"
+                "      - name: later  # python scripts/orphan.py --check\n        run: ruff format --check .\n")
+    problems = _problem_for(tmp_path, "workflow comment", workflow=workflow)
+    assert len(problems) == 1 and "scripts/orphan.py" in problems[0]
+    gates = ('"""Gates. Run python scripts/orphan.py --check by hand."""\n# python scripts/orphan.py --check\n'
+             'x = 1  # python scripts/orphan.py --check\n')
+    problems = _problem_for(tmp_path, "gates comment", gates=gates)
+    assert len(problems) == 1 and "scripts/orphan.py" in problems[0]
+    test = ('# python scripts/orphan.py --check\n"""python scripts/orphan.py --check"""\n'
+            'def test_x():\n    """python scripts/orphan.py --check"""\n')
+    problems = _problem_for(tmp_path, "test comment", test=test)
+    assert len(problems) == 1 and "scripts/orphan.py" in problems[0]
+
+
+def test_near_miss_a_real_run_value_gates_string_and_test_string_stay_callers(tmp_path):
+    cases = {
+        "workflow run": {"workflow": "jobs:\n  a:\n    steps:\n      # note\n"
+                                     "      - run: python scripts/orphan.py --check\n"},
+        "workflow block run": {"workflow": "jobs:\n  a:\n    steps:\n      - run: |\n          set -e\n"
+                                           "          python scripts/orphan.py \\\n            --check\n"},
+        "gates string": {"gates": 'CMD = "python scripts/orphan.py --check"\n'},
+        "test string": {"test": 'def test_x():\n    run("python scripts/orphan.py --check")\n'},
+    }
+    for label, kwargs in cases.items():
+        assert _problem_for(tmp_path, label, **kwargs) == [], label
