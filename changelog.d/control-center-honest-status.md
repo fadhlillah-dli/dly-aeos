@@ -32,7 +32,10 @@
   (`mode_params.credential_ref`), the `/api/routes/eligibility` rejection reasons and the decision rationales show
   `<office/ reference, name withheld>` (or the `projects/` equivalent) to a session that may not see the name, the
   session's selected domain deciding over a queried one; OFFICE sessions and project members still see it, and a
-  `workers/` name is quoted as before (these two leaks were pre-existing, found in review; LESSONS L12 strike 2).
+  `workers/` name is quoted as before. The Doctor row `route.registry` (no domain, read by every session through
+  `/api/doctor/checks`, its history and capabilities) withholds the same names in its summary, evidence
+  (`rejected_decided`) and remedy for its PERSONAL evaluation (`routing.facade.withhold_private_refs`) (these leaks
+  were pre-existing, found in review; LESSONS L12 strike 2).
   `counts.approved` and the Models page count a route as active only with PRESENT or
   NOT_NEEDED and otherwise show "Aktif, tidak dapat dipakai: kunci belum disimpan" (or "... vault terkunci"), not
   sorted first, with `aeos secrets set <ref>` (or `aeos vault unseal`) in the drawer. `secret.presence_changed` and

@@ -146,6 +146,27 @@ def keyless_remedies(excluded: dict[str, str]) -> list[dict[str, str]]:
                    "kuota, kesegaran harga/terms, budget, kunci tersimpan) untuk PERSONAL / INTERNAL, atau PUBLIC "
                    "saja (keputusan C).")
 def route_registry(ctx: CheckContext) -> Outcome:
+    assert ctx.session is not None
+    return withhold_private_refs(ctx.session, _route_registry(ctx))
+
+
+def withhold_private_refs(session: Any, outcome: Outcome) -> Outcome:
+    """*outcome* with every route credential reference name private to OFFICE or to a project replaced by its label in
+    the summary, the evidence and the remedy (L12): this row has no domain, so every session reads it, and the rejection
+    reasons it quotes name the reference (``credential_ref office/...: office/ credentials are never used outside
+    OFFICE``). The one rule of the route views (``routing.withhold_private_refs``), for the viewer this check is
+    evaluated for (ROUTE_DOMAIN, no project scope)."""
+    try:
+        from aeos.routing import facade as routing
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - eligibility already reports UNKNOWN without it
+        return outcome
+    summary, evidence, remedy = routing.withhold_private_refs(
+        session, [outcome.summary, outcome.evidence, outcome.remedy.as_dict() if outcome.remedy else None],
+        domain=ROUTE_DOMAIN)
+    return replace(outcome, summary=summary, evidence=evidence, remedy=Remedy(**remedy) if remedy else None)
+
+
+def _route_registry(ctx: CheckContext) -> Outcome:
     from aeos.models.routing import ModelRoute
 
     assert ctx.session is not None

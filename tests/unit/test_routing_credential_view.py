@@ -294,3 +294,52 @@ def test_withhold_refs_replaces_a_private_project_name_at_any_depth_only_when_no
     # near miss: a member of the project sees the payload unchanged
     shown = service.withheld_refs([route], domain="PERSONAL", project_visible=lambda p: p == "acme")
     assert shown == {} and service.withhold_refs(payload, shown) == payload
+
+
+# Review round 5: the Doctor row route.registry has no domain, so every session reads it; it copied the routing
+# rejection reasons (evidence.rejected_decided) and the first one into its summary, quoting the office/ name.
+DOCTOR_ENDPOINTS = ("/api/doctor/checks", "/api/doctor/checks/route.registry/history", "/api/doctor/capabilities")
+
+
+def _run_route_registry(settings, db, monkeypatch, ref: str, domains: list[str], *, stored: bool = True):
+    from aeos.doctor.checks.model_route import route_registry
+    from aeos.doctor.model import CheckContext
+    from aeos.doctor.runner import run_doctor
+    from tests.unit.test_inventory_fakes import base_runner
+
+    install_fakes(monkeypatch, doctor=False, inventory=False)  # the real Doctor stores the row
+    _seed(db)
+    _office_only(db, domains=domains, ref=ref)
+    _install_store(monkeypatch, CountingStore({ref} if stored else set()))
+    run_doctor(settings, db, checks=["route.registry"], runner=base_runner())
+    db.commit()
+    return route_registry(CheckContext(settings=settings, session=db, runner=base_runner(), repo=settings.data_dir,
+                                       now=utcnow()))
+
+
+def test_bite_office_ref_name_reaches_no_doctor_route_registry_payload(personal_client: AuthedClient, settings, db,
+                                                                         monkeypatch):
+    outcome = _run_route_registry(settings, db, monkeypatch, OFFICE_REF, ["OFFICE"])
+    assert OFFICE_NAME not in str(outcome), f"route.registry quoted an office/ reference name: {outcome}"
+    reasons = outcome.evidence["rejected_decided"][DS]
+    assert f"credential_ref {WITHHELD_OFFICE}: office/ credentials are never used outside OFFICE" in reasons, reasons
+    leaks = [path for path, text in _bodies(personal_client, DOCTOR_ENDPOINTS).items() if OFFICE_NAME in text]
+    assert not leaks, f"an office/ reference name reached a PERSONAL session through {leaks}"
+
+
+def test_bite_two_domain_route_registry_summary_withholds_the_office_name(settings, db, monkeypatch):
+    """On a ['PERSONAL', 'OFFICE'] route the credential reason comes first, so the summary example quoted the name."""
+    outcome = _run_route_registry(settings, db, monkeypatch, OFFICE_REF, ["PERSONAL", "OFFICE"])
+    assert f"{DS}: credential_ref {WITHHELD_OFFICE}" in outcome.summary, outcome.summary
+    assert OFFICE_NAME not in str(outcome), f"route.registry quoted an office/ reference name: {outcome}"
+
+
+def test_workers_ref_is_still_quoted_in_doctor_route_registry(personal_client: AuthedClient, settings, db,
+                                                               monkeypatch):
+    """Near miss: a platform-level workers/ reference is not private; the Doctor row keeps quoting it (here: the
+    PERSONAL route is kept out because that key is not stored)."""
+    outcome = _run_route_registry(settings, db, monkeypatch, ZEN_REF, ["PERSONAL", "OFFICE"], stored=False)
+    assert ZEN_REF in str(outcome.evidence["rejected_decided"]), outcome.evidence
+    assert outcome.evidence["excluded_keyless"] == {DS: ZEN_REF} and ZEN_REF in outcome.summary, outcome.summary
+    assert "name withheld" not in str(outcome), "a workers/ reference was withheld"
+    assert ZEN_REF in _bodies(personal_client, ("/api/doctor/checks",))["/api/doctor/checks"]
