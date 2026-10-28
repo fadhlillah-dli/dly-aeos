@@ -59,9 +59,11 @@
    setting that could narrow the scan is refused by a test.
 6. **Linear and bounded.** The scan is linear in the payload (bodies are capped at 8 MB): literal pre-checks before
    patterns that the regex engine cannot search by prefix, the PEM block pattern bounded by the last END marker, and
-   the labelled unseal-key pattern written without nested whitespace quantifiers. A 2 MB request is scanned in well
-   under 200 ms on the owner's Mac (measured in the test), and adversarial 2 MB inputs that backtracked
-   quadratically before (minutes) take well under a second.
+   the labelled unseal-key pattern written without nested whitespace quantifiers. A 2.5 MB request took 0.13 s of
+   CPU on the owner's Mac (arm64) and 0.54 s on the Intel macOS CI runner (2026-10-28), and adversarial 2 MB inputs
+   that backtracked quadratically before (minutes) take well under a second. The test asserts linear growth (four
+   times the input costs at most eight times the CPU; a quadratic scan costs sixteen) and a 3 s cap, not a fixed
+   time, which would measure the machine (LESSONS L15).
 7. **Fewer false positives in the guard, never weaker redaction.** The patterns of `aeos.core.redaction` are the
    ones log and error redaction, the repository secret scan and the Claude prompt guard use; this ADR does not narrow
    them (amendment, decision A). Only the high-confidence scan (this guard) skips, after review of the first build:

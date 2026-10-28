@@ -233,13 +233,27 @@ def _load() -> str:
         return "load average n/a"
 
 
-def test_a_2mb_request_is_scanned_well_within_200ms():
-    messages = [{"role": "user" if i % 2 else "assistant", "content": CODE_DIFF * 4} for i in range(1300)]
-    payload = {"messages": messages}
-    size = len(outgoing_text(payload))
+def _grows_linearly(small: float, took: float) -> bool:
+    """Four times the input may cost at most about four times the CPU: bound 8x for noise (a quadratic scan costs
+    16x), and a quarter-size run under 20 ms is read as 20 ms, since a shorter time is mostly noise."""
+    return took <= 8 * max(small, 0.02)
+
+
+def _request(messages: int) -> dict:
+    return {"messages": [{"role": "user" if i % 2 else "assistant", "content": CODE_DIFF * 4} for i in range(messages)]}
+
+
+def test_a_2mb_request_is_scanned_in_linear_time():
+    """No absolute bound on a realistic request: the same code took 0.13 s of CPU on the owner's Mac (arm64) and
+    0.54 s on the Intel macOS runner of CI (2026-10-28), so a fixed bound measures the machine, not the scan."""
+    quarter, full = _request(325), _request(1300)
+    size = len(outgoing_text(full))
     assert size >= 2_000_000
-    took = _best_of(3, lambda: sensitive_content_findings(payload))
-    assert took < 0.5, f"{size} chars took {took:.3f}s of CPU ({_load()})"
+    small = _best_of(3, lambda: sensitive_content_findings(quarter))
+    took = _best_of(2, lambda: sensitive_content_findings(full))
+    assert took < 3.0, f"{size} chars took {took:.3f}s of CPU ({_load()})"
+    assert _grows_linearly(small, took), (f"not linear - a quarter of the request {small:.3f}s, {size} chars "
+                                          f"{took:.3f}s of CPU ({_load()})")
 
 
 def _adversarial(shape: str, k: float) -> str:
@@ -269,31 +283,34 @@ def test_adversarial_2mb_inputs_stay_linear(shape):
     made the escape-boundary view quadratic (1.3 s at 20,000, review of 2026-10-28); the two boundary views (greedy
     and cut) stay linear when every escape has a tail that could begin a token.
 
-    Linearity is measured, not assumed from a wall-clock bound: four times the input may cost at most about four times
-    the CPU (bound 8x for noise; a quadratic scan costs 16x), plus a generous absolute CPU cap that only a pathological
-    regression reaches."""
+    Linearity is measured, not assumed from a wall-clock bound (`_grows_linearly`), plus a generous absolute CPU cap
+    that only a pathological regression reaches."""
     quarter, full = _adversarial(shape, 0.25), _adversarial(shape, 1.0)
     small = _best_of(2, lambda: find_high_confidence_secrets(quarter))
     took = _best_of(1, lambda: find_high_confidence_secrets(full))
     assert took < 3.0, f"{shape}: {len(full)} chars took {took:.3f}s of CPU ({_load()})"
-    assert took <= 8 * max(small, 0.02), (f"{shape}: not linear - {len(quarter)} chars {small:.3f}s, {len(full)} "
+    assert _grows_linearly(small, took), (f"{shape}: not linear - {len(quarter)} chars {small:.3f}s, {len(full)} "
                                           f"chars {took:.3f}s of CPU ({_load()})")
 
 
 def test_bite_the_linearity_check_catches_a_quadratic_scan():
-    """The 8x bound is a real check: a scan that restarts from every 100th position (quadratic) costs about 16x for
-    four times the input and fails it, while one linear pass passes."""
-    def quadratic(s: str) -> int:
-        return sum(s.find("\x00", i) for i in range(0, len(s), 100))
+    """`_grows_linearly` is a real check: a backtracking regex search (quadratic, the failure ADR-0127 removed) fails
+    it, and one linear pass passes. The quadratic input is sized so the quarter run costs about 20 ms on the owner's
+    Mac and more on slower machines: with a run of 0.3 ms (the first version of this test, 2026-10-28) noise decided
+    the ratio and the quadratic grew only 7.3x on a CI runner (L15)."""
+    backtracking = re.compile(r"a+b")
+
+    def quadratic(s: str) -> object:
+        return backtracking.search(s)
 
     def linear(s: str) -> int:
         return s.count("\x00")
 
-    quarter, full = "a" * 60_000, "a" * 240_000
-    ratio_q = _best_of(1, lambda: quadratic(full)) / max(_best_of(2, lambda: quadratic(quarter)), 1e-6)
-    assert ratio_q > 8, f"a quadratic scan grew only {ratio_q:.1f}x for 4x the input: the bound would not catch it"
-    took = _best_of(1, lambda: linear(full))
-    assert took <= 8 * max(_best_of(2, lambda: linear(quarter)), 0.02)
+    quarter, full = "a" * 8_000, "a" * 32_000
+    small, took = _best_of(3, lambda: quadratic(quarter)), _best_of(1, lambda: quadratic(full))
+    assert not _grows_linearly(small, took), (f"a quadratic scan passed: {small:.3f}s for {len(quarter)} chars, "
+                                              f"{took:.3f}s for {len(full)} ({_load()})")
+    assert _grows_linearly(_best_of(3, lambda: linear(quarter)), _best_of(1, lambda: linear(full)))
 
 
 # ------------------------------------------------------------------------------------- the proxy, :free route
