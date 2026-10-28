@@ -235,6 +235,16 @@ bootstrap (169 s).
 **Open items (record only).** 26 tests marked `integration` or `network` run in no CI job (the shards select `not
 integration and not network`; the verifier and browser jobs run only their named files). This gap predates this change.
 
+## Amendment 2026-10-29 — 3 shards on macos-26-intel
+
+Main went red after PR #52 without a failing test: on `macos-26-intel` shard 2/2 passed all 3,295 tests in 23 min 4 s,
+and the job then hit `timeout-minutes: 25` during its last steps and was cancelled. The same shards took 11 and 16 min
+on the PR run an hour earlier, so the Intel runners vary up to about 2x while `windows-latest` and `macos-latest`
+stayed steady. Two shards left no margin for that variance (LESSONS L15: a timing assumption, fixed, not re-run).
+Decision: `macos-26-intel` runs 3 shards, like `windows-latest`; the timeout stays 25 minutes, so a real hang still
+fails. A third Intel shard uses one more macOS slot; jobs that wait for a slot queue, and queue time does not count
+toward the timeout.
+
 ## Amendment 2026-10-27 — merge policy: merge commit only, two more required checks, settings as code
 
 **Decision** (owner, 2026-10-27: "Keputusan yang lain lakukan rekomendasi yang terbaik yang tidak mengganggu atau

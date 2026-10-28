@@ -630,10 +630,11 @@ def test_out_of_scope_edit_stops_the_run_at_once(settings, setup):
     """§22 'Stop berlaku saat ... scope dilanggar': stopped at the edit, not when the worker exits."""
     make, _ = setup
     run_id, task_id = make("outside_sleep")
-    t0 = time.monotonic()
     res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, te = _load(run_id, task_id)
-    assert time.monotonic() - t0 < 45, "the worker would have slept 120 s / hit the 60 s timeout"
+    # No wall-clock bound (L15, 2026-10-29: 46.1 s against a 45 s bound at load average ~200, 1.4 s alone). What proves
+    # "at once" is the live stop: caps.scope_stop is set only by the monitoring loop while the worker runs, and the stop
+    # reason would be TIMEOUT if the run had waited for the 60 s task timeout (the worker sleeps 120 s).
     assert res["stop_reason"] == "SCOPE_VIOLATION" and run.outcome_code == "SCOPE_VIOLATION"
     assert run.caps["scope_stop"] is True and run.quarantined
     assert not processes.is_alive(run.pid, run.pid_create_time)
