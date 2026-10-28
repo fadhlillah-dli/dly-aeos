@@ -268,7 +268,10 @@ def test_a_non_free_openrouter_worker_route_keeps_the_existing_rules(routes, mon
     approve(routes, key, kind="TRIAL", details={"budget_decision_id": budget.id})
     _forwarded(routes, 60)  # the account's :free count is used up: not this route's limit
     assert eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL").eligible == [key]
-    assert select_route(routes, task=task(classification="INTERNAL")).route.route_key == key
+    # ADR-0128: a per-token paid route takes a task only by ESCALATION or OVERFLOW; as the only route it waits
+    with pytest.raises(Blocked) as ei:
+        select_route(routes, task=task(classification="INTERNAL"))
+    assert ei.value.code == "PAID_NOT_ADMITTED" and "no $0-marginal route is eligible" in ei.value.message
     assert service.route_use_problem(routes, paid) is None
     assert service.free_worker_problem(routes, paid, run_id="no-such-run") is None  # no PUBLIC-only TaskSpec rule
     assert free_tier.route_limit_problem(routes, paid) is None and not service.free_first(paid)

@@ -24,6 +24,8 @@ class RouteDecision:
     reason: str = ""
     # additive (wave 7): the RUNNING EvalRun whose exact route was selected for a TaskSpec bound to one of its slots
     eval_run_id: str | None = None
+    # additive (ADR-0128): why a per-token paid route was admitted (``reason`` ESCALATION or OVERFLOW), else None
+    paid_admission: dict[str, Any] | None = None
 
 
 def eligible_routes(
@@ -223,6 +225,15 @@ def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> di
     from aeos.routing.capacity import route_capacity as impl
 
     return impl(session, task=task, route=route)
+
+
+def paid_admission(session: Session, *, task: TaskSpec, route: ModelRoute) -> dict[str, Any] | None:
+    """ADR-0128 (additive): whether the per-token paid *route* may take *task* - ``admitted`` with ``reason``
+    ESCALATION or OVERFLOW, else ``code`` PAID_NOT_ADMITTED and ``why``. None for a route that is not per-token paid
+    (or a task bound to an evaluation slot). Read only."""
+    from aeos.routing.paid import paid_admission as impl
+
+    return impl(session, task, route)
 
 
 def reselect_allowed(session: Session, route_key: str) -> bool:
