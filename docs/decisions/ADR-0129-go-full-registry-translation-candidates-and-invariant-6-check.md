@@ -48,15 +48,23 @@ Invariant 6 (Claude only through the native `claude` binary) was enforced in the
    UNKNOWN, on the chat-completions endpoint with the bare model id. Allowances and data terms come from
    `https://opencode.ai/go`, and rates from models.dev (both read 2026-10-28).
    * `deepseek-v4-pro` ($15): PUBLIC only. The DeepSeek zero-retention agreement is renewed monthly, and the current
-     one runs through 2026-10-31. The model needs the Global region of the Go workspace. Priority 8.
+     one runs through 2026-10-31. The model needs the Global region of the Go workspace. Priority 8. Like its sibling
+     `deepseek-v4.1-flash` it records its Go peak rates (1.32/3.96/0.044 per 1M tokens for input/output/cached read,
+     off-peak 0.66/1.98/0.022) and peak hours (Mon-Fri 01:00-04:00 and 06:00-10:00 UTC) in `pricing`, with their
+     source (the Go docs, `https://opencode.ai/v2/docs/console/go/`, read 2026-10-28). The allowance estimate uses the
+     off-peak rates, as for the sibling.
    * `hy4-preview` ($30). Priority 9.
    * The translation candidates are `gemini-4-argon` ($30), `qwen3.8-max` ($15), `qwen3.8-flash` ($30),
      `qwen3.7-plus` ($60) and `minimax-m3` ($60). `data_terms.serving` and the notes say "served through OpenCode
      Console API translation - NOT PROVEN until the plain and --tools probes pass". `data_terms.native_api_family`
      names the family models.dev states. Their `source_refs` cite that native family and its endpoint and the Go docs'
      translation sentence; they never cite a catalog listing on chat-completions, which is the claim not yet proven.
-     They get priorities 30 to 34, after the Zen pilots. The broker already speaks chat-completions, so no broker code
-     changes.
+     They get priorities 30 to 34, after the Zen pilots. The broker already speaks chat-completions, so no broker
+     request code changes.
+   * Gemini 4 Argon's listed 2.00/10.00/0.10 rates are a temporary 50% promotion; the Go docs state it applies through
+     2026-11-30 (read 2026-10-28). The route records the promoted rates, the end date and the source in `pricing`
+     (`promotion_*`) and in its `expires_note`, and its allowance is estimated at the full rate 4.00/20.00/0.20. That
+     is conservative: it can only over-count the allowance used.
    * `mimo-v2.5` ($60) and `mimo-v2.5-pro` ($15) are superseded by mimo-v2.6-flash and mimo-v2.6-pro. They have their
      own allowances and priorities 990 and 991, the lowest of the WORKER pool, so they serve as overflow only.
    * Context-tier rates (qwen3.7-plus above 256k tokens, minimax-m3 above 512k) are kept in
@@ -66,8 +74,11 @@ Invariant 6 (Claude only through the native `claude` binary) was enforced in the
      test is red for a data-terms change of an existing route and green for a descriptive one. `worker_prompt_revision`
      inputs, `policy/*.yaml` and the CONFIG_FIELDS values of seeded routes are unchanged.
 2. **One invariant 6 check: `aeos.core.model_policy`.** It is stdlib only, so the ranking script imports it too.
-   * `model_family_refusal(id)` returns `claude` for a token starting with `claude` or `anthropic` (`claude-*`,
-     `anthropic/*`, `~anthropic/*`, `us.anthropic.claude-*`, `opencode-go/claude-haiku-*`). It returns `meta-router`
+   * `model_family_refusal(id)` returns `claude` for any token that starts with `claude` or `anthropic`, in any case
+     and whatever follows (`claude-*`, `claude3-opus`, `claude4.5-haiku`, `Claude-X`, `anthropic/*`, `~anthropic/*`,
+     `us.anthropic.claude-*`, `opencode-go/claude-haiku-*`). A token starts at the beginning of the id or of a path
+     segment, or after any other non-alphanumeric separator. Only a letter or digit directly before it makes it part
+     of another name (`myclaude3`), which stays allowed. It returns `meta-router`
      for OpenRouter's routing models (`auto`, `auto-*`, `*router`, `pareto*`, `fusion`, `free`, `bodybuilder`), any
      `*router` model and `~vendor/*` floating aliases, which let the provider pick the build.
    * `invariant6_refusal(*ids, provider=...)` allows Claude only on the native `claude-native` provider.
@@ -79,6 +90,13 @@ Invariant 6 (Claude only through the native `claude` binary) was enforced in the
        serves.
      * **The role ranking:** the generator refuses its own output.
      * **The agent catalog:** `role_agents.catalog_problems` now uses this check instead of `NEVER_PREFERRED`.
+     * **Route activation:** `routing.service.activate_route` refuses a refused row with `PolicyDenied`
+       (`MODEL_FAMILY_REFUSED`) before any decision is written.
+     * **The broker egress boundary:** `broker.model_proxy.resolve_upstream`, which every probe and every worker call
+       goes through, refuses a refused row (`MODEL_FAMILY_REFUSED`) before any credential is read or request sent.
+     * Eligibility, activation and egress call the same helper on the stored row, `route_invariant6_refusal(route)`
+       (route key, model id and upstream model id under the route's provider). A Claude-family or meta-router row that
+       is already in the database can therefore be neither activated, nor probed, nor called.
    * Near misses stay allowed and are tested: `openrouter/stealth-alpha:free` is a model, not a router, and
      `z-ai/autoglm-*` is allowed too.
 3. **Role ranking (`scripts/role_route_ranking.py`, `role_route_preferences.json`, the committed inputs).**
@@ -115,12 +133,14 @@ Invariant 6 (Claude only through the native `claude` binary) was enforced in the
   ([OWNER_ACTIONS](../OWNER_ACTIONS.md) 1.11, "OpenCode Go routes of owner decision R34").
 * The category agents' preferences change (regenerated file). The agents stay seeded DISABLED, and nothing is
   activated.
-* A translation candidate that fails the plain probe gets no TRIAL. The owner disables it, or it stays CANDIDATE, and
-  the ranking entry stays inert.
+* A translation candidate can only be probed under a TRIAL (the probe goes through the same broker gates as a worker
+  call), so the TRIAL comes first, with scheduling paused. When its plain probe fails, the owner's next step disables
+  it right away (`aeos routes disable`, [OWNER_ACTIONS](../OWNER_ACTIONS.md) 1.11, step 3), before the tool probe and
+  before scheduling resumes. A disabled route is never eligible, so its ranking entry stays inert.
 
 ## Evidence and NOT-PROVEN
 
-* **E2, macOS arm64.** Unit runs cover the seed, the hash pins, the invariant 6 bite tests at all five call sites, the
+* **E2, macOS arm64.** Unit runs cover the seed, the hash pins, the invariant 6 bite tests at all seven call sites, the
   ranking generator and its comparability bite test, and a mocked tool probe of the seeded Argon route that goes to
   the chat-completions endpoint with the bare id.
 * **NOT-PROVEN:**

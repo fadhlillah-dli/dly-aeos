@@ -20,7 +20,7 @@ from sqlalchemy import select
 from aeos.broker import facade as broker
 from aeos.broker import feasibility
 from aeos.core.errors import PolicyDenied
-from aeos.core.model_policy import invariant6_refusal, model_family_refusal
+from aeos.core.model_policy import invariant6_refusal, model_family_refusal, route_invariant6_refusal
 from aeos.core.paths import repo_root
 from aeos.core.timeutil import utcnow
 from aeos.models.decisions import Decision
@@ -58,6 +58,12 @@ def _ranking_script() -> ModuleType:
     ("openrouter/pareto-code", "meta-router"),
     ("~deepseek/deepseek-flash-latest", "meta-router"),  # a floating alias: the provider picks the build
     ("typesafe/jev-router", "meta-router"),
+    # the prefix rule: a token that STARTS WITH claude/anthropic is refused whatever follows (review round 2)
+    ("claude3-opus", "claude"),
+    ("claude4.5-haiku", "claude"),
+    ("Claude-X", "claude"),
+    ("opencode-go/claude3.5", "claude"),
+    ("openrouter/anthropic2/x", "claude"),
 ])
 def test_bite_claude_family_and_meta_router_ids_are_refused(model, family):
     assert model_family_refusal(model) == family
@@ -69,6 +75,8 @@ def test_bite_claude_family_and_meta_router_ids_are_refused(model, family):
     "opencode-go/gemini-4-argon", "opencode-go/qwen3.8-max", "opencode-go/minimax-m3", "opencode-go/deepseek-v4-pro",
     PAID_1017, "deepseek/deepseek-v4.1-flash", "openrouter/openrouter/stealth-alpha:free",  # a model, not a router
     "openrouter/poolside/laguna-s-2.1:free", "z-ai/autoglm-phone", "local/qwen3.8-flash-next",
+    # 'claude' later inside a segment, directly after a letter or digit, is part of another name
+    "myclaude3", "opencode-go/myclaude3-mini", "openrouter/xanthropic/model-1",
 ])
 def test_near_miss_real_models_are_allowed(model):
     assert model_family_refusal(model) is None and invariant6_refusal(model) is None
@@ -217,7 +225,7 @@ def _activate(db, route: ModelRoute) -> None:
 
 
 def test_a_translation_candidate_is_probed_on_chat_completions_with_its_bare_id(db, secrets_memory):
-    """No new broker code: the seeded Argon route is called like every Go route (the plain and the --tools probe go
+    """No new broker request code: the seeded Argon route is called like every Go route (the plain and the --tools probe go
     to the chat-completions endpoint with the bare model id); whether Go translates it is what the live probe shows."""
     secrets_memory.put("workers/opencode-go", GO_KEY, actor="test")
     seed.run(db)
@@ -304,3 +312,101 @@ def test_bite_the_ranking_refuses_a_claude_or_meta_router_route(monkeypatch):
     monkeypatch.setitem(mod.GO_ALLOWANCE, "glm-5.4-test", 15)
     prefs = mod.build_data(inputs, "sha")["agents"]["coder"]["preferred_routes"]
     assert "opencode-go/glm-5.4-test" in prefs
+
+
+# ---------------------------------------------------------------------------------------------- activation and egress
+REFUSED_ROWS = (("opencode-go/claude3-opus", "opencode-go", "is a Claude-family model"),
+                ("openrouter/openrouter/auto", "openrouter", "is a meta-router"))
+
+
+@pytest.mark.parametrize("key,provider,fragment", REFUSED_ROWS)
+def test_bite_a_refused_row_already_in_the_database_is_never_activated(db, key, provider, fragment):
+    bad = _route(db, key, provider=provider, status="CANDIDATE")
+    with pytest.raises(PolicyDenied) as exc:
+        service.activate_route(db, key, actor_user_id="owner", mode="TRIAL", rationale="owner trial after terms",
+                               expected_config_hash=bad.config_hash or "")
+    assert exc.value.code == "MODEL_FAMILY_REFUSED" and f"{key} {fragment}" in exc.value.message
+    assert db.scalar(select(Decision).where(Decision.target_id == key)) is None
+    assert service.get_route(db, key).status == "CANDIDATE"
+
+
+def test_near_miss_activation_is_not_refused_by_the_model_family_check(db):
+    near = _route(db, "opencode-go/myclaude3-mini", status="CANDIDATE")
+    assert route_invariant6_refusal(near) is None
+    try:
+        service.activate_route(db, near.route_key, actor_user_id="owner", mode="TRIAL",
+                               rationale="owner trial after terms", expected_config_hash=near.config_hash or "")
+    except Exception as exc:  # other activation gates (terms, budget) may refuse it: never the model-family check
+        assert getattr(exc, "code", None) != "MODEL_FAMILY_REFUSED", exc
+
+
+@pytest.mark.parametrize("key,provider,fragment", REFUSED_ROWS)
+def test_bite_a_refused_row_with_a_trial_is_neither_probed_nor_called(db, secrets_memory, key, provider, fragment):
+    from aeos.broker.model_proxy import ProxyError, resolve_upstream
+
+    secrets_memory.put("workers/opencode-go", GO_KEY, actor="test")
+    secrets_memory.put("workers/openrouter", GO_KEY, actor="test")
+    bad = _route(db, key, provider=provider)
+    _activate(db, bad)  # a TRIAL that reached the database by another path
+    with respx.mock(assert_all_called=False) as mock:
+        sent = mock.route().mock(return_value=httpx.Response(200, json={}))
+        for tools in (False, True):
+            with pytest.raises(PolicyDenied) as exc:
+                broker.probe_route(db, route_key=key, actor="user:owner", tools=tools)
+            assert exc.value.code == "MODEL_FAMILY_REFUSED" and f"{key} {fragment}" in exc.value.message
+        with pytest.raises(ProxyError) as perr:  # the worker call path (default WORKER pools)
+            resolve_upstream(db, key, domain="PERSONAL")
+        assert perr.value.code == "MODEL_FAMILY_REFUSED" and f"{key} {fragment}" in perr.value.message
+    assert not sent.called, "nothing may leave the broker for a refused route"
+
+
+def test_near_miss_a_real_go_trial_resolves_at_the_egress_boundary(db, secrets_memory):
+    from aeos.broker.model_proxy import resolve_upstream
+
+    secrets_memory.put("workers/opencode-go", GO_KEY, actor="test")
+    near = _route(db, "opencode-go/myclaude3-mini")
+    _activate(db, near)
+    up = resolve_upstream(db, near.route_key, domain="PERSONAL")
+    assert up.model_id == "myclaude3-mini" and up.route_key == near.route_key
+
+
+# ---------------------------------------------------------------------------------------------- Go rates (round 2)
+def _rate_problems(spec: dict) -> list[str]:
+    """A DeepSeek Go route without its peak rates, or a promoted route whose allowance is estimated at the promoted
+    (lower) rate, under-counts the allowance it uses."""
+    pricing, out = spec["pricing"], []
+    if spec["route_key"].startswith("opencode-go/deepseek-") and not (
+            pricing.get("peak_rate_per_mtok") and pricing.get("peak_hours") == seed.GO_PEAK_HOURS):
+        out.append(f"{spec['route_key']}: no Go peak rates or peak hours")
+    promo = pricing.get("promotion_rate_per_mtok")
+    if promo and any(pricing["allowance_rate_per_mtok"][k] <= promo[k] for k in ("input", "output")):
+        out.append(f"{spec['route_key']}: allowance estimated at the promoted rate, not the full rate")
+    return out
+
+
+def test_bite_go_peak_and_promotion_rates_are_recorded_conservatively(db):
+    from aeos.cost.subscription import subscription_terms
+
+    routes = {r["route_key"]: r for r in seed.seed_routes()}
+    pro, argon = routes["opencode-go/deepseek-v4-pro"], routes[ARGON]
+    assert pro["pricing"]["peak_rate_per_mtok"] == {"input": 1.32, "output": 3.96, "cached_read": 0.044}
+    assert pro["pricing"]["peak_hours"] == routes["opencode-go/deepseek-v4.1-flash"]["pricing"]["peak_hours"]
+    assert seed.GO_DOCS in pro["pricing"]["peak_source"] and "2026-10-28" in pro["pricing"]["peak_source"]
+    assert argon["pricing"]["allowance_rate_per_mtok"] == {"input": 4.00, "output": 20.00, "cached_read": 0.20}
+    assert argon["pricing"]["promotion_rate_per_mtok"] == {"input": 2.00, "output": 10.00, "cached_read": 0.10}
+    assert argon["pricing"]["promotion_ends"] == "2026-11-30" and "full rate" in argon["expires_note"]
+    assert [p for r in routes.values() for p in _rate_problems(r)] == []
+    # the cost module estimates the allowance at the full rate
+    seed.run(db)
+    db.flush()
+    terms, problem = subscription_terms(service.get_route(db, ARGON))
+    assert problem is None and terms is not None and float(terms["rates"]["output"]) == 20.0
+    # red: the promoted rate as the estimate, and a DeepSeek route without peak rates, each with its own message
+    cheap = copy.deepcopy(argon)
+    cheap["pricing"]["allowance_rate_per_mtok"] = dict(cheap["pricing"]["promotion_rate_per_mtok"])
+    assert _rate_problems(cheap) == [f"{ARGON}: allowance estimated at the promoted rate, not the full rate"]
+    bare = copy.deepcopy(pro)
+    del bare["pricing"]["peak_rate_per_mtok"]
+    assert _rate_problems(bare) == ["opencode-go/deepseek-v4-pro: no Go peak rates or peak hours"]
+    # near miss: a route with no promotion and no DeepSeek model needs neither
+    assert _rate_problems(routes["opencode-go/hy4-preview"]) == []

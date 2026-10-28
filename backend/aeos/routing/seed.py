@@ -204,9 +204,17 @@ GO_DIRECT_R34: tuple[tuple[str, str, float, dict[str, float]], ...] = (
 )
 GO_DEEPSEEK_PRO: tuple[str, str, float, dict[str, float]] = (
     "deepseek-v4-pro", "DeepSeek V4 Pro", 15, {"input": 0.66, "output": 1.98, "cached_read": 0.022})
+# Go docs (GO_DOCS, read 2026-10-28): the DeepSeek models have peak rates in the same peak hours; the off-peak rates
+# above are the allowance estimate, like its sibling deepseek-v4.1-flash (the peak rates are stated, not estimated)
+GO_PEAK_HOURS = "01:00-04:00 and 06:00-10:00 UTC, Mon-Fri"
+GO_DEEPSEEK_PRO_PEAK: dict[str, float] = {"input": 1.32, "output": 3.96, "cached_read": 0.044}
+GO_DEEPSEEK_PRO_PEAK_SOURCE = (f"{GO_DOCS} (DeepSeek V4 Pro off-peak and peak rates per 1M tokens and peak hours, "
+                               "read 2026-10-28)")
 # (model, display, monthly allowance USD, rates per 1M tokens, the native API family models.dev states)
 GO_TRANSLATION_R34: tuple[tuple[str, str, float, dict[str, float], str], ...] = (
-    ("gemini-4-argon", "Gemini 4 Argon", 30, {"input": 2.00, "output": 10.00, "cached_read": 0.10}, "google"),
+    # the FULL rate: Go lists Argon at a temporary 50% promotion (GO_PROMOTIONS); the allowance estimate stays at the
+    # full rate (conservative: it over-counts, never under-counts, the allowance used)
+    ("gemini-4-argon", "Gemini 4 Argon", 30, {"input": 4.00, "output": 20.00, "cached_read": 0.20}, "google"),
     ("qwen3.8-max", "Qwen3.8 Max", 15, {"input": 2.00, "output": 6.00, "cached_read": 0.25}, "anthropic"),
     ("qwen3.8-flash", "Qwen3.8 Flash", 30, {"input": 0.15, "output": 0.47, "cached_read": 0.016}, "anthropic"),
     ("qwen3.7-plus", "Qwen3.7 Plus", 60, {"input": 0.40, "output": 1.60, "cached_read": 0.04}, "anthropic"),
@@ -223,6 +231,21 @@ GO_SUPERSEDED_R34: tuple[tuple[str, str, float, dict[str, float], str], ...] = (
     ("mimo-v2.5-pro", "MiMo-V2.5-Pro", 15, {"input": 0.435, "output": 0.87, "cached_read": 0.003625},
      "mimo-v2.6-pro"),
 )
+# temporary Go promotions: the promoted rate is recorded, the allowance is estimated at the full rate (conservative)
+GO_PROMOTIONS: dict[str, dict[str, Any]] = {
+    "gemini-4-argon": {
+        "promotion_rate_per_mtok": {"input": 2.00, "output": 10.00, "cached_read": 0.10},
+        "promotion": "temporary 50% off the full rate (Go docs: the 50% discount applies through November 30, 2026)",
+        "promotion_ends": "2026-11-30",
+        "promotion_source": f"{GO_DOCS} (Gemini 4 Argon rates, '50% off', read 2026-10-28)",
+        "allowance_estimate": "FULL rate (allowance_rate_per_mtok), not the promoted rate: conservative while the "
+                              "promotion runs",
+    },
+}
+GO_PROMOTION_NOTES: dict[str, str] = {
+    "gemini-4-argon": ("Go promotion 50% off (2.00/10.00/0.10 per 1M) through 2026-11-30 per the Go docs (read "
+                       "2026-10-28); allowance estimated at the full rate 4.00/20.00/0.20 (conservative)"),
+}
 GO_R34_TRANSLATION_PRIORITY = 30  # after the Zen pilots (10, 20): unproven upstream shape, not a ranking
 GO_R34_SUPERSEDED_PRIORITY = 990  # last of the WORKER pool
 # §23 "mode/thinking params" of the native supervisor routes: the bridge passes no --effort/thinking flag, so the
@@ -337,7 +360,7 @@ def _go_routes() -> list[dict[str, Any]]:
     out.append(_go(
         "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", pool="WATCHLIST", priority=510 + len(GO_WATCH),
         pricing=_go_pricing(80, {"input": 0.15, "output": 0.60}, peak_rate_per_mtok={"input": 0.30, "output": 1.20},
-                            peak_hours="01:00-04:00 and 06:00-10:00 UTC, Mon-Fri"),
+                            peak_hours=GO_PEAK_HOURS),
         terms=GO_DEEPSEEK_TERMS, classes=[P],
         expires_note="DeepSeek ZDR agreement valid through 2026-10-31 per the Go docs (renewed monthly)",
         notes="OpenCode Go watchlist: needs the Global region in the Go workspace (default EU & US excludes it) and "
@@ -371,7 +394,9 @@ def _go_r34_routes(paid: str, *, first_priority: int) -> list[dict[str, Any]]:
     head = "OpenCode Go WORKER candidate (owner decision R34, 2026-10-28, ADR-0129)"
 
     def pricing(model: str, allowance: float, rates: dict[str, float]) -> dict[str, Any]:
-        extra = {"context_tier_rate_per_mtok": dict(GO_CONTEXT_TIERS[model])} if model in GO_CONTEXT_TIERS else {}
+        extra: dict[str, Any] = (
+            {"context_tier_rate_per_mtok": dict(GO_CONTEXT_TIERS[model])} if model in GO_CONTEXT_TIERS else {})
+        extra.update(copy.deepcopy(GO_PROMOTIONS.get(model, {})))
         return _go_pricing(allowance, rates, checked_at=GO_R31_READ, **extra)
 
     common: dict[str, Any] = {"pool": "WORKER", "tools": "UNKNOWN", "source_refs": GO_R34_SOURCES,
@@ -379,7 +404,10 @@ def _go_r34_routes(paid: str, *, first_priority: int) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     model, display, allowance, rates = GO_DEEPSEEK_PRO
     out.append(_go(
-        model, display, pricing=pricing(model, allowance, rates), priority=first_priority, terms=GO_R34_DEEPSEEK_TERMS,
+        model, display, priority=first_priority, terms=GO_R34_DEEPSEEK_TERMS,
+        pricing=pricing(model, allowance, rates) | {"peak_rate_per_mtok": dict(GO_DEEPSEEK_PRO_PEAK),
+                                                    "peak_hours": GO_PEAK_HOURS,
+                                                    "peak_source": GO_DEEPSEEK_PRO_PEAK_SOURCE},
         classes=[P], expires_note="DeepSeek ZDR agreement valid through 2026-10-31 per the Go docs (renewed monthly)",
         notes=f"{head}: PUBLIC only - the DeepSeek zero-retention agreement is renewed monthly (current one through "
               "2026-10-31) and the model needs the Global region of the Go workspace (default Europe & United States "
@@ -395,6 +423,7 @@ def _go_r34_routes(paid: str, *, first_priority: int) -> list[dict[str, Any]]:
                  "native_api_family": f"{family} (models.dev providers/opencode-go, read {GO_R31_READ})"}
         out.append(_go(model, display, pricing=pricing(model, allowance, rates),
                        priority=GO_R34_TRANSLATION_PRIORITY + i, terms=terms,
+                       expires_note=GO_PROMOTION_NOTES.get(model),
                        notes=f"{head}: {GO_TRANSLATION_STATEMENT}. Go serves it natively on the {family} API family; "
                              "the broker calls the chat-completions endpoint (no new broker code). Priority after the "
                              f"Zen pilots, not a ranking. {tools} {paid}",

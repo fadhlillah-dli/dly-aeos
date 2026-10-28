@@ -564,8 +564,10 @@ Copy the route key and its config hash from the `routes list` output.
      probe"`).
   2. Do steps 1 to 5 of the OpenCode Go routes above with its route key: refresh, terms, Extra Usage OFF, the BUDGET
      decision for the plan fee, then the TRIAL with `--region`.
-  3. Run the plain probe, `./aeos broker probe-route <route_key>`. For a translation candidate it must answer OK. If it
-     does not, disable the route (`./aeos routes disable "<route_key>" --reason "Go translation probe failed"`).
+  3. Run the plain probe, `./aeos broker probe-route <route_key>`. For a translation candidate it must answer OK.
+     **If it does not, disable the route now**, before step 4 and before you resume scheduling:
+     `./aeos routes disable "<route_key>" --reason "Go translation probe failed"`.
+     Disabling invalidates its TRIAL, so the route never serves a task; skip step 4 and go on with step 5.
   4. Run the tool-call probe, `./aeos broker probe-route --tools <route_key>`. Until it prints `tool call: PASS`, the
      route serves only tasks that need no tools.
   5. Resume scheduling (`./aeos work resume`).

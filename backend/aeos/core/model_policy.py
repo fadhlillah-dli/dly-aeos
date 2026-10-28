@@ -7,6 +7,17 @@ Claude API by another door, so it is refused. A meta-router (``openrouter/auto``
 floating alias) picks the model itself, so neither the configuration hash nor the ranking would name what runs: it is
 refused too.
 
+The Claude-family rule is a prefix rule: a token that STARTS WITH ``claude`` or ``anthropic`` (any case, whatever
+follows: ``claude3-opus``, ``claude4.5-haiku``, ``Claude-X``) is refused, where a token starts at the beginning of the id
+or of a path segment, or after any other non-alphanumeric separator (``.``, ``-``, ``_``, ``~``, ``:``). Only a letter
+or digit directly before it makes it part of another name (``myclaude3``, ``xanthropic``): such ids stay allowed.
+
+One check at every door (ADR-0129): seed, catalog discovery, eligibility, the ranking and the agent catalog call
+``invariant6_refusal``/``model_family_refusal``; route activation (``aeos.routing.service.activate_route``) and the
+broker egress (``aeos.broker.model_proxy.resolve_upstream``, used by every probe and every worker call) call
+``route_invariant6_refusal`` on the stored row, so a row that reached the database by another path is never
+activated, probed or called (code ``MODEL_FAMILY_REFUSED``).
+
 Stdlib only and free of side effects: ``scripts/role_route_ranking.py`` imports it with the backend on ``sys.path``.
 Callers turn a reason into their own refusal (seed: ``PolicyDenied``; catalog discovery: skipped and reported;
 eligibility: a hard reason; ranking and the agent catalog: a finding). Nothing here is silently stripped.
@@ -15,14 +26,18 @@ eligibility: a hard reason; ranking and the agent catalog: a finding). Nothing h
 from __future__ import annotations
 
 import re
+from typing import Any
 
 NATIVE_CLAUDE_PROVIDER = "claude-native"
 CLAUDE_FAMILY = "claude"
 META_ROUTER = "meta-router"
+# the refusal code of activation, egress and seed (one code for every door)
+REFUSAL_CODE = "MODEL_FAMILY_REFUSED"
 
-# a token that starts with claude or anthropic, not preceded by a letter or digit: claude-haiku-5-5, anthropic/x,
-# ~anthropic/x, us.anthropic.claude-x, opencode-go/claude-y (near misses: deepseek, qwen3.8-max, gemini-4-argon)
-_CLAUDE = re.compile(r"(?<![a-z0-9])(?:claude|anthropic)(?![a-z0-9])")
+# a token that STARTS WITH claude or anthropic, whatever follows (claude-haiku-5-5, claude3-opus, claude4.5-haiku,
+# anthropic/x, ~anthropic/x, us.anthropic.claude-x, opencode-go/claude-y); only a letter or digit directly before it
+# makes it part of another name (near misses: myclaude3, deepseek, qwen3.8-max, gemini-4-argon). Matched lower-cased.
+_CLAUDE = re.compile(r"(?<![a-z0-9])(?:claude|anthropic)")
 # route-key / config prefixes of the providers AEOS knows (a route key is "<provider>/<model id>")
 _PROVIDER_PREFIXES = ("openrouter/", "opencode-go/", "opencode-zen/", "opencode/", "gemini/", "local/")
 # OpenRouter's own routing models (catalog read 2026-10-28) and the router ids of other gateways
@@ -75,3 +90,13 @@ def invariant6_refusal(*ids: str | None, provider: str | None = None) -> str | N
         return (f"{model} is a meta-router or floating alias: it picks the model itself, so the configuration and "
                 "the ranking would not name what runs (AGENTS.md invariant 6, ADR-0129)")
     return None
+
+
+def route_invariant6_refusal(route: Any) -> str | None:
+    """The refusal reason for a stored route row (None = allowed): its route key, model id and upstream model id under
+    its provider, through ``invariant6_refusal``. The one helper of route activation and the broker egress boundary;
+    *route* is any object with ``route_key``, ``model_id``, ``provider`` and ``mode_params`` (a ``ModelRoute``)."""
+    mode = getattr(route, "mode_params", None) or {}
+    upstream = mode.get("upstream_model") if isinstance(mode, dict) else None
+    return invariant6_refusal(getattr(route, "route_key", None), getattr(route, "model_id", None),
+                              upstream if isinstance(upstream, str) else None, provider=getattr(route, "provider", None))
