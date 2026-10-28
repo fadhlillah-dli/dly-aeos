@@ -21,9 +21,17 @@ Fallback: only along the failed route's ``fallback_chain``, only to routes that 
   eligible, same pool, free — never a paid fallback and never a supervisor downgrade.
 Decision C (ADR-0041 amendment 2026-10-26, OpenRouter ``:free`` models only): a ``:free`` route the owner
   moved into WORKER (``set_route_pool``) and re-activated serves PUBLIC PERSONAL worker tasks while it is free
-  (``free_tier``), ranks ahead of every other eligible route, and when only its account-wide rate/daily limit keeps it
-  out, a selection that would land on a route that is not free waits (``FREE_TIER_LIMIT_REACHED``) instead. Any other
-  OpenRouter route keeps the rules above.
+  (``free_tier``), and when only its account-wide rate/daily limit keeps it out, a selection that would land on a
+  route that is not $0 marginal waits (``FREE_TIER_LIMIT_REACHED``) instead. Any other OpenRouter route keeps the rules
+  above.
+Decision C' and best-first (ADR-0124, owner decision 2026-10-28, amends decision C's "free first"): for PUBLIC tasks a
+  SUBSCRIPTION route within its plan ($0 marginal, OpenCode Go) ranks first and the free OpenRouter routes are the
+  fallback; INTERNAL ranking is unchanged (never ``:free``). The ranking is tier -> eval -> the agent's
+  ``route_policy.preferred_routes`` position (it only re-orders routes that already passed every hard filter) ->
+  priority -> key. The first ranked route that ``capacity`` does not skip for load (ROUTE_BUSY, ALLOWANCE_FIT,
+  PUBLIC_SHARE; a cool-down is a limit rejection) serves; after a skip or a limit only a $0-marginal route may serve,
+  otherwise the task waits (``ROUTE_CAPACITY``, or ``FREE_TIER_LIMIT_REACHED`` when a free route is at its limit) -
+  never a paid route.
 """
 
 from __future__ import annotations
@@ -941,7 +949,10 @@ def _route_rejections(
     q = quota_exhausted(session, route)
     if q is not None:
         resets = q.resets_at.isoformat() if q.resets_at else "UNKNOWN"
-        limits.append(f"quota EXHAUSTED ({q.scope}, source {q.source}, resets {resets})")
+        cd = (q.details or {}).get("cooldown")
+        cooled = (f"; COOLDOWN after HTTP {(q.details or {}).get('status', 'UNKNOWN')} (streak {cd.get('streak')}): "
+                  "new tasks skip the route, a running attempt stays on it" if isinstance(cd, dict) else "")
+        limits.append(f"quota EXHAUSTED ({q.scope}, source {q.source}, resets {resets}){cooled}")
     counted = free_tier.route_limit_problem(session, route, now=now, observed=False)
     if counted is not None:
         limits.append(counted["reason"])
@@ -982,8 +993,10 @@ def _eligibility(
     session: Session, *, domain: str, data_classification: str, needs_tools: bool = True,
     min_context: int | None = None, pool: str = "WORKER", tools: list[str] | None = None,
 ) -> tuple[RouteDecision, list[str]]:
-    """The eligibility decision and the decision C routes kept out by a rate/quota limit only (they would serve
-    once the limit resets)."""
+    """The eligibility decision and the $0-marginal routes (decision C free routes, Go routes in a cool-down) kept out
+    by a rate/quota limit only (they would serve once the limit resets)."""
+    from aeos.routing import capacity
+
     _validate_inputs(domain, data_classification, pool)
     office, office_reason = (_office_policy(session) if domain == Domain.OFFICE.value else (None, ""))
     eligible: list[str] = []
@@ -998,7 +1011,7 @@ def _eligibility(
                                             credential_states=credential_states)
         if reasons or limits:
             rejected[r.route_key] = reasons + limits
-            if limits and not reasons and free_tier.is_decision_c_route(r):
+            if limits and not reasons and (free_tier.is_decision_c_route(r) or capacity.zero_marginal(r)):
                 limited.append(r.route_key)
         else:
             eligible.append(r.route_key)
@@ -1016,6 +1029,8 @@ class RankedRoute:
     score: float | None
     basis: str  # EVAL | PRIORITY
     priority: int
+    tier: int = 1  # 0 ranks first (decision C' / decision C, see ``rank_tier``)
+    preferred: int | None = None  # position in the agent's ``route_policy.preferred_routes`` (None = not listed)
 
 
 def eval_score(route: ModelRoute, role: str | None) -> float | None:
@@ -1032,22 +1047,53 @@ def eval_score(route: ModelRoute, role: str | None) -> float | None:
 
 
 def free_first(route: ModelRoute) -> bool:
-    """Decision C "free first": an eligible free OpenRouter WORKER route ranks ahead of every other eligible route (the
-    OpenCode Go subscription routes included). It is eligible for PUBLIC data only, so INTERNAL tasks never see it."""
+    """Decision C: an eligible, effectively free OpenRouter WORKER route. It is eligible for PUBLIC data only, so
+    INTERNAL tasks never see it. Since decision C' (ADR-0124) it ranks right after the $0-marginal SUBSCRIPTION routes
+    for PUBLIC tasks (``rank_tier``): the free routes are the fallback."""
     return free_tier.is_decision_c_route(route) and is_effectively_free(route)
 
 
-def rank(session: Session, route_keys: list[str], role: str | None) -> list[RankedRoute]:
+def rank_tier(route: ModelRoute, data_classification: str | None) -> int:
+    """The first ranking key. PUBLIC (decision C', owner 2026-10-28): 0 a SUBSCRIPTION route within its plan (OpenCode
+    Go, $0 marginal), 1 a free OpenRouter WORKER route (decision C, the fallback), 2 any other route. Any other data
+    class (and a caller that names none): 0 a free OpenRouter WORKER route (never eligible for INTERNAL), 1 the rest -
+    the ranking INTERNAL tasks always had."""
+    if data_classification == DataClassification.PUBLIC.value:
+        from aeos.routing import capacity
+
+        if capacity.go_first(route):
+            return 0
+        return 1 if free_first(route) else 2
+    return 0 if free_first(route) else 1
+
+
+def preferred_list(value: Any) -> list[str]:
+    """The ordered ``preferred_routes`` of an agent's route policy (contract (a), ADR-0124): route keys only."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[str] = []
+    for v in value:
+        if isinstance(v, str) and v and v not in out:
+            out.append(v)
+    return out
+
+
+def rank(session: Session, route_keys: list[str], role: str | None, *, preferred: list[str] | None = None,
+         data_classification: str | None = None) -> list[RankedRoute]:
+    """Order *route_keys* (routes that already passed every hard filter): tier -> eval -> preferred position ->
+    priority -> key. ``preferred`` only re-orders these keys; a key that is not among them is ignored, so a preference
+    can never make an ineligible route (ARENA, WATCHLIST, paid without BUDGET, ``:free`` for INTERNAL) selectable."""
     routes = {r.route_key: r for r in session.scalars(select(ModelRoute).where(ModelRoute.route_key.in_(route_keys)))}
+    order = [k for k in preferred_list(preferred) if k in routes]
     ranked = []
-    tier: dict[str, int] = {}
     for key in route_keys:
         r = routes[key]
         s = eval_score(r, role)
-        tier[key] = 0 if free_first(r) else 1
-        ranked.append(RankedRoute(key, s, "EVAL" if s is not None else "PRIORITY", r.priority))
-    ranked.sort(key=lambda x: (tier[x.route_key], 0 if x.score is not None else 1, -(x.score or 0.0), x.priority,
-                               x.route_key))
+        ranked.append(RankedRoute(key, s, "EVAL" if s is not None else "PRIORITY", r.priority,
+                                  rank_tier(r, data_classification), order.index(key) if key in order else None))
+    ranked.sort(key=lambda x: (x.tier, 0 if x.score is not None else 1, -(x.score or 0.0),
+                               x.preferred if x.preferred is not None else len(order), x.priority, x.route_key))
+    assert {x.route_key for x in ranked} == set(route_keys)  # a preference never adds a route
     return ranked
 
 
@@ -1113,7 +1159,8 @@ def _select_eval_route(session: Session, task: TaskSpec, pol: dict[str, Any], bo
 
 def _free_tier_wait(limited: list[str], rejected: dict[str, list[str]], *, would_serve: str | None) -> Blocked:
     """Decision C, no paid fallback: a free OpenRouter WORKER route kept out only by its (account-wide) rate/daily
-    limit would have ranked first, so the task waits for it instead of being served by a route that is not free."""
+    limit ranked ahead of what is left, so the task waits for it instead of being served by a route that is not $0
+    marginal."""
     return Blocked("the free OpenRouter WORKER route(s) eligible for this task are at their rate/daily limit; the task "
                    "waits for the limit to reset - no fallback to a route that is not free"
                    + (f" (would have been {would_serve})" if would_serve else ""),
@@ -1122,7 +1169,31 @@ def _free_tier_wait(limited: list[str], rejected: dict[str, list[str]], *, would
                             "would_serve": would_serve})
 
 
-def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
+def _limit_wait(session: Session, held: list[str], limited: list[str], rejected: dict[str, list[str]], *,
+                would_serve: str | None) -> Blocked:
+    """The task waits: every $0-marginal route ranked ahead of what is left is kept out by a limit (*limited*) or
+    skipped for load (*held*), and what is left - if anything - is not $0 marginal (never a paid route after a skip).
+    A free OpenRouter route at its limit keeps decision C's code (FREE_TIER_LIMIT_REACHED)."""
+    from aeos.routing import capacity
+
+    free = [k for k in limited if free_tier.is_decision_c_route(get_route(session, k))]
+    if free:
+        return _free_tier_wait(free, rejected, would_serve=would_serve)
+    keys = [*held, *[k for k in limited if k not in held]]
+    return Blocked("every $0-marginal route for this task is busy, cooling down or out of 5h allowance; the task waits "
+                   "- never a paid route" + (f" (would have been {would_serve})" if would_serve else ""),
+                   code=capacity.CODE_CAPACITY,
+                   details={"held": keys, "rejected": {k: rejected.get(k, []) for k in keys},
+                            "would_serve": would_serve,
+                            "reasons": [r for k in keys for r in rejected.get(k, [])][:5]})
+
+
+def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str] | None = None) -> RouteDecision:
+    """The route for *task* (§23): hard filters, then the ranking (``rank``), then the first ranked route the load
+    rules do not skip (``capacity``). *preferred_routes* is the implementing agent's ``route_policy.preferred_routes``:
+    it only re-orders eligible routes."""
+    from aeos.routing import capacity
+
     pol = _task_policy(task)
     try:
         from aeos.broker.facade import SERVED_POOLS as served
@@ -1130,7 +1201,17 @@ def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
         served = ("WORKER",)
     bound = _eval_serving(session, task)
     if bound.get("status") != "NOT_BOUND":
-        return _select_eval_route(session, task, pol, bound)
+        chosen = _select_eval_route(session, task, pol, bound)
+        assert chosen.route is not None  # _select_eval_route returns a route or raises
+        skip = capacity.capacity_skip(session, chosen.route, task=task, runs=capacity.in_flight_runs(session))
+        if skip is not None:  # ADR-0124: the evaluated route's load rules hold too; it waits, never another route
+            key = chosen.route.route_key
+            raise Blocked(f"the task is bound to evaluation {bound.get('eval_run_id')}; its route {key} cannot take it "
+                          "now (busy or out of 5h allowance); the task waits - never another or a paid route",
+                          code=capacity.CODE_CAPACITY,
+                          details={"held": [key], "rejected": {key: [f"{skip[0]}: {skip[1]}"]}, "would_serve": None,
+                                   "reasons": [f"{skip[0]}: {skip[1]}"], "eval_run_id": bound.get("eval_run_id")})
+        return chosen
     if pol["pool"] not in served:
         # §23: refuse at admission instead of failing at the worker's first model call (ADR-0106).
         raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "
@@ -1147,34 +1228,64 @@ def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
             rejected[key] = ["not in the approved TaskSpec route allow-list"]
         limited = [k for k in limited if k in pol["routes"]]
     role = task.role_key
+    runs = capacity.in_flight_runs(session)
     if pol["primary"]:
         primary = pol["primary"]
         if primary in eligible:
             route = get_route(session, primary)
+            skip = capacity.capacity_skip(session, route, task=task, runs=runs)
+            if skip is not None:  # a pinned primary waits for its own capacity, it is never swapped
+                rejected[primary] = [*rejected.get(primary, []), f"{skip[0]}: {skip[1]}"]
+                raise _limit_wait(session, [primary], [], rejected, would_serve=None)
             return RouteDecision(route=route, eligible=[primary, *[k for k in eligible if k != primary]],
                                  rejected=rejected, reason=f"primary route {primary} eligible")
         fb = _walk_fallback(session, get_route(session, primary), eligible, rejected)
         if fb is not None:
+            skip = capacity.capacity_skip(session, fb, task=task, runs=runs)
+            if skip is not None:  # the chain's free fallback is at capacity too: wait, never further
+                rejected[fb.route_key] = [*rejected.get(fb.route_key, []), f"{skip[0]}: {skip[1]}"]
+                raise _limit_wait(session, [fb.route_key], [], rejected, would_serve=None)
             return RouteDecision(route=fb, eligible=eligible, rejected=rejected,
                                  reason=f"primary {primary} ineligible; fallback {fb.route_key} along its chain")
-        if primary in limited:
+        if primary in limited and free_tier.is_decision_c_route(get_route(session, primary)):
             raise _free_tier_wait([primary], rejected, would_serve=None)
         raise Blocked("primary route ineligible and no eligible fallback along its chain - task waits",
                       code="NO_ELIGIBLE_ROUTE", details={"rejected": rejected, "primary": primary})
     if not eligible:
         if limited:
-            raise _free_tier_wait(limited, rejected, would_serve=None)
+            raise _limit_wait(session, [], limited, rejected, would_serve=None)
         raise Blocked("no approved route is eligible for this task", code="NO_ELIGIBLE_ROUTE",
                       details={"rejected": rejected, "domain": task.domain,
                                "classification": task.data_classification})
-    ranked = rank(session, eligible, role)
-    top = get_route(session, ranked[0].route_key)
-    if limited and not is_effectively_free(top):
-        raise _free_tier_wait(limited, rejected, would_serve=top.route_key)
-    basis = ranked[0].basis.lower()
-    return RouteDecision(route=top, eligible=[r.route_key for r in ranked], rejected=rejected,
-                         reason=(f"selected free first (decision C), then by {basis}, for role {role}"
-                                 if free_first(top) else f"selected by {basis} for role {role}"))
+    preferred = preferred_list(preferred_routes)
+    ranked = rank(session, [*eligible, *limited], role, preferred=preferred,
+                  data_classification=task.data_classification)
+    held: list[str] = []  # skipped for load (busy, allowance fit, PUBLIC share)
+    passed: list[str] = []  # skipped for a limit (free tier, cool-down)
+    for item in ranked:
+        key = item.route_key
+        if key in limited:
+            passed.append(key)
+            continue
+        route = get_route(session, key)
+        skip = capacity.capacity_skip(session, route, task=task, runs=runs)
+        if skip is not None:
+            rejected[key] = [*rejected.get(key, []), f"{skip[0]}: {skip[1]}"]
+            held.append(key)
+            continue
+        if (held or passed) and not capacity.zero_marginal(route):
+            raise _limit_wait(session, held, passed, rejected, would_serve=key)
+        serving = [r.route_key for r in ranked if r.route_key not in limited and r.route_key not in held]
+        basis = item.basis.lower()
+        tier = ("Go first (decision C')" if item.tier == 0 and task.data_classification == "PUBLIC"
+                else "free (decision C)" if free_first(route) else None)
+        how = f"{tier}, then by {basis}" if tier else f"by {basis}"
+        if item.preferred is not None:
+            how += f" and agent preference #{item.preferred + 1}"
+        skipped = f"; skipped {', '.join(held + passed)}" if held or passed else ""
+        return RouteDecision(route=route, eligible=serving, rejected=rejected,
+                             reason=f"selected {how} for role {role}{skipped}")
+    raise _limit_wait(session, held, passed, rejected, would_serve=None)
 
 
 def _walk_fallback(session: Session, failed: ModelRoute, eligible: list[str],

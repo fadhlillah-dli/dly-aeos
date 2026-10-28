@@ -117,7 +117,9 @@ def eval_served(session: Session, task: TaskSpec, route: ModelRoute) -> bool:
 
 # Routing refusals that are a quota wait, not an ineligible route (decision C, ADR-0041 amendment 2026-10-26): the
 # free OpenRouter WORKER route is at its account-wide rate/daily limit and the task waits for it (no paid fallback).
-QUOTA_ROUTE_CODES = frozenset({"FREE_TIER_LIMIT_REACHED"})
+# ADR-0124 (2026-10-28): ROUTE_CAPACITY - every $0-marginal route is busy, cooling down or out of 5h allowance and
+# the task waits (never a paid route).
+QUOTA_ROUTE_CODES = frozenset({"FREE_TIER_LIMIT_REACHED", "ROUTE_CAPACITY"})
 
 
 def select_route(session: Session, task: TaskSpec) -> tuple[ModelRoute | None, list[str]]:
@@ -125,13 +127,17 @@ def select_route(session: Session, task: TaskSpec) -> tuple[ModelRoute | None, l
     return route, reasons
 
 
-def select_route_detail(session: Session, task: TaskSpec) -> tuple[ModelRoute | None, list[str], str]:
+def select_route_detail(session: Session, task: TaskSpec, *,
+                        preferred_routes: list[str] | None = None) -> tuple[ModelRoute | None, list[str], str]:
     """``select_route`` plus the admission wait code when no route is returned: ``ROUTE_INELIGIBLE``, or a routing
-    quota code (``QUOTA_ROUTE_CODES``) when the task waits for a rate-limited free route."""
+    quota code (``QUOTA_ROUTE_CODES``) when the task waits for a rate-limited free route or for route capacity.
+    ``preferred_routes``: the implementing agent's ``route_policy.preferred_routes`` (it only re-orders eligible
+    routes, ADR-0124 contract (a))."""
     from aeos.routing import facade as routing
 
     try:
-        decision = routing.select_route(session, task=task)
+        decision = (routing.select_route(session, task=task, preferred_routes=preferred_routes) if preferred_routes
+                    else routing.select_route(session, task=task))
     except ImportError as exc:
         return None, [_unavailable("routing", exc)], "ROUTE_INELIGIBLE"
     except Blocked as exc:
@@ -237,6 +243,40 @@ def subscription_allowance(session: Session, route: ModelRoute) -> dict[str, Any
             return {"route_key": route.route_key, "state": "UNKNOWN", "problems": [_unavailable("cost", exc)],
                     "windows": []}
         return None
+
+
+def route_capacity(session: Session, task: TaskSpec, route: ModelRoute) -> dict[str, Any]:
+    """The selected route's capacity answer (cap, active tasks, allowance fit and the estimate the run holds;
+    ADR-0124). Routing unavailable -> ``UNAVAILABLE`` and no hold (the admission checks stay in force)."""
+    try:
+        from aeos.routing import facade as routing
+
+        return routing.route_capacity(session, task=task, route=route)
+    except (ImportError, AttributeError) as exc:
+        return {"route_key": route.route_key, "status": "UNAVAILABLE", "reason": _unavailable("routing", exc),
+                "hold": None}
+
+
+def zero_marginal(route: ModelRoute) -> bool:
+    """The route costs no money at the margin (free, loopback LOCAL, a SUBSCRIPTION within its plan). Routing
+    unavailable -> False (fail closed: a re-selection then waits)."""
+    try:
+        from aeos.routing import facade as routing
+
+        return bool(routing.zero_marginal(route))
+    except (ImportError, AttributeError):
+        return False
+
+
+def reselect_allowed(session: Session, route_key: str) -> bool:
+    """A quota-stopped task may leave *route_key* between attempts (expected wait above the owner threshold, ADR-0124).
+    Routing unavailable -> False: the task keeps waiting for its route, as before."""
+    try:
+        from aeos.routing import facade as routing
+
+        return bool(routing.reselect_allowed(session, route_key))
+    except (ImportError, AttributeError):
+        return False
 
 
 def subscription_block(status: dict[str, Any] | None) -> tuple[str, str] | None:

@@ -1,7 +1,9 @@
 """Owner decision C (ADR-0041 amendment 2026-10-26): a free OpenRouter route serves worker tasks for PUBLIC data only,
 behind an explicit owner pool move and a new hash-bound activation; never INTERNAL/CONFIDENTIAL, never OFFICE, never
-once it is not free; free first for PUBLIC tasks; the account's free-model limits make the task wait - never a
-fallback to a route that is not free. respx only: no network, no real credentials, no real data directory."""
+once it is not free; the account's free-model limits make the task wait - never a fallback to a route that is not $0
+marginal. Decision C' (ADR-0124, owner 2026-10-28): for PUBLIC tasks the OpenCode Go routes (subscription, $0 marginal
+within the plan) rank first and the free routes are the fallback. respx only: no network, no real credentials, no real
+data directory."""
 
 from __future__ import annotations
 
@@ -214,7 +216,7 @@ def test_internal_and_confidential_tasks_never_route_to_it_and_office_is_denied(
     install_fakes(monkeypatch)
     _worker(routes)
     _go(routes)
-    assert select_route(routes, task=task(classification="PUBLIC")).route.route_key == FREE
+    assert select_route(routes, task=task(classification="PUBLIC")).route.route_key == GO_GLM  # decision C': Go first
     sel = select_route(routes, task=task(classification="INTERNAL"))
     assert sel.route.route_key == GO_GLM and any("not allowed" in x for x in sel.rejected[FREE])
     with pytest.raises(Blocked) as ei:
@@ -305,24 +307,36 @@ def test_catalog_refresh_keeps_the_worker_pool_and_stops_a_repriced_or_dropped_m
 # ------------------------------------------------------------------ ranking and the no-paid-fallback rule
 
 
-def test_free_first_for_public_even_against_an_evaluated_go_route(routes, monkeypatch):
+def test_go_first_for_public_and_the_free_route_is_the_fallback(routes, monkeypatch):
+    """Decision C' (owner 2026-10-28): PUBLIC tasks use OpenCode Go first, even against an evaluated free route; the free
+    route serves when PUBLIC's share of the Go window is used up (go_public_share); INTERNAL is unaffected."""
     install_fakes(monkeypatch)
-    _worker(routes)
-    go = _go(routes)
-    go.eval_results = {"feature-implementer": {"score": 0.99, "config_hash": go.config_hash}}
+    free = _worker(routes)
+    _go(routes)
+    free.eval_results = {"feature-implementer": {"score": 0.99, "config_hash": free.config_hash}}
     sel = select_route(routes, task=task(classification="PUBLIC"))
-    assert sel.route.route_key == FREE and sel.eligible == [FREE, GO_GLM] and "free first" in sel.reason
+    assert sel.route.route_key == GO_GLM and sel.eligible == [GO_GLM, FREE] and "Go first" in sel.reason
+    assert select_route(routes, task=task(classification="INTERNAL")).route.route_key == GO_GLM
+    monkeypatch.setenv("AEOS_GO_PUBLIC_SHARE", "0")
+    config_mod.reset_settings_cache()
+    sel = select_route(routes, task=task(classification="PUBLIC"))
+    assert sel.route.route_key == FREE and "free (decision C)" in sel.reason
+    assert any(x.startswith("PUBLIC_SHARE:") for x in sel.rejected[GO_GLM])
     assert select_route(routes, task=task(classification="INTERNAL")).route.route_key == GO_GLM
 
 
-def test_rate_limited_free_route_makes_the_public_task_wait_never_a_go_fallback(routes, monkeypatch):
+def test_rate_limited_free_route_makes_the_public_task_wait_never_a_paid_fallback(routes, monkeypatch):
     install_fakes(monkeypatch)
     _worker(routes)
     _go(routes)
     _forwarded(routes, 50)  # the default daily cap (50) used up this UTC day
+    # decision C': Go ranks first for PUBLIC, so a free route at its limit does not matter while Go can take the task
+    assert select_route(routes, task=task(classification="PUBLIC")).route.route_key == GO_GLM
+    monkeypatch.setenv("AEOS_GO_PUBLIC_SHARE", "0")  # PUBLIC's share of the Go window used up: the free route is next
+    config_mod.reset_settings_cache()
     with pytest.raises(Blocked) as ei:
         select_route(routes, task=task(classification="PUBLIC"))
-    assert ei.value.code == "FREE_TIER_LIMIT_REACHED" and ei.value.details["would_serve"] == GO_GLM
+    assert ei.value.code == "FREE_TIER_LIMIT_REACHED" and ei.value.details["limited"] == [FREE]
     route, reasons, code = integrations.select_route_detail(routes, task(classification="PUBLIC"))
     assert route is None and code == "FREE_TIER_LIMIT_REACHED" and code in scheduler.QUOTA_CODES
     assert code in scheduler.WAIT_CODES
@@ -349,6 +363,9 @@ def test_an_observed_429_excludes_every_free_route_account_wide_and_waits(routes
     assert row.state == "EXHAUSTED" and row.details["reset_basis"] == "retry-after"
     d = eligible_routes(routes, domain="PERSONAL", data_classification="PUBLIC")
     assert d.eligible == [GO_GLM] and all(any("quota EXHAUSTED" in x for x in d.rejected[k]) for k in (FREE, FREE2))
+    assert select_route(routes, task=task(classification="PUBLIC")).route.route_key == GO_GLM  # decision C': Go first
+    monkeypatch.setenv("AEOS_GO_PUBLIC_SHARE", "0")  # Go out for PUBLIC: both free routes are at the account's limit
+    config_mod.reset_settings_cache()
     with pytest.raises(Blocked) as ei:
         select_route(routes, task=task(classification="PUBLIC"))
     assert ei.value.code == "FREE_TIER_LIMIT_REACHED" and set(ei.value.details["limited"]) == {FREE, FREE2}

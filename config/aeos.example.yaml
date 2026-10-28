@@ -15,6 +15,14 @@ openbao_addr: http://127.0.0.1:8200
 # time). Raise the daily cap only after that purchase; a value above the documented limit is refused at startup.
 # openrouter_free_rpm_limit: 20
 # openrouter_free_daily_limit: 50
+# Best-first route selection under load (ADR-0124, owner decision 2026-10-28). Not part of any route's configuration
+# identity: changing these never voids a TRIAL. Every cap is 1..2 (the scheduler's global cap in this phase).
+# go_public_share: 0.5               # share of each Go route's 5h window PUBLIC tasks may use (INTERNAL unlimited)
+# go_max_active_total: 2             # tasks at once across all Go (subscription) routes of the key
+# openrouter_free_max_active: 1      # tasks at once across all OpenRouter :free routes (one account-wide limit)
+# route_max_active:                  # per-route cap; default 1 for a Go route with <= 30 USD/month allowance, else 2
+#   opencode-go/glm-5.3-flash: 2
+# route_reselect_after_minutes: 30   # a quota-stopped task leaves its route only when the wait is longer than this
 # Canonical MCI_V2 source (owner-supplied, never committed: the platform repository is public). Default:
 # <data dir>/policy/canonical/<file> named by policy/mci-reference.yaml "location: local:<file>". An absolute
 # path here overrides it; a path inside the repository is refused.

@@ -402,6 +402,12 @@ def admission(task_id: str, principal: CurrentPrincipal, domain: ActiveDomain, d
         # figures follow the GLOBAL/ROUTE budget visibility rule (as the route view and the Costs page); the wait
         # reasons carry no figures
         out["answers"] = {**out["answers"], "subscription": integrations.subscription_without_figures(sub)}
+    cap = (out.get("answers") or {}).get("route_capacity")
+    if isinstance(cap, dict) and not _sees_every_domain(principal):
+        # ADR-0124: the route's active tasks, allowance fit and estimate count every domain's runs (same rule)
+        out["answers"] = {**out["answers"], "route_capacity": {
+            "route_key": cap.get("route_key"), "cap": cap.get("cap"), "figures_hidden": True,
+            "spend_note": "Kapasitas rute mencakup domain lain yang tidak dapat Anda lihat."}}
     return {**out, "state": te.state, "source": "scheduler admission check (§19, read-only)",
             "checked_at": utcnow().isoformat()}
 
