@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -94,6 +95,24 @@ def test_bite_an_invalid_override_is_reported_first_and_the_venv_facts_still_fol
     assert launcher.override_problem() is None  # near miss: unset is not a problem
 
 
+# capfdbinary reads file descriptor 2 itself, so it also catches what ANOTHER process sharing it writes. On macOS a
+# child Python started by an earlier test can print a malloc diagnostic there ("Python(15412) MallocStackLogging: ...
+# not enabled."), which failed this test four times in one full-suite run with correct code (LESSONS L15, 2026-10-29).
+# Only that exact OS line is dropped; any other byte still fails the test.
+_OS_NOISE = re.compile(rb"^[A-Za-z0-9_.-]+\(\d+\) Malloc[A-Za-z]*: [^\n]*\n", re.M)
+
+
+def _without_os_noise(err: bytes) -> bytes:
+    return _OS_NOISE.sub(b"", err)
+
+
+def test_the_noise_filter_drops_only_the_macos_malloc_line() -> None:
+    noise = b"Python(15412) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.\n"
+    assert _without_os_noise(noise) == b""
+    assert _without_os_noise(noise + b"Traceback (most recent call last)\n") == b"Traceback (most recent call last)\n"
+    assert _without_os_noise(b"x") == b"x"
+
+
 @pytest.mark.parametrize("failure", ["raises", "timeout", "nonzero", "empty"])
 def test_every_failure_is_silent_exit_zero(
         failure: str, tmp_path: Path, capfdbinary: pytest.CaptureFixture[bytes]) -> None:
@@ -106,4 +125,4 @@ def test_every_failure_is_silent_exit_zero(
 
     assert launcher.main(fake_run, tmp_path) == 0
     captured = capfdbinary.readouterr()
-    assert captured.out == b"" and captured.err == b""
+    assert captured.out == b"" and _without_os_noise(captured.err) == b""

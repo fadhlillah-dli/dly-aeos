@@ -504,6 +504,20 @@ Copy the route key and its config hash from the `routes list` output.
     `openrouter_free_max_active` and `route_reselect_after_minutes` ([OPERATIONS.md](OPERATIONS.md), "Environment
     variables"). They are not part of a route's configuration, so changing one never voids a TRIAL. Restart
     `./aeos serve` after a change.
+  * **Paid OpenRouter only by escalation or overflow (ADR-0128, your decision R34).** A route that costs money per call
+    always ranks after every Go and free route, whatever its score or the agent's preference. It takes an INTERNAL task
+    only when two earlier attempts of that task on Go or free routes failed the verifier, the review or the acceptance
+    (ESCALATION; a quota, time-out or crash stop does not count), or when every Go or free route that could take the
+    task is busy, out of its 5h window or cooling down (OVERFLOW). A PUBLIC task never runs on it. Otherwise the task
+    waits (`ROUTE_CAPACITY` or `PAID_NOT_ADMITTED`). The paid route still needs your BUDGET decision naming its exact
+    route key, its activation, and a cost limit per task (`limits.max_cost_usd`); the global budget still applies.
+    Every paid run is recorded as an event (`route.paid_admitted`) and in the audit log. To turn a path off,
+    set `paid_escalation: false` or `paid_overflow: false` in `aeos.yaml` and restart `./aeos serve`.
+    ESCALATION does not start by itself: a task may have at most 2 attempts (§21 pilot cap), so after the second
+    failure it is BLOCKED with `NEEDS_DECISION` ("attempt cap reached (2/2)"). Retry it with a rationale and one extra
+    attempt (*Pekerjaan Live* -> retry); that attempt is the one that goes to the paid route first. If the task's last
+    attempt stopped at a quota on a Go route, it goes back to a Go or free route instead (ADR-0124), never first to the
+    paid route.
 
   * **No cost limit per task.** A TaskSpec needs no `max_cost_usd`. The marginal cost of each run is $0, and the
     run's cost cap is $0.
