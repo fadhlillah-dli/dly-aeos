@@ -380,9 +380,36 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   lack. A trailing `\` continues a line only in zsh and bash: on Windows it becomes `^` in cmd.exe and a backtick
   in PowerShell (`docs/OWNER_ACTIONS.md` section 5).
 
+- **`scripts/owner_dryrun.py`** dry-runs an owner script before the owner runs it (LESSONS L13). An owner script
+  lives outside the repository (for example in `~/Documents/dly-aeos-owner-scripts`) and exposes
+  `run(client, username, password, ask)`; a script without it is refused. Run it with the project interpreter from
+  the checkout the server runs (it imports the repository's own packages, not only the stdlib):
+
+  ```bash
+  .venv/bin/python scripts/owner_dryrun.py \
+    ~/Documents/dly-aeos-owner-scripts/example.py \
+    --answer SEMUA --answer TIDAK
+  ```
+
+  It copies the live database with sqlite3's online backup from a read-only connection into a new temporary data
+  dir (with a copy of `aeos.yaml`), reads which secret references exist from the real `aeos secrets status` (names
+  and expiry, never a value) and gives the dry run an in-memory store that reports exactly those as present, with
+  dummy values. The dry-run process has the null keyring, OpenBao at a closed loopback port, and refuses every TCP
+  connect to a non-loopback address and to the loopback ports of the real OpenBao and Control Center. It creates a
+  temporary SUPER_ADMIN in the copy (`--user NAME`, default `dryrun-admin`), runs the script against the real app
+  through a TestClient with the `--answer` values in order (a prompt with no answer left fails the run), and runs
+  the Doctor without `--functional` before and after. It prints the capability table (before -> after) and every
+  check whose status changed. A capability that got worse (READY < DEGRADED < UNKNOWN < BLOCKED) ends with
+  `OWNER_DRYRUN: DEGRADED` (exit 1); `--accept-degrade 'reason'` accepts it with a stated reason (exit 0, the last
+  line says `OWNER_DRYRUN: DEGRADED-ACCEPTED`, never OK). Otherwise `OWNER_DRYRUN: OK` (exit 0); a harness or script
+  failure, or a copy that is not at this checkout's migration head, is `OWNER_DRYRUN: FAIL` (exit 2). The temporary
+  dir is removed in every case. Show the capability diff together with the commands before they reach the owner
+  (`docs/agent/DELEGATION-BRIEF.md`, rule 10). NOT-PROVEN: child processes of the Doctor probes (the same ones
+  `aeos doctor` runs) are not network-isolated, and only the database and `aeos.yaml` of the data dir are copied.
+
 The tools have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`,
 `tests/unit/test_github_settings.py`, `tests/unit/test_action_pins_tool.py`,
-`tests/unit/test_owner_commands_paste_safe.py`): a violating fixture is red and a
+`tests/unit/test_owner_commands_paste_safe.py`, `tests/unit/test_owner_dryrun.py`): a violating fixture is red and a
 near-miss legitimate one is green. The junction
 test runs only on Windows.
 

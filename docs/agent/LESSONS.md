@@ -30,7 +30,7 @@ observe -> record with incident -> count strikes -> threshold -> tool -> bite te
 
 `level` is the strongest control that exists today: written-rule, memory, process, test, ci-gate,
 git-hook, harness-hook or tool-refusal. A `PENDING:` tool raises it once merged.
-Evidence: rows describe incidents of 2026-10-26 and 2026-10-27; E1 = static reading, E2 = unit run on macOS arm64.
+Evidence: rows describe incidents of 2026-10-26 to 2026-10-28; E1 = static reading, E2 = unit run on macOS arm64.
 Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PROVEN).
 
 ## Table 1 - Rules with incidents
@@ -49,7 +49,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 | L10 | 2026-10-26 | An agent re-implemented attribution regexes instead of reusing aeos.core.attribution; on 2026-10-27 two parallel branches each implemented the changelog fragment format | process | 2 | test | tests/unit/test_repository_hygiene.py | yes | Only one module defines attribution patterns and a test fails on a second copy |
 | L11 | 2026-10-26 | An agent widened the scope of an owner decision beyond what the owner said | process | 1 | written-rule | - | yes | Decisions are recorded with an exact scope that tools compare against the change |
 | L12 | 2026-10-26 | An inventory change leaked one domain's decision into the other domain's view | process | 1 | written-rule | - | yes | A differential domain test fails on any cross-domain leak |
-| L13 | 2026-10-26 | Owner-run scripts failed twice on validation rules that could have been checked first | process | 2 | written-rule | - | yes | A dry-run harness runs every owner script against a temporary database automatically |
+| L13 | 2026-10-26 | Owner-run scripts failed twice on validation rules that could have been checked first; on 2026-10-28 a script passed a dry run against a database copy with no secrets, and on the real system it activated two WORKER routes whose credential was not stored, so CAN_RUN_WORKER fell from READY to BLOCKED (the dry run mirrored no secret presence and compared no Doctor capabilities) | process | 3 | tool-refusal | scripts/owner_dryrun.py + tests/unit/test_owner_dryrun.py | yes | A dry-run harness runs every owner script against a temporary database automatically |
 | L14 | 2026-10-26 | Background test runs failed on a missing dependency and on zsh not word-splitting a variable, then again in a 'set -- $var' loop, and a third time on 2026-10-27 in the session itself | process | 3 | tool-refusal | scripts/run_tests.sh | yes | One test-runner script owns environment, deadline and failure marker |
 | L15 | 2026-10-26 | Verifier runs were QUARANTINED at random under load and were re-run, not fixed; the cause was not timing: psutil raised SystemError reading a dying unrelated process and it escaped the process sweep; on 2026-10-27 a memory-cap test that flaked under load was first 'fixed' as a timeout race, and its own diagnostics then showed macOS compressing the hog's zero-filled memory so the cap never fired | correctness | 5 | test | backend/aeos/verification/procgroup.py | yes | The sweep or psutil changes; re-run the churn tests in tests/unit/test_verification_procs.py |
 | L16 | 2026-10-26 | The session scratchpad that held owner scripts can vanish | process | 1 | written-rule | - | no | Owner scripts are generated on demand from the repository |
@@ -74,7 +74,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 * L10 Reuse the canonical module or script instead of re-implementing it (the changelog fragment format lives only in scripts/changelog.py).
 * L11 Quote the owner decision verbatim with its exact scope in the brief and the PR. Widening is a new question.
 * L12 A change for one domain is proven not to alter the other domain's view.
-* L13 Dry-run every owner command or script in-process against a temporary database and paste the result first.
+* L13 Dry-run every owner script with `scripts/owner_dryrun.py` (a copy of the live database, the real store's secret presence without values, Doctor capabilities before and after) and show its capability diff before the commands reach the owner; `OWNER_DRYRUN: DEGRADED` stops it unless the reason is given with `--accept-degrade`.
 * L14 Diagnose input, then environment, then code. No background job without a deadline and a failure marker. zsh does not word-split a variable: use an array.
 * L15 A flaky test is a defect: record it and fix its timing assumption. A re-run is not a fix.
 * L16 Owner scripts live in a persistent private folder outside the repository.
@@ -91,7 +91,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 |---|---|---|---|
 | Blind verifier: give a second reader the claim, not the evidence | Re-run the verifier on the same claim and compare verdicts | A claim confirmed only because the reader saw the author's reasoning | A tool derives the verdict from the evidence record |
 | Adversarial review, then delta-only re-review | Diff of the fixes against the findings list | Endless full re-reviews, or fixes nobody re-checked | Findings are tracked by a tool that re-checks each fix |
-| In-process dry-run of owner scripts against a temporary database | Run the script with a temp data dir and compare the printed result | Owner-run scripts failing on validation that was checkable up front | The harness dry-runs every owner script automatically |
+| In-process dry-run of owner scripts against a temporary database | `scripts/owner_dryrun.py SCRIPT`: the capability diff and the OWNER_DRYRUN verdict | Owner-run scripts failing on validation that was checkable up front | The harness dry-runs every owner script automatically |
 | Merge main into a branch and resolve the changelog before push | The merge commit exists and the branch has no conflict with main | A conflict found only after a long CI run | Changelog fragments make the conflict impossible |
 | Violating fixture red plus near-miss fixture green for every gate | The bite tests of the gate in a temporary directory | A gate that never fails, or one that rejects legitimate input | The gate is replaced by a stronger check with its own bite test |
 
