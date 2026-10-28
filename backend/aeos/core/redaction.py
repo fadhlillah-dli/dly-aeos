@@ -180,14 +180,20 @@ def _reads_as_identifier(body: str) -> bool:
 
 # An escape sequence in front of (or after) a token is a boundary, not part of a word: a JSON string escape (``\n``,
 # ``\t``, ``\"``, ``\u00e9``; a run of backslashes for JSON encoded twice), a terminal colour or cursor code (an ANSI
-# CSI sequence such as ``ESC[31m``, raw or JSON-escaped as ``\u001b[31m``) and any URL-encoded byte (``%3D``, ``%2F``,
+# CSI sequence such as ``ESC[31m``: raw, JSON-escaped as ``\u001b[31m``, or written as text in shell source or its log
+# as ``\x1b[31m``, ``\033[31m`` or ``\e[31m``), the string terminator ESC + backslash that ends an OSC-8 terminal
+# hyperlink (raw, JSON-escaped as ``\u001b\\``, or as text ``\e\\``), and any URL-encoded byte (``%3D``, ``%2F``,
 # ``%40``, ``%2B``, ``%5C``; ``%25`` for encoded twice). Without it ``...\nAIza...`` or ``ESC[31mAIza...`` reads as glued
-# to the base64 character ``n`` or ``m`` and ``\nsk-...`` fails the look-behind (differential reviews of ADR-0127,
-# 2026-10-28). No token pattern holds ``\``, ``%`` or ``ESC``, so masking them never cuts a token. A backslash run is
-# matched only from its first backslash and possessively, so a long run costs linear time, not quadratic.
+# to the base64 character ``n`` or ``m``, ``\nsk-...`` fails the look-behind, and after an OSC-8 terminator the
+# backslash and the token's first letter read as the JSON escape ``\b`` or ``\r``, which blanked the ``b`` of a batch
+# token ``b.`` or the ``r`` of a recovery token ``r.`` (differential reviews of ADR-0127, 2026-10-28). The terminator's
+# backslashes are matched in pairs after an encoded ESC (a JSON-encoded backslash is two), and never the letter after
+# them. No token pattern holds ``\``, ``%`` or ``ESC``, so masking them never cuts a token. A backslash run is matched
+# only from its first backslash and possessively, so a long run costs linear time, not quadratic.
 _ANSI_CSI = r"\[[0-?]*[ -/]*[@-~]"
-_ESCAPE_BOUNDARY = re.compile(r"(?<!\\)\\++(?:u001[bB]" + _ANSI_CSI + r"|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
-                              r"|\x1b(?:" + _ANSI_CSI + r")?"
+_ESCAPE_BOUNDARY = re.compile(r"(?<!\\)\\++(?:(?:u001[bB]|x1[bB]|033|e)(?:" + _ANSI_CSI + r"|(?:\\\\)++)"
+                              r"|u001[bB]|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
+                              r"|\x1b(?:" + _ANSI_CSI + r"|\\)?"
                               r"|%(?:25)*[0-9A-Fa-f]{2}")
 
 

@@ -8,13 +8,15 @@ caught it before merge.
 This test is that differential, kept: a corpus of secret shapes, one or more variants for every pattern of
 ``aeos.core.redaction`` as origin/main defined them when the incident was found (each body holds every character its
 pattern's class allows; long bodies too), placed in many contexts (plain, after a letter or digit, after a JSON escape,
-after a URL-encoded byte, after a terminal colour code, inside a data URI, inside a JSON string, a multi-line PEM
-block). It asserts that
+after a URL-encoded byte, after a terminal colour code raw or written as text, after an OSC-8 hyperlink terminator,
+inside a data URI, inside a JSON string, a multi-line PEM block). It asserts that
 
-* ``redact_text`` masks completely (no piece of ``PIECE`` characters of the secret survives) and ``contains_secret``
+* ``redact_text`` masks completely (no piece of ``PIECE`` characters of any part of the secret survives: every key of
+  an ``operator init`` JSON list, every line of a PEM body) and ``contains_secret``
   detects every (variant, context) that origin/main caught: the only pairs it may miss are listed in ``MAIN_MISSES``
   (derived by running origin/main's patterns over this corpus); a check of the whole value alone stayed green when a
-  narrowed character class masked only a prefix (review of 2026-10-28);
+  narrowed character class masked only a prefix, and a check of the first key or line alone stayed green when a change
+  narrowed only the repeated group of a pattern (reviews of 2026-10-28);
 * the outgoing guard (``find_high_confidence_secrets`` and the broker's ``sensitive_content_findings``) finds every
   token-shaped item in every context except the documented base64 exception (a Google key or refresh token glued to
   a letter or digit reads as base64 data), including after escapes origin/main's redaction misses;
@@ -86,20 +88,24 @@ def _fixed(chars: str, size: int) -> list[str]:
     return [(pool[i:i + size] + _draw(chars, size))[:size] for i in range(0, len(pool), size)]
 
 
-def _pem(kind: str) -> tuple[str, str]:
+def _pem(kind: str) -> tuple[str, tuple[str, ...]]:
     b64 = _ALNUM + "+/"
     lines = ["".join(_RNG.sample(b64, 64)) for _ in range(3)] + [_draw(b64, 20) + "=="]
     item = ("-----BEGIN " + kind + "PRIVATE " + "KEY-----\n" + "\n".join(lines) + "\n-----END " + kind + "PRIVATE "
             + "KEY-----")
-    return item, lines[0]
+    return item, tuple(lines)
 
 
-def _variants() -> list[tuple[str, str, str, str]]:
-    """(variant id, detector kind, item placed in a context, the secret value that must not survive redaction)."""
-    out: list[tuple[str, str, str, str]] = []
+def _variants() -> list[tuple[str, str, str, tuple[str, ...]]]:
+    """(variant id, detector kind, item placed in a context, the parts of the secret: no piece of any part may survive
+    redaction). A multi-part secret lists every part (each key of an `operator init` JSON list, every line of a PEM
+    body): origin/main masks the repeated part of its pattern too, and a check of the first part alone stays green
+    when a change narrows only the repeated part (review of 2026-10-28)."""
+    out: list[tuple[str, str, str, tuple[str, ...]]] = []
 
-    def add(vid: str, kind: str, item: str, value: str | None = None) -> None:
-        out.append((vid, kind, item, item if value is None else value))
+    def add(vid: str, kind: str, item: str, value: str | tuple[str, ...] | None = None) -> None:
+        parts = (item,) if value is None else (value,) if isinstance(value, str) else value
+        out.append((vid, kind, item, parts))
 
     def token(vid: str, kind: str, prefix: str, extra: str = "", alnum: str = _ALNUM) -> None:
         add(vid, kind, prefix + _body(extra, alnum=alnum))
@@ -123,7 +129,7 @@ def _variants() -> list[tuple[str, str, str, str]]:
     for c in "sb":
         token(f"vault_short_{c}", "vault_token_short", c + ".")
     token("openbao_recovery", "openbao_recovery_token", "r" + ".")
-    key, key2 = _body("+/") + "==", _body("+/")
+    key, key2, key3 = _body("+/") + "==", _body("+/"), _body("+/=")
     for label in ("Unseal Key 1", "Recovery Key 3", "unseal key share 2", "Unseal Key"):
         add("unseal_" + label.lower().replace(" ", "_"), "vault_unseal_key", label + ": " + key, key)
     long_key = _body("+/", length=_LONG) + "="
@@ -135,12 +141,12 @@ def _variants() -> list[tuple[str, str, str, str]]:
     for which in ("unseal", "recovery"):
         for enc in ("b64", "hex"):
             add(f"init_json_{which}_{enc}", "vault_init_json",
-                json.dumps({f"{which}_keys_{enc}": [key, key2]}), key)
+                json.dumps({f"{which}_keys_{enc}": [key, key2, key3]}), (key, key2, key3))
     for c in "baprs":
         token(f"slack_xox{c}", "slack_token", "xo" + "x" + c + "-", "-")
     for label in ("", "RSA ", "EC ", "OPENSSH "):
-        item, value = _pem(label)
-        add("pem_" + (label.strip().lower() or "pkcs8"), "private_key_pem", item, value)
+        item, lines = _pem(label)
+        add("pem_" + (label.strip().lower() or "pkcs8"), "private_key_pem", item, lines)
     for vid, length in (("bearer", 0), ("bearer_long", _LONG)):
         value = _body("._-~+/", length=length) + "=="
         add(vid, "bearer_value", "Authorization: Bearer " + value, value)
@@ -175,6 +181,14 @@ CONTEXTS: dict[str, Callable[[str], str]] = {
     "after_url_backslash": lambda t: "path=C%3A%5C" + t,
     "after_ansi_colour": lambda t: "\x1b[31m" + t + "\x1b[0m",
     "after_json_ansi_colour": lambda t: json.dumps({"log": "\x1b[1;32m" + t + "\x1b[0m"}),
+    # a colour code written as text, as in shell source or a log of it: backslash x1b, backslash 033, backslash e
+    "after_textual_hex_colour": lambda t: "echo -e '\\x1b[31m" + t + "\\x1b[0m'",
+    "after_textual_octal_colour": lambda t: "printf '\\033[1;32m" + t + "\\033[0m\\n'",
+    "after_textual_e_colour": lambda t: "printf '\\e[31m" + t + "\\e[0m'",
+    # an OSC-8 terminal hyperlink: its terminator is ESC + backslash, raw, JSON-escaped or written as text
+    "after_osc8_link": lambda t: "\x1b]8;;https://h.example/x\x1b\\" + t + "\x1b]8;;\x1b\\",
+    "after_json_osc8_link": lambda t: json.dumps({"log": "\x1b]8;;https://h.example/x\x1b\\" + t + "\x1b]8;;\x1b\\"}),
+    "after_textual_osc8_link": lambda t: "printf '\\e]8;;https://h.example/x\\e\\\\" + t + "\\e]8;;\\e\\\\'",
     "data_uri": lambda t: "data:text/plain;charset=utf-8," + t,
 }
 GLUED = frozenset({"after_letter", "after_digit"})
@@ -184,14 +198,16 @@ GLUED = frozenset({"after_letter", "after_digit"})
 # Everything else must stay masked completely. Shrinking this set is fine; adding to it weakens redaction and needs an
 # owner decision recorded in an ADR.
 # Contexts in which the token directly follows a letter or digit: glued, or after an escape that ends in one
-# (``\n``, ``\t``, ``\u00e9``, ``%3D``, ``%26``, ``%3F``, ``%2F``, ``%40``, ``%2B``, ``%5C``, a colour code ``ESC[31m``).
+# (``\n``, ``\t``, ``\u00e9``, ``%3D``, ``%26``, ``%3F``, ``%2F``, ``%40``, ``%2B``, ``%5C``, a colour code ``ESC[31m``, raw or
+# written as text). After an OSC-8 terminator (ESC + backslash) the token follows a backslash: origin/main masks it.
 _LETTER_OR_DIGIT_BEFORE = ("after_letter", "after_digit", "after_json_newline", "after_json_tab", "after_json_unicode",
                            "double_json_newline", "after_url_eq", "after_url_amp", "after_url_question",
                            "after_url_slash", "after_url_at", "after_url_plus", "after_url_backslash",
-                           "after_ansi_colour", "after_json_ansi_colour")
+                           "after_ansi_colour", "after_json_ansi_colour", "after_textual_hex_colour",
+                           "after_textual_octal_colour", "after_textual_e_colour")
 # Contexts in which JSON escaping turned the quotes of a labelled JSON shape into ``\"``.
 _JSON_ENCODED = ("json_string", "after_json_newline", "after_json_tab", "after_json_quote", "after_json_unicode",
-                 "double_json_newline", "after_json_ansi_colour")
+                 "double_json_newline", "after_json_ansi_colour", "after_json_osc8_link")
 MAIN_MISSES = frozenset(
     # a look-behind (``sk-``, ``hv[sbr].``, ``r.``) or a word boundary (the unseal-key label) needs a non-alphanumeric
     # character before the shape; glued, an ``hvs.``/``hvb.`` token is masked by the short pattern only up to its
@@ -216,8 +232,8 @@ GUARD_UNSEEN = frozenset((vid, ctx) for vid, kind, _, _ in VARIANTS for ctx in C
                          or (kind == "vault_root_token" and ctx in GLUED))
 
 
-def _cases() -> list[tuple[str, str, str, str, str]]:
-    return [(vid, kind, ctx, wrap(item), value) for vid, kind, item, value in VARIANTS for ctx, wrap in CONTEXTS.items()]
+def _cases() -> list[tuple[str, str, str, str, tuple[str, ...]]]:
+    return [(vid, kind, ctx, wrap(item), parts) for vid, kind, item, parts in VARIANTS for ctx, wrap in CONTEXTS.items()]
 
 
 def _what(kind: str, vid: str, ctx: str) -> str:
@@ -227,22 +243,28 @@ def _what(kind: str, vid: str, ctx: str) -> str:
 PIECE = 8  # no piece of a secret this long may survive redaction
 
 
-def unmasked_pieces(value: str, redacted: str) -> int:
-    """How many of the PIECE-character pieces of *value* are still in *redacted*: 0 when all of it is masked. A check
-    of the whole value alone stays green when a narrowed pattern masks only a prefix (review of 2026-10-28)."""
-    return sum(value[i:i + PIECE] in redacted for i in range(len(value) - PIECE + 1))
+def _pieces(parts: tuple[str, ...]) -> list[str]:
+    """Every PIECE-character piece of every part of a secret (each key of a list, every line of a PEM body)."""
+    return [part[i:i + PIECE] for part in parts for i in range(len(part) - PIECE + 1)]
+
+
+def unmasked_pieces(parts: tuple[str, ...], redacted: str) -> int:
+    """How many of the PIECE-character pieces of the secret's *parts* are still in *redacted*: 0 when all of every part
+    is masked. A check of the whole value alone stays green when a narrowed pattern masks only a prefix, and a check of
+    the first part alone when a change narrows only a repeated part (reviews of 2026-10-28)."""
+    return sum(piece in redacted for piece in _pieces(parts))
 
 
 def redaction_regressions() -> list[str]:
     """Every (variant, context) origin/main masked completely that redact_text no longer masks completely, or that
     contains_secret no longer detects. The message names the pattern and the context, never the value (L26)."""
     out = []
-    for vid, kind, ctx, text, value in _cases():
+    for vid, kind, ctx, text, parts in _cases():
         if (vid, ctx) in MAIN_MISSES:
             continue
-        left = unmasked_pieces(value, redact_text(text))
+        left = unmasked_pieces(parts, redact_text(text))
         if left:
-            out.append(f"{_what(kind, vid, ctx)}: redact_text leaves {left} of its {len(value) - PIECE + 1} "
+            out.append(f"{_what(kind, vid, ctx)}: redact_text leaves {left} of its {len(_pieces(parts))} "
                        f"{PIECE}-character pieces unmasked (origin/main masked all)")
         if not contains_secret(text):
             out.append(f"{_what(kind, vid, ctx)}: contains_secret no longer detects it (origin/main did)")
@@ -257,11 +279,11 @@ def _overlaps(text: str, value: str, spans: list[tuple[int, int]]) -> bool:
 def guard_misses() -> list[str]:
     """Every token-shaped (variant, context) the outgoing guard does not find, outside its documented exceptions."""
     out = []
-    for vid, kind, ctx, text, value in _cases():
+    for vid, kind, ctx, text, parts in _cases():
         if kind in GROUP_KINDS or (vid, ctx) in GUARD_EXEMPT or (vid, ctx) in GUARD_UNSEEN:
             continue
         spans = [(f.start, f.end) for f in find_high_confidence_secrets(text)]
-        if not _overlaps(text, value, spans):
+        if not _overlaps(text, parts[0], spans):
             out.append(f"{_what(kind, vid, ctx)}: the outgoing guard does not find it")
     return out
 
@@ -278,10 +300,11 @@ def test_the_corpus_covers_every_pattern_of_origin_main_and_of_today():
 
 
 def test_each_variant_is_still_matched_whole_by_its_own_pattern():
-    """Each variant's secret lies inside one match of its own pattern: the whole body, every character of its class."""
+    """Each part of each variant's secret lies inside a match of its own pattern: the whole body, every character of its
+    class, every key of a list and every line of a PEM body."""
     patterns = dict(redaction._NAMED_PATTERNS)
-    wrong = [f"pattern {kind} no longer matches the whole of its variant {vid} (plain)"
-             for vid, kind, item, value in VARIANTS
+    wrong = [f"pattern {kind} no longer matches the whole of its variant {vid} (plain, part {n})"
+             for vid, kind, item, parts in VARIANTS for n, value in enumerate(parts, 1)
              if not any(m.start() <= item.find(value) and item.find(value) + len(value) <= m.end()
                         for m in patterns[kind].finditer(item))]
     assert not wrong, "\n".join(wrong)
@@ -301,7 +324,7 @@ def test_the_broker_refuses_every_token_after_a_json_escape_in_a_tool_result():
     from aeos.broker.model_proxy import sensitive_content_findings
 
     escaped = ("after_json_newline", "after_json_tab", "after_json_quote", "after_json_unicode", "double_json_newline",
-               "after_json_ansi_colour")
+               "after_json_ansi_colour", "after_json_osc8_link")
     missed = []
     for vid, kind, ctx, text, _ in _cases():
         if ctx not in escaped or kind in GROUP_KINDS or (vid, ctx) in GUARD_UNSEEN:
@@ -341,6 +364,10 @@ NEAR_MISSES = {
     "lockfile_sha512": _lockfile(5_000),
     "ansi_coloured_code": "\x1b[32m" + "s" + ".registerServiceWithHealthCheck(ctx)\x1b[0m r" + ".findAllByOrganizationId()",
     "url_encoded_base64": _url_encoded_base64(),
+    "textual_colour_code": ("printf '\\e[32m" + "s" + ".registerServiceWithHealthCheck(ctx)\\x1b[0m' \\033[1m"
+                            + "b" + ".ReportAllocsAndResetTimerNow()"),
+    "osc8_linked_code": ("\x1b]8;;file:///src/a.go\x1b\\" + "r" + ".findAllByOrganizationIdentifier(id)\x1b]8;;\x1b\\ "
+                         "\\e]8;;x\\e\\\\" + "b" + ".ReportAllocsAndResetTimerNow()"),
 }
 
 
@@ -387,13 +414,86 @@ def test_bite_a_narrowed_character_class_that_masks_only_a_prefix_is_red(monkeyp
     named = [(k, narrowed if k == "google_oauth_token" else p) for k, p in redaction._NAMED_PATTERNS]
     monkeypatch.setattr(redaction, "_NAMED_PATTERNS", named)
     monkeypatch.setattr(redaction, "_PATTERNS", [p for _, p in named])
-    (text, value), = [(item, value) for vid, _, item, value in VARIANTS if vid == "google_oauth"]
+    (text, (value,)), = [(item, parts) for vid, _, item, parts in VARIANTS if vid == "google_oauth"]
     redacted = redact_text(text)
     assert value not in redacted and redacted != text  # the old whole-value check stays green: that is the gap
-    assert unmasked_pieces(value, redacted) >= 3
+    assert unmasked_pieces((value,), redacted) >= 3
     regressions = redaction_regressions()
     for ctx in ("plain", "after_json_newline", "after_ansi_colour"):
         assert any(r.startswith(f"pattern google_oauth_token (variant google_oauth) in context {ctx}: redact_text "
                                 "leaves ") for r in regressions), (ctx, regressions)
     assert all("google_oauth" in r for r in regressions), regressions  # no other pattern is blamed
     assert not any(value[i:i + PIECE] in r for r in regressions for i in range(len(value) - PIECE + 1))  # L26
+
+
+def _replace_pattern(monkeypatch, kind: str, pattern: re.Pattern[str]) -> None:
+    named = [(k, pattern if k == kind else p) for k, p in redaction._NAMED_PATTERNS]
+    monkeypatch.setattr(redaction, "_NAMED_PATTERNS", named)
+    monkeypatch.setattr(redaction, "_PATTERNS", [p for _, p in named])
+
+
+_INIT_JSON_REPEAT = r'(?:\s*,\s*"[A-Za-z0-9+/=]{32,}")*'  # the repeated group of origin/main's `operator init` pattern
+_INIT_JSON_REPEAT_NARROWED = {
+    "repeat_drops_plus": r'(?:\s*,\s*"[A-Za-z0-9/=]{32,}")*',
+    "repeat_bounded_to_one": r'(?:\s*,\s*"[A-Za-z0-9+/=]{32,}"){0,1}',
+}
+
+
+@pytest.mark.parametrize("mutation", sorted(_INIT_JSON_REPEAT_NARROWED))
+def test_bite_a_narrowed_repeated_group_of_the_init_json_list_is_red(monkeypatch, mutation):
+    """Review of 2026-10-28: a change to only the repeated group of the `operator init` JSON pattern (its character
+    class loses ``+``, or the repeat is bounded) leaves a later unseal key of the list whole in the log while the first
+    key stays masked: a check of the first key alone is green (the gap), the check of every key is red and names the
+    pattern and the context."""
+    original = dict(redaction._NAMED_PATTERNS)["vault_init_json"]
+    assert original.pattern.endswith(_INIT_JSON_REPEAT)
+    head = original.pattern[:-len(_INIT_JSON_REPEAT)]
+    _replace_pattern(monkeypatch, "vault_init_json", re.compile(head + _INIT_JSON_REPEAT_NARROWED[mutation]))
+    (text, parts), = [(item, parts) for vid, _, item, parts in VARIANTS if vid == "init_json_unseal_b64"]
+    redacted = redact_text(text)
+    assert unmasked_pieces(parts[:1], redacted) == 0  # the first key is masked: a first-part check stays green
+    assert unmasked_pieces(parts[1:], redacted) > 0
+    regressions = redaction_regressions()
+    for ctx in ("plain", "after_space", "multiline", "after_osc8_link"):
+        assert any(r.startswith(f"pattern vault_init_json (variant init_json_unseal_b64) in context {ctx}: redact_text "
+                                "leaves ") for r in regressions), (ctx, regressions)
+    assert all(r.startswith("pattern vault_init_json ") for r in regressions), regressions  # no other pattern blamed
+    pieces = _pieces(parts)
+    assert not any(piece in r for r in regressions for piece in pieces)  # L26
+
+
+def test_bite_a_pem_pattern_that_masks_only_the_first_body_line_is_red(monkeypatch):
+    """The same gap for a PEM block: a pattern that masks the header and the first body line leaves the other lines
+    readable; checking every body line is red and names the pattern and the context."""
+    _replace_pattern(monkeypatch, "private_key_pem", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----\n[^\n]*"))
+    (text, parts), = [(item, parts) for vid, _, item, parts in VARIANTS if vid == "pem_rsa"]
+    redacted = redact_text(text)
+    assert unmasked_pieces(parts[:1], redacted) == 0 and unmasked_pieces(parts[1:], redacted) > 0
+    regressions = redaction_regressions()
+    assert any(r.startswith("pattern private_key_pem (variant pem_rsa) in context plain: redact_text leaves ")
+               for r in regressions), regressions
+    assert all(r.startswith("pattern private_key_pem ") for r in regressions), regressions
+
+
+# The escape boundary of 787626a: raw and JSON-escaped colour codes only.
+_ESCAPE_BOUNDARY_BEFORE_TEXTUAL_FORMS = re.compile(
+    r"(?<!\\)\\++(?:u001[bB]" + redaction._ANSI_CSI + r"|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
+    r"|\x1b(?:" + redaction._ANSI_CSI + r")?"
+    r"|%(?:25)*[0-9A-Fa-f]{2}")
+
+
+def test_bite_textual_escapes_and_the_osc8_terminator_are_boundaries(monkeypatch):
+    """Review of 2026-10-28: with a boundary that knows only raw and JSON-escaped colour codes, a token after a colour
+    code written as text (backslash x1b, backslash 033, backslash e) reads as glued to ``m``, and after an OSC-8
+    terminator (ESC + backslash) the backslash and the first letter of a ``b.`` or ``r.`` token read as the JSON escape
+    backslash-b or backslash-r, and that letter is blanked: the guard is red, naming the pattern and the context.
+    Today's boundary is the near miss (the guard test above is green, the code near misses stay unflagged)."""
+    monkeypatch.setattr(redaction, "_ESCAPE_BOUNDARY", _ESCAPE_BOUNDARY_BEFORE_TEXTUAL_FORMS)
+    misses = guard_misses()
+    for vid, kind in (("vault_short_b", "vault_token_short"), ("openbao_recovery", "openbao_recovery_token")):
+        for ctx in ("after_osc8_link", "after_json_osc8_link", "after_textual_osc8_link"):
+            assert f"pattern {kind} (variant {vid}) in context {ctx}: the outgoing guard does not find it" in misses, (
+                vid, ctx)
+    for ctx in ("after_textual_hex_colour", "after_textual_octal_colour", "after_textual_e_colour"):
+        assert f"pattern anthropic_key (variant anthropic) in context {ctx}: the outgoing guard does not find it" \
+            in misses, ctx

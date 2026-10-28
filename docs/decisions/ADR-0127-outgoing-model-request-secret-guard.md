@@ -34,8 +34,9 @@
    system, user, assistant and tool messages (also content parts), tool calls and their `arguments` (decoded as JSON
    too, so a JSON escape does not hide a token), tool definitions, stop sequences, response schemas. An escape
    sequence in a string (a JSON escape such as `\n`, `\t`, `\"` or `\u00e9`, also JSON encoded twice, a terminal
-   colour code such as `ESC[31m`, raw or JSON-escaped, and any URL-encoded byte such as `%3D`, `%2F`, `%40` or `%5C`)
-   is a boundary before or after a token (amendment, decision B).
+   colour code such as `ESC[31m`, raw, JSON-escaped or written as text (`\x1b[31m`, `\033[31m`, `\e[31m`), the
+   OSC-8 hyperlink terminator ESC + backslash in the same three forms, and any URL-encoded byte such as `%3D`, `%2F`,
+   `%40` or `%5C`) is a boundary before or after a token (amendment, decision B).
 3. **What is detected.** `aeos.core.redaction.find_high_confidence_secrets`: the token-shaped patterns (OpenRouter,
    Anthropic and OpenAI-style keys, GitHub tokens, AWS access key ids, Google keys and tokens, Vault/OpenBao tokens and
    labelled unseal/root material, Slack tokens, PEM private key blocks) and every secret value AEOS registered at run
@@ -73,6 +74,15 @@
    * a Google API key or refresh token glued to a base64 character before or after it: inside an image data URI or a
      lockfile `sha512-` integrity hash, `AIza` and `1//` occur by chance (a 1 MB image gave several findings).
 
+   "Glued" and "after a letter" are judged on the guard's boundary view (decision B), in which every escape sequence
+   is blanked with as many spaces: a JSON escape, a URL-encoded byte, a terminal colour code (raw, JSON-escaped, or
+   written as text as `\x1b[31m`, `\033[31m` or `\e[31m`) and the OSC-8 terminator ESC + backslash (raw, JSON-escaped
+   or as text). The terminator's backslashes are blanked, never the letter after them, so the `b` of a batch token
+   `b.` or the `r` of a recovery token `r.` right after a hyperlink is no longer read as the JSON escape `\b` or `\r`
+   and blanked (review of 2026-10-28). A token after any of these escapes is therefore neither glued to base64 nor
+   behind a word; the code near misses (Go receivers and member names after a textual colour code or inside an OSC-8
+   link) still read as identifiers and pass.
+
    Redaction of logs and errors keeps masking the wider shapes; only the decision to refuse a request is narrowed.
 
 ## Amendment 2026-10-28: differential review before merge
@@ -89,14 +99,20 @@ A. **Redaction is never weakened for the guard.** The first build added a look-b
    origin/main had, in plain, glued, JSON-escaped, URL-encoded, colour-coded, data URI, JSON string and multi-line
    contexts. Each sample is assembled at run time from every character its pattern's class allows, with long bodies
    (L26: the file holds no literal secret shape). A pattern change that drops a case, or masks only part of a secret
-   (any 8-character piece survives, as when a character class is narrowed), is red with the pattern and the context
-   named, never the value.
+   (any 8-character piece of any part survives, as when a character class is narrowed), is red with the pattern and
+   the context named, never the value. A secret of several parts is checked part by part: every key of an
+   `operator init` JSON list (three keys, so the repeated group of that pattern is exercised twice) and every line of a
+   PEM body; bite tests narrow only the repeated group of the list pattern (its class loses `+`, or the repeat is
+   bounded to one) and mask only the first PEM body line, and each is red while the first key or line stays masked.
 B. **Escapes are boundaries for the guard.** A token after `\n`, `\t`, `\"`, `\u00e9` (also JSON encoded twice),
-   after a terminal colour code (raw or JSON-escaped) or after any URL-encoded byte (`%3D`, `%2F`, `%40`, `%2B`,
-   `%5C`, also encoded twice) is found: the guard scans a same-length view in which each escape sequence is replaced
+   after a terminal colour code (raw, JSON-escaped, or written as text: `\x1b[31m`, `\033[31m`, `\e[31m`), after the
+   OSC-8 hyperlink terminator ESC + backslash (raw, JSON-escaped or as text; its backslashes only, never the token's
+   first letter) or after any URL-encoded byte (`%3D`, `%2F`, `%40`, `%2B`, `%5C`, also encoded twice) is found: the guard scans a same-length view in which each escape sequence is replaced
    by spaces, so the span still names the token in the request. Before, `AIza` and `1//` after an escaped newline or
    `ESC[31m` read as glued to the base64 character `n` or `m`. A backslash run is matched from its first backslash
-   only, so the view stays linear (a 20,000-backslash run took 1.3 s in the first build). Code identifiers, base64
+   only and possessively (the terminator's backslashes in pairs, also possessively), so the view stays linear (a
+   20,000-backslash run took 1.3 s in the first build; 2 MB runs of textual escapes and terminators are measured in the
+   test). Code identifiers, base64
    image data (also URL-encoded) and lockfile `sha512-` hashes stay unflagged, also JSON-encoded (the near misses of
    the test).
 C. **Investigation runs.** `SENSITIVE_CONTENT_BLOCKED` is a recognised stop reason of an investigation run: the run
@@ -125,7 +141,8 @@ NOT-PROVEN on Windows and macOS Intel until CI runs.
 * **Token lookalike rules** (decision 7): about 0.5% of random 24-character `s.`/`b.`/`r.` token bodies (0.015% at 40
   characters, none at 100; measured on 200,000, 400,000 and 100,000 random bodies) read as an identifier and pass, and
   a Google key or refresh token written directly against a base64 character (for example inside a URL path after a
-  literal `/`; an encoded `%2F` or a colour code before it is a boundary) passes. A token AEOS loaded itself is still
+  literal `/`; an encoded `%2F`, a colour code in any of its forms or an OSC-8 terminator before it is a boundary)
+  passes. A token AEOS loaded itself is still
   caught as a registered value whatever its shape.
 * **Log redaction of glued tokens (unchanged from before this ADR)**: `redact_text` misses a look-behind shape (`sk-`,
   `hv[sbr].`, `r.`, the unseal-key label) written directly after a letter, digit or escape, and masks a glued `hvs.`
