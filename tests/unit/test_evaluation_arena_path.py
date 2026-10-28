@@ -66,7 +66,7 @@ def _plan(db, route, **kw):
 
 
 @pytest.fixture
-def arena(db):
+def arena(db, worker_keys):
     service.seed_suites(db)
     route = _route(db)
     db.commit()

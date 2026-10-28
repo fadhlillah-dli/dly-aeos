@@ -30,6 +30,7 @@ from tests.acceptance.world import (
     activate_route,
     caps_by_name,
     doctor_ready,
+    ensure_worker_key,
     fake_opencode,
     manifest_with_pin,
     owner_exception,
@@ -96,6 +97,7 @@ def _enabled_opencode(client: AuthedClient, db, monkeypatch, host, settings) -> 
     settings.opencode_binary = None
     fake_opencode(monkeypatch)  # the worker runtime's own view of the same binary
     register_free_route(db, WORKER_ROUTE)
+    ensure_worker_key(monkeypatch)
     activate_route(client, WORKER_ROUTE)
     owner_exception(client, target_type="worker_sandbox", target_id="process", details={"allow_process_sandbox": True})
     # after the owner decisions: they mark dependent Doctor results STALE (§08), see world.doctor_ready

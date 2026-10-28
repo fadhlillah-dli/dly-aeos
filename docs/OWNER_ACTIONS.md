@@ -410,6 +410,13 @@ Copy the route key and its config hash from the `routes list` output.
 ```
 
 * **In the UI:** *Model & Rute* (`/models`) → route → *Aktifkan rute…*.
+* **Store the route's key first (1.8).** A route whose key is not in the secret store is not eligible; its rejection
+  reads `credential <ref> not stored: aeos secrets set <ref>` (a store that is sealed or unreachable rejects every
+  keyed route, fail closed). The Doctor check `route.registry` names such active routes ("Dikecualikan: kunci belum
+  disimpan"). While another route is eligible, `route.worker_key` lists them as a note that does not block
+  `CAN_RUN_WORKER`; with no eligible route left it stays MISSING. Either store the key
+  (`./aeos secrets set "<ref>"`) or disable the route
+  (`./aeos routes disable "<route_key>" --reason "<why>"`).
 * **Paid route:** first record a BUDGET decision on *Keputusan* → *Catat keputusan manusia* (Jenis keputusan:
   BUDGET), then add `--budget-decision <id>`.
 * **Free OpenCode Zen routes:** they need the client-terms decision in [2.12](#212-smaller-open-decisions) first.
