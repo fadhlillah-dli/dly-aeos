@@ -40,8 +40,12 @@ RULES (lesson ids in brackets)
    ran on and its NOT-PROVEN part. Anything not run on Windows is NOT-PROVEN there.
 9. Secrets [L1]. Never print, paste, log or commit a secret. If one appears, stop and report it
    without repeating its value.
-10. Owner-facing commands [L2, L13]. Run every command or script meant for the owner in zsh first,
-    and dry-run it in-process against a temporary database. Paste the result with the command.
+10. Owner-facing commands [L2, L13]. Run every command or script meant for the owner in zsh first.
+    Every owner command or script that writes state is dry-run before it is given to the owner, and the
+    result is shown with it: an owner script with scripts/owner_dryrun.py (its capability diff;
+    OWNER_DRYRUN: DEGRADED stops it unless the reason is given with --accept-degrade); any other owner
+    command that writes state in-process against a temporary database, or wrapped in a tiny owner
+    script and run through scripts/owner_dryrun.py.
     Commands for the owner are drafted into a file and checked with scripts/paste_safe.py --check
     before they are shown; one prompting command (a password or a typed confirmation) per block, last
     (no inline '#' comment, every '[]', '*' and '<placeholder>' quoted, no line over 80 characters).
@@ -62,11 +66,12 @@ RULES (lesson ids in brackets)
     it. A tool with no named owner is a question to the delegating session, not a license to build.
 16. Machine load [L19]. One full suite at a time with -n logical on the owner's Mac; a second concurrent
     suite only with -n at most half the logical CPUs. Record the load average with any timing.
-17. Hermetic secrets [L20]. Tests never reach the owner's real secret stores: the SecretGuard in
-    tests/conftest.py hides the OS keyring (also from sandboxed child processes), a real OpenBao and the
-    owner's real Claude Code login from every test; a test that needs a secret installs a fake
-    (secrets_memory, its own keyring, a vault on a free port, a fake claude); only the real_claude_cli
-    fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault,
+17. Hermetic secrets [L20]. Tests never reach the owner's real secret stores or running services: the
+    SecretGuard in tests/conftest.py hides the OS keyring (also from sandboxed child processes), a real
+    OpenBao, the owner's real Claude Code login and the owner's running Control Center port (a test that
+    needs a server pins AEOS_PORT to its own listener) from every test; a test that needs a secret
+    installs a fake (secrets_memory, its own keyring, a vault on a free port, a fake claude); only the
+    real_claude_cli fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault,
     OpenBao, Keychain or keyring to check anything; all proof is by tests with fakes.
 18. Dependent steps [L22]. Chain a step whose failure must stop the next one with && or a checked if, never ';' or
     a separate line, and run chains with 'set -o pipefail' (a gate piped into tail or grep hides its exit code). Check
