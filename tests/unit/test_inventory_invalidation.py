@@ -144,6 +144,7 @@ def test_system_probe_runner_scrubs_provider_env_without_explicit_env(monkeypatc
 
 def test_system_probe_runner_kills_on_timeout():
     rr = SystemProbeRunner().run([sys.executable, "-c", "import time; time.sleep(30)"], timeout=1)
+    # timing-cap: 20 s vs a measured 1.01-1.02 s (the 1 s timeout + kill, load 5-65), 20x; the child sleeps 30 s
     assert rr.error == "TIMEOUT" and rr.ok is False and rr.duration_ms < 20_000
 
 
