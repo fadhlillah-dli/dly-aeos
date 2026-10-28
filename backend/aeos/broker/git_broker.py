@@ -11,6 +11,9 @@ Boundary rules (each tested):
   never written to any config file and never passed on the command line;
 * every operation needs an ACTIVE run-bound capability grant (GIT_BRANCH / PR_CREATE) and, for a
   remote write, the external-write interlock (§26);
+* owner rule R44 (ADR-0132): every push and PR of a worker run needs the run's latest Claude checkpoint review to
+  be a PASS bound to exactly the head commit being published - otherwise ``REVIEW_REQUIRED``, audited, before any
+  grant is consumed or credential read;
 * the broker has no capability to integrate a PR into any branch: human-only (U-09, §31);
 * owner rule (AGENTS.md invariant 11): before any push every commit of the pushed range (every commit of the
   head that no branch of the remote reaches yet) is authored AND committed by the configured identity of the
@@ -248,6 +251,8 @@ def _interlock(session: Session, run: WorkerRun, *, provider: str, operation: st
 
 
 PUBLISHABLE_RUN_STATES = frozenset({"REVIEW", "DONE"})
+# Owner rule R44 (2026-10-29, ADR-0132): no worker candidate is published before a Claude review PASS of its exact head.
+REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
 
 def _require_publishable(session: Session, run: WorkerRun, operation: str) -> None:
@@ -257,7 +262,11 @@ def _require_publishable(session: Session, run: WorkerRun, operation: str) -> No
     * the run finished its execution phase (REVIEW/DONE) — never a running, failed or cancelled one;
     * the runtime recorded the candidate head commit (what verification/review looked at);
     * a quarantined patch needs an ACTIVE human EXCEPTION decision bound to this run and that exact
-      head commit (special review, ADR-0054)."""
+      head commit (special review, ADR-0054);
+    * owner rule R44 (ADR-0132): the run's latest Claude checkpoint review is a PASS bound to exactly that head
+      commit (``_require_claude_review``).
+
+    Every remote write of a run calls this first - GitHub and Bitbucket push and PR creation."""
     from aeos.workforce.integrations import quarantine_release
 
     if run.execution_status not in PUBLISHABLE_RUN_STATES:
@@ -273,6 +282,36 @@ def _require_publishable(session: Session, run: WorkerRun, operation: str) -> No
         raise PolicyDenied("patch is quarantined: special review + owner release decision bound to the head "
                            "commit is required before remote publication", code="QUARANTINED",
                            details={"reasons": [str(r) for r in (run.quarantine_reasons or [])[:20]]})
+    _require_claude_review(session, run, operation)
+
+
+def _require_claude_review(session: Session, run: WorkerRun, operation: str) -> None:
+    """Owner rule R44 (2026-10-29, ADR-0132), paraphrased: all OpenCode and OpenRouter work passes a Claude review; a
+    worker has no right to commit, push, let alone merge (the verbatim text is in the owner requests register).
+
+    The run's runtime-recorded head - the only commit the broker pushes or opens a PR for - must carry a Claude
+    checkpoint review PASS bound to exactly that commit (``aeos.verification.facade.publication_review``). No review,
+    a review of another (older) head, a non-PASS verdict, a PASS contradicted by its own findings, a MOCK review or a
+    reviewer model outside the review policy's Claude family: ``PolicyDenied(REVIEW_REQUIRED)``, audited, before any
+    grant is consumed or credential read. The verification module missing is a refusal too (fail closed)."""
+    head = run.head_commit or ""
+    try:
+        from aeos.verification import facade as verification
+
+        gate = verification.publication_review(session, run, head)
+    except ImportError:
+        reason, message, details = ("REVIEW_GATE_UNAVAILABLE",
+                                    f"no Claude review PASS for head {head[:12] or 'NONE'}: the review gate is "
+                                    "unavailable (fail closed)", {})
+    else:
+        if gate.allowed:
+            return
+        reason, message, details = gate.reason, gate.message, gate.as_dict()
+    details = {**details, "reason": reason, "head_commit": head, "operation": operation}
+    audit.record(session, actor_type="service", actor_id="broker", action=f"broker.{operation}", result="DENIED",
+                 target_type="run", target_id=run.id, project_id=run.project_id, domain=run.domain,
+                 reason=f"{REVIEW_REQUIRED}: {message}"[:500], details={"code": REVIEW_REQUIRED, **details})
+    raise PolicyDenied(message, code=REVIEW_REQUIRED, details=details)
 
 
 def _side_effect(session: Session, run: WorkerRun, *, kind: str, key: str, target: dict[str, Any]) -> BrokerSideEffect:

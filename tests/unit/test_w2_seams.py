@@ -33,6 +33,7 @@ from aeos.verification import acceptance
 from aeos.verification import scope as verification_scope
 from aeos.workforce import scheduler
 from aeos.workforce.states import is_legal
+from tests.unit.review_gate_support import record_claude_review
 from tests.unit.test_workforce_support import (
     FakeModules,
     init_git_repo,
@@ -358,6 +359,7 @@ def test_push_is_sha_pinned_returns_head_sha_and_notifies_delivery(db, fakes, tm
                     branch=branch, head_commit=head)
     db.add(run)
     db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     pr = PullRequestRecord(project_id=p.id, domain="PERSONAL", task_id="t", run_id=run.id, acceptance_id="a",
                            repo_full_name="owner/repo", number=3, head_ref=branch, base_ref="main",
                            accepted_head_sha="9" * 40, state="OPEN", bundle_hash="sha256:x")

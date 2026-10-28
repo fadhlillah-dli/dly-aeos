@@ -18,6 +18,7 @@ from aeos.core.errors import Blocked, PolicyDenied, ValidationFailed
 from aeos.models.audit import AuditEvent
 from aeos.models.broker_ext import BrokerSideEffect
 from aeos.models.workforce import WorkerRun
+from tests.unit.review_gate_support import record_claude_review
 from tests.unit.test_workforce_support import FakeModules, init_git_repo, make_project
 
 BRANCH = "aeos/task-a-1234abcd"
@@ -46,6 +47,7 @@ def repo_env(db, tmp_path):
                     branch=BRANCH, head_commit=head)
     db.add(run)
     db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     return {"src": src, "bare": bare, "run": run, "head": head}
 
 

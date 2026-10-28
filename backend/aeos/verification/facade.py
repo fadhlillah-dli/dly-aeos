@@ -54,6 +54,17 @@ def acceptance_is_valid(
     return impl(session, task_id, base_commit=base_commit, config_hash=config_hash, plan_version_hash=plan_version_hash)
 
 
+def publication_review(session: Session, run: Any, head_commit: str | None) -> Any:
+    """Whether worker run *run* may publish *head_commit* (additive, owner rule R44, ADR-0132): a
+    ``publication_review.PublicationReview`` that allows it only when the run's latest Claude checkpoint review is
+    COMPLETED, non-MOCK, bound to exactly that head through its checkpoint package evidence, a PASS not contradicted
+    by its own HIGH/CRITICAL findings, and answered by a proven Claude model of the review policy's family. The broker
+    refuses every push/PR of the run otherwise (``REVIEW_REQUIRED``)."""
+    from aeos.verification.publication_review import publication_review as impl
+
+    return impl(session, run, head_commit)
+
+
 def project_test_baseline(session: Session, project_id: str, commit: str | None) -> dict[str, Any]:
     """§05 step 6: the latest trusted project test baseline at *commit* (status, evidence id, suite identity,
     passed/failed/skipped, failing sample), else ``{"status": "NOT_RUN", "reason": ...}`` (additive, wave 7)."""

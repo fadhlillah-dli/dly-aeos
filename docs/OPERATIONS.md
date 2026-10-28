@@ -842,6 +842,30 @@ from it (an unkeyed hash of a short secret such as a password could be brute-for
 move it out of the repository or the task's inputs, rotate it if it is real (AGENTS.md invariant 12), then let the
 task run again. A fixture that only looks like a key is assembled from parts at run time instead of written literally.
 
+## Publication needs a Claude review of the exact head (owner rule R44, ADR-0132)
+
+Owner rule R44 (2026-10-29), paraphrased: all OpenCode and OpenRouter work must pass a Claude review; a worker has no
+right to commit, push, let alone merge, as the architecture says.
+
+* **Who publishes.** Only the trusted broker pushes a worker run's `aeos/*` branch and opens its draft PR (GitHub
+  for PERSONAL, Bitbucket Cloud for OFFICE). A worker holds no code-host credential: git in its sandbox finds none
+  (HOME redirected, global and system git config off, no prompts), the self-build candidate has no remote, it gets
+  no shell in the process sandbox, and its only broker endpoint is the model proxy. The runtime commits the candidate
+  inside the run's own workspace only. Nothing in the runtime merges: merge to main is yours (or a delegated
+  maintainer's) with your own credential.
+* **The gate.** Before every push and every PR of a run, the broker checks the run's latest Claude checkpoint review
+  (`aeos verify review <run id>`, or the manual package collected with `aeos verify collect-review <review id>`): it
+  must be COMPLETED, not MOCK, a PASS that its own HIGH/CRITICAL findings do not contradict, answered by a proven
+  Claude model of the review policy's family, and bound to exactly the head being published (the head named by the
+  review's checkpoint package). This comes after the run-state, runtime-head and quarantine checks (a quarantined
+  patch still needs your release decision too) and before any grant, credential or request.
+* **Refusal.** `REVIEW_REQUIRED`: "no Claude review PASS for head <sha12>: <why>", audited as `broker.<operation>`
+  DENIED with `details.reason`: `NO_REVIEW`, `OTHER_HEAD` (the review covers an older head: a worker commit came
+  after it), `NOT_PASS`, `FINDINGS`, `MODEL`, `NOT_COMPLETED` (waiting for quota or a manual result), `MOCK`,
+  `NOT_CLAUDE`, `UNBOUND` (no checkpoint package binding), `NO_HEAD`, `REVIEW_GATE_UNAVAILABLE`. `prepare-pr`
+  answers with the same code. Remedy: request the review of the current head and publish after its PASS; a FAIL
+  verdict goes to a repair attempt, never to publication.
+
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 
 The owner's standing rule for DLY AEOS and every project it creates or manages: every GitHub activity (commits as

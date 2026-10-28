@@ -23,6 +23,7 @@ from aeos.models.broker_ext import BrokerSideEffect
 from aeos.models.routing import CapabilityGrant
 from aeos.models.workforce import WorkerRun
 from tests.conftest import TEST_GIT_EMAIL, TEST_GIT_NAME
+from tests.unit.review_gate_support import record_claude_review
 from tests.unit.test_workforce_support import init_git_repo, make_project
 
 BRANCH = "aeos/task-g-1234abcd"
@@ -68,6 +69,7 @@ def _run(db, env, head: str, *, base: str | None = None) -> WorkerRun:
                     workspace_ref=str(env["src"]), branch=BRANCH, head_commit=head, base_commit=base)
     db.add(run)
     db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     broker.issue_grant(db, run_id=run.id, project_id=run.project_id, domain=run.domain, kind="GIT_BRANCH",
                        scope={"repo": REPO, "branch": BRANCH}, ttl_seconds=300, max_requests=2)
     return run

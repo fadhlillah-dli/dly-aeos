@@ -201,7 +201,8 @@ def test_prepare_pr_refuses_ai_attribution_before_anything_is_pushed(db, accepte
     assert broker.calls == [], "the branch never leaves the machine with an attributed PR text"
 
 
-@pytest.mark.parametrize("code", ["COMMIT_IDENTITY_MISMATCH", "AI_ATTRIBUTION_IN_COMMIT", "COMMIT_IDENTITY_MISSING"])
+@pytest.mark.parametrize("code", ["COMMIT_IDENTITY_MISMATCH", "AI_ATTRIBUTION_IN_COMMIT", "COMMIT_IDENTITY_MISSING",
+                                  "REVIEW_REQUIRED"])
 def test_prepare_pr_keeps_the_brokers_owner_rule_code(db, accepted, monkeypatch, code):
     w, acc = accepted
     install_doctor(monkeypatch, "READY")

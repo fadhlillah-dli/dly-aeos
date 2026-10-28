@@ -9,6 +9,8 @@ The same boundary as the GitHub path (``aeos.broker.git_broker``, every rule tes
 * fail closed before any credential or network call: the project's ``bitbucket/code`` integration is
   enabled (ADR-0073 disabled by default), the deployment is Bitbucket **Cloud** (Data Center ->
   ``BITBUCKET_DC_NOT_SUPPORTED``, §04), the repository is registered and its exact identity VERIFIED;
+* owner rule R44 (ADR-0132): a push or PR of a worker run needs a Claude checkpoint review PASS bound to exactly
+  the run's head commit (``_require_publishable`` -> ``REVIEW_REQUIRED``), checked before any grant or credential;
 * every remote write needs an ACTIVE run-bound capability grant (GIT_BRANCH / PR_CREATE) **and** the
   external-write interlock: the company authorisation POLICY decision listing ``bitbucket`` (OFFICE default
   deny, §23), write enablement, and the human APPROVAL of the run's plan version that allows the operation

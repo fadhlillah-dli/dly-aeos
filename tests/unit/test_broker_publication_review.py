@@ -1,0 +1,359 @@
+"""Owner rule R44 (2026-10-29, ADR-0132): a worker candidate is published only after a Claude review PASS of its exact
+head (paraphrased: all OpenCode and OpenRouter work must pass a Claude review; a worker has no right to commit, push,
+let alone merge).
+
+Every remote write of a worker run - the push of its ``aeos/*`` branch and pull-request creation (the Bitbucket path:
+tests/unit/test_office_bitbucket_delivery.py) - is refused with ``REVIEW_REQUIRED`` unless the run's latest Claude
+checkpoint review is COMPLETED, non-MOCK, bound to exactly the head being published through its checkpoint package
+evidence, a PASS not contradicted by its own findings, and answered by a Claude model of the review policy's family.
+Each refusal below asserts its own message; each has a near miss that publishes. Local bare remotes, mocked HTTP."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import httpx
+import pytest
+import respx
+from sqlalchemy import select
+
+from aeos.broker import facade as broker
+from aeos.broker import git_broker
+from aeos.core.errors import PolicyDenied
+from aeos.models.audit import AuditEvent
+from aeos.models.broker_ext import BrokerSideEffect
+from aeos.models.decisions import Decision
+from aeos.models.evidence import ReviewRecord
+from aeos.models.routing import CapabilityGrant
+from aeos.models.workforce import WorkerRun
+from aeos.verification import publication_review as gate
+from aeos.verification import review
+from aeos.workforce.integrations import QUARANTINE_TARGET_TYPE
+from tests.unit.review_gate_support import record_claude_review
+from tests.unit.test_verification_support import (
+    FakeBridge,
+    FakeWorkforce,
+    claude_envelope,
+    claude_result,
+    install_doctor,
+    make_world,
+    record_verification,
+    review_payload,
+)
+from tests.unit.test_workforce_support import FakeModules, init_git_repo, make_project
+
+BRANCH = "aeos/task-r-1234abcd"
+REPO = "owner/repo"
+TOKEN = "ghp_" + "r" * 36
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+
+
+@pytest.fixture
+def env(db, tmp_path):
+    """A worker run in REVIEW whose runtime head is one commit above the base; no review yet."""
+    src = tmp_path / "candidate"
+    base = init_git_repo(src)
+    _git(src, "checkout", "-q", "-b", BRANCH)
+    (src / "feature.txt").write_text("work\n", encoding="utf-8")
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", "candidate")
+    head = _git(src, "rev-parse", "HEAD")
+    bare = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    p = make_project(db)
+    run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="REVIEW", workspace_ref=str(src),
+                    branch=BRANCH, head_commit=head, base_commit=base)
+    db.add(run)
+    db.flush()
+    broker.issue_grant(db, run_id=run.id, project_id=p.id, domain="PERSONAL", kind="GIT_BRANCH",
+                       scope={"repo": REPO, "branch": BRANCH}, ttl_seconds=300, max_requests=3)
+    return {"src": src, "bare": bare, "run": run, "head": head, "base": base}
+
+
+def _push(db, env):
+    return git_broker.push_task_branch(db, run_id=env["run"].id, worktree=str(env["src"]), branch=BRANCH,
+                                       repo_full_name=REPO, remote_url=str(env["bare"]))
+
+
+def _remote_refs(env) -> str:
+    return _git(env["bare"], "for-each-ref", "--format=%(refname)")
+
+
+def _grant_uses(db, run, kind="GIT_BRANCH") -> int:
+    g = db.scalar(select(CapabilityGrant).where(CapabilityGrant.run_id == run.id, CapabilityGrant.kind == kind))
+    return g.used_requests or 0
+
+
+def _refused_push(db, env, message: str, reason: str) -> PolicyDenied:
+    """The push is refused with REVIEW_REQUIRED and *message*, audited, nothing pushed, no grant consumed."""
+    with pytest.raises(PolicyDenied) as e:
+        _push(db, env)
+    assert e.value.code == "REVIEW_REQUIRED", e.value.code
+    assert message in e.value.message, e.value.message
+    assert e.value.message.startswith(f"no Claude review PASS for head {env['head'][:12]}: ")
+    assert e.value.details["reason"] == reason and e.value.details["head_commit"] == env["head"]
+    assert _remote_refs(env) == "", "nothing reached the remote"
+    assert _grant_uses(db, env["run"]) == 0, "the capability is not consumed by a refused write"
+    assert db.scalar(select(BrokerSideEffect).where(BrokerSideEffect.run_id == env["run"].id)) is None
+    row = db.scalar(select(AuditEvent).where(AuditEvent.action == "broker.git.push_branch",
+                                             AuditEvent.result == "DENIED").order_by(AuditEvent.seq.desc()))
+    assert row is not None and row.details["code"] == "REVIEW_REQUIRED" and row.details["reason"] == reason
+    return e.value
+
+
+def _pushed(db, env) -> None:
+    res = _push(db, env)
+    assert res["ok"] and res["status"] == "PUSHED" and res["head_sha"] == env["head"], res
+    assert _git(env["bare"], "rev-parse", f"refs/heads/{BRANCH}") == env["head"]
+
+
+# ----------------------------------------------------------------------------- push: the four required cases
+def test_push_without_a_claude_review_is_refused(db, env):
+    _refused_push(db, env, "no Claude checkpoint review exists for this run", "NO_REVIEW")
+    record_claude_review(db, env["run"])  # near miss: the same run once Claude passed this head
+    _pushed(db, env)
+
+
+def test_push_is_refused_when_the_review_covers_an_older_head(db, env):
+    record_claude_review(db, env["run"], head=env["base"])  # a PASS - of the head before the worker's last commit
+    err = _refused_push(db, env, f"the latest Claude checkpoint review covers head {env['base'][:12]}, not this head",
+                        "OTHER_HEAD")
+    assert err.details["reviewed_head"] == env["base"]
+    record_claude_review(db, env["run"])  # near miss: a new review of exactly this head
+    _pushed(db, env)
+
+
+@pytest.mark.parametrize("verdict", ["FAIL", "NOT-PROVEN", "BLOCKED"])
+def test_push_is_refused_on_a_non_pass_verdict(db, env, verdict):
+    record_claude_review(db, env["run"], verdict=verdict,
+                         findings=[{"severity": "MEDIUM", "title": "t", "detail": "d", "required_action": "fix"}])
+    _refused_push(db, env, f"the latest Claude checkpoint review verdict is {verdict}", "NOT_PASS")
+
+
+def test_push_is_allowed_with_a_pass_bound_to_the_head(db, env):
+    rec = record_claude_review(db, env["run"])
+    _pushed(db, env)
+    row = db.scalar(select(AuditEvent).where(AuditEvent.action == "broker.git.push_branch",
+                                             AuditEvent.result == "SUCCESS"))
+    assert row is not None
+    assert gate.publication_review(db, env["run"], env["head"]).review_id == rec.id
+
+
+# ----------------------------------------------------------------------------- push: the review's own properties
+def test_a_later_fail_supersedes_an_earlier_pass_of_the_same_head(db, env):
+    record_claude_review(db, env["run"])
+    record_claude_review(db, env["run"], verdict="FAIL")
+    _refused_push(db, env, "verdict is FAIL", "NOT_PASS")
+
+
+def test_a_pass_contradicted_by_its_own_high_findings_is_refused(db, env):
+    high = {"severity": "HIGH", "title": "token logged", "detail": "d", "required_action": "redact"}
+    record_claude_review(db, env["run"], findings=[high])
+    _refused_push(db, env, "is contradicted by its own HIGH/CRITICAL findings", "FINDINGS")
+    low = {"severity": "LOW", "title": "naming", "detail": "d", "required_action": "rename"}
+    record_claude_review(db, env["run"], findings=[low])  # near miss: a LOW finding does not contradict a PASS
+    _pushed(db, env)
+
+
+@pytest.mark.parametrize("resolved,needle", [
+    ("claude-sonnet-5-5", "(family sonnet) is not the requested family fable"),
+    (None, "resolved reviewer model is UNKNOWN"),
+    ("gpt-5", "(family UNKNOWN) is not the requested family fable"),
+])
+def test_a_review_by_a_model_outside_the_policy_family_is_refused(db, env, resolved, needle):
+    record_claude_review(db, env["run"], model_resolved=resolved)
+    _refused_push(db, env, needle, "MODEL")
+
+
+def test_a_review_from_the_allowed_family_of_another_generation_passes(db, env):
+    """Near miss of the model rule: the family is the policy, not one exact id."""
+    record_claude_review(db, env["run"], model_requested="opus", model_resolved="claude-opus-5-5")
+    _pushed(db, env)
+
+
+@pytest.mark.parametrize("status", ["WAITING_QUOTA", "NEEDS_DECISION", "FAILED"])
+def test_a_review_that_did_not_complete_is_refused(db, env, status):
+    record_claude_review(db, env["run"], status=status)
+    _refused_push(db, env, f"the latest Claude checkpoint review is {status}, not COMPLETED", "NOT_COMPLETED")
+
+
+def test_a_mock_review_is_refused(db, env):
+    record_claude_review(db, env["run"], mode="MOCK")
+    _refused_push(db, env, "the latest Claude checkpoint review is a MOCK", "MOCK")
+
+
+def test_a_review_not_by_the_claude_reviewer_is_refused(db, env):
+    record_claude_review(db, env["run"], reviewer_kind="HUMAN")
+    _refused_push(db, env, "is by 'HUMAN', not the Claude checkpoint reviewer", "NOT_CLAUDE")
+
+
+def test_a_review_without_its_package_binding_is_refused(db, env):
+    """A PASS whose head cannot be proven (no package evidence, or package evidence of another review) never counts."""
+    db.add(ReviewRecord(target_type="worker_run", target_id=env["run"].id, target_hash="sha256:" + "a" * 64,
+                        project_id=env["run"].project_id, domain="PERSONAL", run_id=env["run"].id,
+                        reviewer_kind="CLAUDE", model_requested="fable", model_resolved="claude-fable-5-1",
+                        verdict="PASS-CONTROLLED", status="COMPLETED"))
+    db.flush()
+    _refused_push(db, env, "is not bound to a recorded head commit", "UNBOUND")
+    other = record_claude_review(db, env["run"], artifact_hash="sha256:" + "9" * 64)  # another verified artifact
+    rec = record_claude_review(db, env["run"])
+    rec.package_evidence_id = other.package_evidence_id  # the package of another review: its hashes differ
+    db.flush()
+    _refused_push(db, env, "is not bound to a recorded head commit", "UNBOUND")
+
+
+def test_quarantine_is_still_checked_first_and_still_needs_its_release(db, env):
+    """The special-review rule is unchanged: a quarantined patch with a Claude PASS still needs the owner's release
+    bound to the head; with both it publishes."""
+    run = env["run"]
+    run.quarantined = True
+    run.quarantine_reasons = [{"path": ".github/workflows/ci.yml", "rule": "protected-path", "detail": "d"}]
+    with pytest.raises(PolicyDenied) as e:
+        _push(db, env)
+    assert e.value.code == "QUARANTINED"  # without a review too: quarantine is decided first
+    record_claude_review(db, run)
+    with pytest.raises(PolicyDenied) as e:
+        _push(db, env)
+    assert e.value.code == "QUARANTINED"
+    db.add(Decision(kind="EXCEPTION", actor_user_id="owner", target_type=QUARANTINE_TARGET_TYPE, target_id=run.id,
+                    target_hash=run.head_commit, domain="PERSONAL", rationale="special review done"))
+    db.flush()
+    _pushed(db, env)
+
+
+def test_the_gate_unavailable_refuses_the_push(db, env, absent_modules):
+    record_claude_review(db, env["run"])
+    absent_modules("aeos.verification.publication_review")
+    with pytest.raises(PolicyDenied) as e:
+        _push(db, env)
+    assert e.value.code == "REVIEW_REQUIRED" and "review gate is unavailable (fail closed)" in e.value.message
+    assert _remote_refs(env) == ""
+
+
+# ----------------------------------------------------------------------------- pull request creation (GitHub)
+def _pr_env(db, monkeypatch, secrets_memory, env) -> list[str]:
+    FakeModules(interlock_allowed=True).install(monkeypatch)
+    secrets_memory.put("personal/github", TOKEN, actor="test")
+    reads: list[str] = []
+    real = secrets_memory.get
+
+    def get(ref, **kw):
+        reads.append(ref)
+        return real(ref, **kw)
+
+    monkeypatch.setattr(secrets_memory, "get", get)
+    broker.issue_grant(db, run_id=env["run"].id, project_id=env["run"].project_id, domain="PERSONAL",
+                       kind="PR_CREATE", scope={"repo": REPO, "head": BRANCH, "base": "main"}, ttl_seconds=300,
+                       max_requests=3)
+    return reads
+
+
+def _create_pr(db, env):
+    return git_broker.create_pull_request(db, run_id=env["run"].id, repo_full_name=REPO, head=BRANCH, base="main",
+                                          title="Task R", body="evidence")
+
+
+def _refused_pr(db, env, reads, message: str, reason: str) -> None:
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as e:
+            _create_pr(db, env)
+        assert not mock.calls, "no request reached GitHub"
+    assert e.value.code == "REVIEW_REQUIRED" and message in e.value.message, e.value.message
+    assert e.value.details["reason"] == reason
+    assert reads == [], "the GitHub credential is never read for a refused PR"
+    assert _grant_uses(db, env["run"], "PR_CREATE") == 0
+    row = db.scalar(select(AuditEvent).where(AuditEvent.action == "broker.github.create_pr",
+                                             AuditEvent.result == "DENIED").order_by(AuditEvent.seq.desc()))
+    assert row is not None and row.details["reason"] == reason
+
+
+def _pr_created(db, env) -> None:
+    with respx.mock(assert_all_mocked=True) as mock:
+        route = mock.post(f"https://api.github.com/repos/{REPO}/pulls").mock(return_value=httpx.Response(
+            201, json={"number": 4, "html_url": f"https://github.com/{REPO}/pull/4", "head": {"sha": env["head"]}}))
+        res = _create_pr(db, env)
+        assert route.called
+    assert res["ok"] and res["status"] == "CREATED" and res["head_sha"] == env["head"]
+
+
+def test_pr_without_a_claude_review_is_refused(db, env, monkeypatch, secrets_memory):
+    reads = _pr_env(db, monkeypatch, secrets_memory, env)
+    _refused_pr(db, env, reads, "no Claude checkpoint review exists for this run", "NO_REVIEW")
+    record_claude_review(db, env["run"])  # near miss
+    _pr_created(db, env)
+
+
+def test_pr_is_refused_when_the_review_covers_an_older_head(db, env, monkeypatch, secrets_memory):
+    reads = _pr_env(db, monkeypatch, secrets_memory, env)
+    record_claude_review(db, env["run"], head=env["base"])
+    _refused_pr(db, env, reads, f"covers head {env['base'][:12]}, not this head", "OTHER_HEAD")
+
+
+def test_pr_is_refused_on_a_fail_verdict(db, env, monkeypatch, secrets_memory):
+    reads = _pr_env(db, monkeypatch, secrets_memory, env)
+    record_claude_review(db, env["run"], verdict="FAIL")
+    _refused_pr(db, env, reads, "the latest Claude checkpoint review verdict is FAIL", "NOT_PASS")
+
+
+def test_pr_is_allowed_with_a_pass_bound_to_the_head(db, env, monkeypatch, secrets_memory):
+    _pr_env(db, monkeypatch, secrets_memory, env)
+    record_claude_review(db, env["run"])
+    _pr_created(db, env)
+
+
+# ----------------------------------------------------------------------------- the real review paths bind the head
+@pytest.fixture
+def reviewed_world(db, monkeypatch):
+    FakeWorkforce().install(monkeypatch)
+    w = make_world(db)
+    record_verification(db, w)  # the verifier's head for this run
+    return w
+
+
+def test_a_native_review_records_the_binding_the_gate_reads(db, reviewed_world, monkeypatch):
+    """What ``review_run`` writes through the bridge is what the broker checks (not only the test helper)."""
+    w = reviewed_world
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload("PASS-CONTROLLED"))).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED"
+    assert gate.reviewed_head(db, out.review) == w.run.head_commit
+    ok = gate.publication_review(db, w.run, w.run.head_commit)
+    assert ok.allowed and ok.reason == "PASS" and ok.review_id == out.review.id, ok
+    moved = gate.publication_review(db, w.run, "e" * 40)  # a later worker commit is not covered
+    assert not moved.allowed and moved.reason == "OTHER_HEAD"
+
+
+def test_a_manual_package_review_keeps_the_binding(db, reviewed_world, monkeypatch):
+    w = reviewed_world
+    install_doctor(monkeypatch, status="UNKNOWN")
+    FakeBridge().install(monkeypatch, manual=False)
+    waiting = review.review_run(db, w.run.id, actor="t").review
+    assert not gate.publication_review(db, w.run, w.run.head_commit).allowed  # waiting for the manual result
+    out = review.collect_manual_review(db, waiting.id, actor="owner",
+                                       structured=claude_envelope(review_payload()))
+    assert out.review.status == "COMPLETED" and out.review.mode == "MANUAL_FALLBACK"
+    assert gate.publication_review(db, w.run, w.run.head_commit).allowed
+
+
+def test_a_native_fail_review_refuses(db, reviewed_world, monkeypatch):
+    w = reviewed_world
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload("FAIL", [{"severity": "HIGH", "title": "bug", "detail": "d",
+                                                              "required_action": "fix"}]))).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    assert out.review.verdict == "FAIL"
+    res = gate.publication_review(db, w.run, w.run.head_commit)
+    assert not res.allowed and res.reason == "NOT_PASS"
+
+
+# ----------------------------------------------------------------------------- merge stays outside the runtime
+def test_the_broker_still_has_no_merge_operation():
+    """R44 "apalagi sampai merge": nothing in the broker integrates a pull request (U-09)."""
+    names = dir(git_broker) + dir(broker)
+    assert not [n for n in names if "merge" in n.lower()]
+    assert "REVIEW_REQUIRED" == git_broker.REVIEW_REQUIRED == gate.REVIEW_REQUIRED

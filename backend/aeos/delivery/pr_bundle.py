@@ -444,8 +444,9 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
 DELIVERY_GRANT_TTL = 900
 DELIVERY_GRANT_REQUESTS = 3  # push + PR + one reconciled retry
 # Owner rule (AGENTS.md invariant 11): the broker's commit gate and the outbound text guard refuse with these codes.
+# Owner rule R44 (ADR-0132): the broker publishes only a head with a Claude checkpoint review PASS bound to it.
 OWNER_RULE_CODES = frozenset({"COMMIT_IDENTITY_MISSING", "COMMIT_IDENTITY_MISMATCH", "AI_ATTRIBUTION_IN_COMMIT",
-                              "COMMIT_RANGE_UNBOUNDED", "AI_ATTRIBUTION_IN_TEXT"})
+                              "COMMIT_RANGE_UNBOUNDED", "AI_ATTRIBUTION_IN_TEXT", "REVIEW_REQUIRED"})
 # Broker failures whose outbox/audit rows must survive the refusal (the router commits before raising).
 PERSISTED_FAILURE_CODES = frozenset({"HEAD_MISMATCH", "BROKER_PUSH_FAILED", "BROKER_PUSH_UNKNOWN",
                                      "BROKER_PR_FAILED", "BROKER_PR_UNKNOWN", "GOVERNANCE_REJECTED",
@@ -453,8 +454,8 @@ PERSISTED_FAILURE_CODES = frozenset({"HEAD_MISMATCH", "BROKER_PUSH_FAILED", "BRO
 
 
 def _owner_rule_refusal(rejected: Any, what: str) -> None:
-    """A broker refusal of the owner rule keeps its own code (commit identity / AI attribution) instead of the
-    generic broker failure, so the owner sees why and what to fix."""
+    """A broker refusal of an owner rule keeps its own code (commit identity / AI attribution / Claude review of the
+    head) instead of the generic broker failure, so the owner sees why and what to fix."""
     detail = str(getattr(rejected, "detail", "") or "")
     code = detail.split(":", 1)[0].strip()
     if getattr(rejected, "status", "") == "REJECTED" and code in OWNER_RULE_CODES:
