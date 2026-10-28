@@ -7,6 +7,8 @@ Every entry is DESIGN-mode and NOT_EVALUATED until an evaluation (§43/§44) say
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 # §17 organisation view groups (projection only — no authority, no reporting-line permissions).
@@ -460,3 +462,88 @@ AGENT_DEFINITIONS: list[dict[str, Any]] = [
 
 IMPLEMENTER_AGENT_KEY = "opencode-implementer"
 REVIEWER_AGENT_KEYS = frozenset({"claude-checkpoint-reviewer"})
+
+# ----------------------------------------------------------------------------- category agents (ADR-0126)
+# Owner decision R31 (2026-10-28): "best models first ... matched to each role's needs". One OpenCode agent per
+# LiveBench category, each serving the executor roles in ``allowed_scope.roles``. Each one is the implementer's
+# configuration (same harness, worker prompt, tools, limits, pool and scope) plus that role list and an ordered
+# ``route_policy.preferred_routes`` that only RE-ORDERS routes that are already eligible (ADR-0124). Seeded DISABLED:
+# enabling one is the owner's ``aeos work agent-enable`` (ADR-0126, docs/OWNER_ACTIONS.md 1.11).
+ROLE_ROUTE_PREFERENCES_FILE = Path(__file__).with_name("role_route_preferences.json")  # scripts/role_route_ranking.py
+
+# agent key -> (LiveBench category, served roles; the first one is the agent's descriptive role_key, description)
+CATEGORY_AGENTS: dict[str, tuple[str, tuple[str, ...], str]] = {
+    "agentic-coder": ("Long Agentic", (
+        "backend-api-engineer", "frontend-engineer", "db-data-engineer", "integration-engineer",
+        "data-ai-feature-engineer", "platform-devsecops-engineer", "security-engineer"),
+        "pekerjaan rekayasa yang mengubah kode lintas banyak langkah"),
+    # independent-verifier: verifying code and tests is Coding work (ADR-0126 amendment); that the coder's route is
+    # of another model family than the task implementer's is NOT yet enforced (follow-up).
+    "coder": ("Coding", ("qa-test-designer", "independent-verifier"), "rancangan, kode uji dan verifikasi kode"),
+    "designer": ("Design", ("ux-ui-designer", "diagram-visual-author"), "desain UI/UX dan sumber diagram"),
+    "reasoner": ("Reasoning", (
+        "solution-architect", "engineering-delivery-analyst", "incident-analyst", "sre-operations-assistant"),
+        "arsitektur, analisis delivery, insiden dan operasi"),
+    "researcher": ("Research", ("ux-research-assistant", "product-analyst", "supply-chain-analyst"),
+                   "riset pengguna, produk dan rantai pasok"),
+    "writer": ("Instruction Following", (
+        "technical-writer", "privacy-grc-analyst", "release-coordinator", "retirement-assistant", "context-curator"),
+        "dokumen yang mengikuti instruksi dan format"),
+    "analyst": ("Data Analysis", ("model-evaluation-analyst", "finops-quota-analyst"), "analisis data evaluasi dan kuota"),
+}
+
+
+def _route_preferences() -> dict[str, dict[str, Any]]:
+    """The reviewed ranking per category agent. A missing or unreadable file yields no preference (routing then
+    orders by its own rules); it never makes a route eligible or ineligible."""
+    try:
+        data = json.loads(ROLE_ROUTE_PREFERENCES_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    agents = data.get("agents") if isinstance(data, dict) else None
+    return {str(k): v for k, v in (agents or {}).items() if isinstance(v, dict)}
+
+
+def _category_agent(agent_key: str, prefs: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    category, roles, what = CATEGORY_AGENTS[agent_key]
+    implementer = next(a for a in AGENT_DEFINITIONS if a["agent_key"] == IMPLEMENTER_AGENT_KEY)
+    pref = prefs.get(agent_key) or {}
+    return {
+        "agent_key": agent_key,
+        "role_key": roles[0],
+        "harness": implementer["harness"],
+        "description": f"OpenCode - agen kategori {category} (LiveBench) untuk {what}; prompt, tools dan sandbox "
+                       "sama dengan opencode-implementer.",
+        "route_policy": {**implementer["route_policy"],
+                         "preferred_routes": [str(k) for k in pref.get("preferred_routes") or []],
+                         "preferred_routes_source": {"file": "aeos/workforce/role_route_preferences.json",
+                                                     "category": pref.get("category"), "release": pref.get("release")}},
+        "tools": list(implementer["tools"]),
+        "limits": dict(implementer["limits"]),
+        "allowed_scope": {**implementer["allowed_scope"], "roles": list(roles)},
+        "enabled": False,
+        "deterministic": False,
+        "enabled_reason": "Nonaktif sampai pemilik mengaktifkannya (aeos work agent-enable, ADR-0126).",
+    }
+
+
+_PREFS = _route_preferences()
+AGENT_DEFINITIONS += [_category_agent(k, _PREFS) for k in CATEGORY_AGENTS]
+
+
+def served_roles(allowed_scope: dict[str, Any] | None, role_key: str | None) -> list[str]:
+    """The executor roles an agent serves: ``allowed_scope.roles`` when it lists them, else its own role_key."""
+    roles = (allowed_scope or {}).get("roles")
+    if isinstance(roles, list) and roles:
+        return [str(r) for r in roles]
+    return [role_key] if role_key else []
+
+
+def role_agent_map() -> dict[str, list[str]]:
+    """role_key -> the agent keys of AGENT_DEFINITIONS that serve it (a reviewed catalog has exactly one WORKER agent
+    per role; independent-verifier also keeps the deterministic verifier runner)."""
+    out: dict[str, list[str]] = {}
+    for spec in AGENT_DEFINITIONS:
+        for role in served_roles(spec.get("allowed_scope"), spec.get("role_key")):
+            out.setdefault(role, []).append(spec["agent_key"])
+    return out

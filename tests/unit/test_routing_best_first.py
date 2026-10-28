@@ -25,7 +25,7 @@ from aeos.models.workforce import WorkerRun
 from aeos.routing import capacity, seed, service
 from aeos.routing import facade as routing
 from aeos.routing.facade import select_route
-from aeos.workforce import integrations, scheduler
+from aeos.workforce import integrations, role_agents, scheduler
 from tests.unit.test_routing_fakes import human_decision, install_fakes
 from tests.unit.test_routing_free_worker import FREE, FREE2, _activate, _midday_utc, _move, _worker  # noqa: F401
 from tests.unit.test_routing_service import approve, task
@@ -171,14 +171,15 @@ def test_eval_outranks_the_preference_and_the_preference_outranks_priority(route
 
 
 def test_admission_passes_the_agent_preferred_routes_to_routing(db, monkeypatch):
-    """The scheduler reads ``route_policy.preferred_routes`` of the implementing agent (written by the role agents)."""
+    """The scheduler reads ``route_policy.preferred_routes`` of the agent the task's role maps to (ADR-0126)."""
     from tests.unit.test_workforce_scheduler import _go_ready
     from tests.unit.test_workforce_support import FakeModules
 
     fakes = FakeModules().install(monkeypatch)
     _route, specs = _go_ready(db, fakes)
-    agent = db.scalar(select(scheduler.AgentDefinition).where(
-        scheduler.AgentDefinition.agent_key == scheduler.IMPLEMENTER_AGENT_KEY))
+    agent_key = role_agents.agent_key_for_role(specs[0].role_key)
+    assert agent_key is not None
+    agent = db.scalar(select(scheduler.AgentDefinition).where(scheduler.AgentDefinition.agent_key == agent_key))
     agent.route_policy = {**(agent.route_policy or {}), "preferred_routes": [GO_MIMO, GO_GLM]}
     db.flush()
     seen: list[Any] = []
@@ -523,7 +524,8 @@ def test_a_paid_route_is_never_chosen_after_a_skip(routes, monkeypatch):
 
 
 def test_route_caps_never_exceed_the_scheduler_hard_cap(monkeypatch, settings):
-    assert config_mod.MAX_ROUTE_ACTIVE == scheduler.HARD_MAX_ACTIVE == 2  # this phase (owner answer 4)
+    # one source (ADR-0126): the per-route bound is derived from the global cap; 2 in this phase (owner answer 4)
+    assert config_mod.MAX_ROUTE_ACTIVE == config_mod.HARD_MAX_ACTIVE == 2
     for name, bad, needle in (("AEOS_GO_MAX_ACTIVE_TOTAL", "3", "route concurrency caps must be 1..2"),
                               ("AEOS_OPENROUTER_FREE_MAX_ACTIVE", "0", "route concurrency caps must be 1..2"),
                               ("AEOS_ROUTE_MAX_ACTIVE", '{"opencode-go/x": 3}', "route_max_active values must be"),
