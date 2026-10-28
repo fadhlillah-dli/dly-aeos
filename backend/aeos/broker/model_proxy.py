@@ -16,6 +16,12 @@ Guarantees:
   stable, opaque ``x-opencode-session`` per worker run (a hash of the run id, never a secret), as the Go docs ask
   of clients other than OpenCode;
 * request/token/cost caps and expiry are enforced before forwarding; ``max_tokens`` is clamped;
+* nothing sensitive leaves the host (ADR-0127, owner request 2026-10-28): before any request is forwarded - every route
+  and pool, worker and probe traffic alike - every string of the forwarded payload is scanned with the one secret
+  detector (``aeos.core.redaction``: token shapes and the secret values registered at runtime). A match is never sent:
+  403 ``SENSITIVE_CONTENT_BLOCKED``, a ``SENSITIVE_BLOCKED`` broker request, an audit record and a run event naming the
+  detector kinds and a SHA-256 of each matched span (never the text), and the executor stops the run. No setting
+  disables or narrows it;
 * upstream 429 -> 429 + ``Retry-After`` to the worker, QuotaState recorded, and NO fallback to any
   other (paid or unapproved) model (§42, §50 "Free quota habis / 429");
 * the real provider key is fetched in-process from the secrets facade, registered for redaction,
@@ -58,9 +64,10 @@ from starlette.concurrency import run_in_threadpool
 from aeos import __version__
 from aeos.audit import service as audit
 from aeos.broker import grants
+from aeos.broker.facade import SENSITIVE_BLOCKED_OUTCOME, SENSITIVE_CONTENT_BLOCKED
 from aeos.core.db import session_factory
 from aeos.core.errors import AeosError, Blocked, Conflict, PolicyDenied
-from aeos.core.redaction import redact_text
+from aeos.core.redaction import find_high_confidence_secrets, redact_text
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
 from aeos.models.broker_ext import BrokerRequest
@@ -100,6 +107,10 @@ MAX_PROVIDER_USD = 1e9
 # Chat-template tokens the prompt-size bound adds on top of the request body's UTF-8 bytes (a byte-level tokenizer never
 # makes more tokens than bytes): part of the upper bound recorded when the upstream reports no usage.
 TEMPLATE_TOKEN_MARGIN = 64
+# ADR-0127 (owner request 2026-10-28): the outgoing-content guard. No setting turns it off or narrows it.
+SENSITIVE_FINDINGS_RECORDED = 20  # findings kept on one audit record (the total is recorded beside them)
+# Joins the payload's strings for one scan: no token pattern crosses it (none of their character classes holds a NUL).
+_SCAN_SEPARATOR = "\n\x00\n"
 
 
 class ProxyError(Exception):
@@ -451,6 +462,11 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
         if exposed not in models:
             _deny(s, grant, "UNKNOWN_MODEL", f"model {exposed!r} is not in this capability's scope")
             raise ProxyError(404, "MODEL_NOT_ALLOWED", f"model {exposed!r} is not available for this run")
+        # ADR-0127: the outgoing-content guard, before anything counts against the grant or a free-model limit
+        findings = sensitive_content_findings({k: v for k, v in body.items() if k in ALLOWED_FIELDS})
+        if findings:
+            _sensitive_blocked(s, grant, models[exposed], exposed, findings)
+            raise ProxyError(403, SENSITIVE_CONTENT_BLOCKED, sensitive_content_message(findings))
         rem = grants.remaining(grant)
         if rem["tokens"] is not None and rem["tokens"] <= 0:
             _deny(s, grant, "CAP_EXCEEDED", "token cap exhausted")
@@ -603,6 +619,80 @@ def _eval_pools(s: Any, grant: CapabilityGrant, route_key: str) -> tuple[str, ..
     if current is None or current.get("eval_run_id") != ev.get("eval_run_id"):
         raise ProxyError(403, "EVAL_SCOPE_INVALID", problem or "the task is bound to another evaluation now")
     return tuple(SERVED_POOLS) + tuple(EVAL_POOLS)
+
+
+def outgoing_text(payload: Any) -> str:
+    """Every string of *payload* - mapping keys and values, list items, at any depth - joined for one scan: message
+    contents of every role, tool calls and their arguments, tool definitions, stop sequences, response schemas. A tool
+    call's ``arguments`` is a JSON-encoded string: its decoded strings are scanned as well, so a JSON escape
+    (``\\u0067``) does not hide a token."""
+    parts: list[str] = []
+    stack: list[Any] = [payload]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, str):
+            parts.append(item)
+        elif isinstance(item, dict):
+            for key, value in item.items():
+                if isinstance(key, str):
+                    parts.append(key)
+                if key == "arguments" and isinstance(value, str):
+                    try:
+                        stack.append(json.loads(value))
+                    except (ValueError, RecursionError):
+                        pass  # not JSON: the string itself is scanned
+                stack.append(value)
+        elif isinstance(item, list | tuple):
+            stack.extend(item)
+    return _SCAN_SEPARATOR.join(parts)
+
+
+def sensitive_content_findings(payload: Any) -> list[dict[str, str]]:
+    """The secrets *payload* would carry upstream (ADR-0127): one ``{"kind", "span_sha256"}`` per distinct detector
+    kind and matched span, sorted - never the matched text. Empty when the payload may be sent. Detection is the one
+    owner of secret detection, ``aeos.core.redaction.find_high_confidence_secrets`` (token shapes and the registered
+    runtime secret values); personal data such as e-mail addresses is not blocked (ADR-0127: code is full of them)."""
+    text = outgoing_text(payload)
+    found = {(f.kind, hashlib.sha256(text[f.start:f.end].encode("utf-8", "surrogatepass")).hexdigest())
+             for f in find_high_confidence_secrets(text)}
+    return [{"kind": kind, "span_sha256": digest} for kind, digest in sorted(found)]
+
+
+def sensitive_content_message(findings: list[dict[str, str]]) -> str:
+    kinds = ", ".join(sorted({f["kind"] for f in findings}))
+    return (f"the request was not sent: it carries a credential ({kinds}). Remove the secret from the conversation "
+            "(do not read key, environment or token files into the prompt) and start again; nothing sensitive leaves "
+            "this host in a model request")
+
+
+def _sensitive_blocked(s: Any, grant: CapabilityGrant, route_key: str, exposed: str,
+                       findings: list[dict[str, str]]) -> None:
+    """A request refused by the outgoing-content guard (ADR-0127): never forwarded and never counted against a
+    free-model limit (no upstream model), recorded for the run (the executor stops it), the audit trail and the run
+    timeline."""
+    kinds = sorted({f["kind"] for f in findings})
+    summary = f"{SENSITIVE_CONTENT_BLOCKED}: {', '.join(kinds)}"
+    s.add(BrokerRequest(grant_id=grant.id, run_id=grant.run_id, project_id=grant.project_id, domain=grant.domain,
+                        route_key=route_key, exposed_model=exposed, outcome=SENSITIVE_BLOCKED_OUTCOME,
+                        status_code=403, error_summary=summary[:500]))
+    run = s.get(WorkerRun, grant.run_id)
+    if run is not None:
+        us = dict(run.usage_summary or {})
+        us["sensitive_blocked"] = int(us.get("sensitive_blocked", 0)) + 1
+        run.usage_summary = us
+        run.current_action = f"{SENSITIVE_CONTENT_BLOCKED}: request not sent ({', '.join(kinds)})"
+    details = {"route_key": route_key, "kinds": kinds, "findings": findings[:SENSITIVE_FINDINGS_RECORDED],
+               "findings_total": len(findings), "sent": False}
+    audit.record(s, actor_type="worker", actor_id=f"run:{grant.run_id}", action="broker.model_proxy.sensitive_blocked",
+                 result="DENIED", target_type="model_route", target_id=route_key, project_id=grant.project_id,
+                 domain=grant.domain, reason=summary[:500], details=details)
+    events.emit(s, source="broker", kind="run.model_call_blocked", entity_type="run", entity_id=grant.run_id,
+                run_id=grant.run_id, project_id=grant.project_id, domain=grant.domain,
+                mode=run.mode if run is not None and run.mode else "LIVE",
+                payload={**details, "code": SENSITIVE_CONTENT_BLOCKED,
+                         "label": f"Permintaan model ditahan, tidak dikirim: berisi kredensial ({', '.join(kinds)})",
+                         "detail": SENSITIVE_CONTENT_BLOCKED})
+    s.commit()
 
 
 def _deny(s: Any, grant: CapabilityGrant, code: str, message: str, *, commit: bool = True) -> None:

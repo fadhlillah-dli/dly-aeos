@@ -52,6 +52,11 @@ SUPERSEDED_ENDPOINTS: dict[str, str] = {
 # marker (nothing is sent; the provider's default applies). A worker-sent ``reasoning_effort`` is never forwarded.
 REASONING_LEVELS: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh")
 REASONING_DEFAULT_MARKERS: tuple[str, ...] = ("HARNESS_DEFAULT", "PROVIDER_DEFAULT")
+# Outgoing-content guard (additive, ADR-0127, owner request 2026-10-28): a model request that carries a credential is
+# never sent, whatever the route. The caller gets 403 with this code, the broker request row this outcome, and the
+# worker runtime stops the run with this code as its stop reason.
+SENSITIVE_CONTENT_BLOCKED = "SENSITIVE_CONTENT_BLOCKED"
+SENSITIVE_BLOCKED_OUTCOME = "SENSITIVE_BLOCKED"
 
 
 def issue_grant(

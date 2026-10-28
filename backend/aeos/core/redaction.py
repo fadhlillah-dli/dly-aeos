@@ -9,37 +9,50 @@ from __future__ import annotations
 
 import re
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 REDACTED = "[REDACTED]"
 
-_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9]{20,}"),  # OpenRouter
-    re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_\-]{20,}"),  # Anthropic
-    re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}"),  # OpenAI-style
-    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),  # GitHub tokens
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"AKIA[0-9A-Z]{16}"),  # AWS access key id
-    re.compile(r"AIza[0-9A-Za-z_\-]{35}"),  # Google API key
-    re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}"),  # Google OAuth access token
-    re.compile(r"1//[0-9A-Za-z_\-]{20,}"),  # Google refresh token
-    re.compile(r"(?<![A-Za-z0-9])hv[sbr]\.[A-Za-z0-9_\-]{24,}"),  # Vault/OpenBao service, batch, recovery tokens
-    re.compile(r"(?:hvs|s|b)\.[A-Za-z0-9]{24,}"),  # Vault/OpenBao tokens (older and short forms)
-    re.compile(r"(?<![A-Za-z0-9.])r\.[A-Za-z0-9]{24,}"),  # OpenBao recovery token (short form)
+# The end marker of a PEM private key block: part of the private-key pattern below, and what bounds the outgoing-content
+# scan of that pattern to linear time (find_high_confidence_secrets).
+_PEM_END = r"-----END [A-Z ]*PRIVATE KEY-----"
+
+# (detector kind, pattern). The kind names what matched in a refusal or an audit record - never the matched text.
+# Patterns with a capturing group (key=value forms) redact only their value part and are not high-confidence.
+_NAMED_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("openrouter_key", re.compile(r"(?<![A-Za-z0-9])sk-or-v1-[A-Za-z0-9]{20,}")),  # OpenRouter
+    ("anthropic_key", re.compile(r"(?<![A-Za-z0-9])sk-ant-[A-Za-z0-9_\-]{20,}")),  # Anthropic
+    ("openai_style_key", re.compile(r"(?<![A-Za-z0-9])sk-[A-Za-z0-9_\-]{20,}")),  # OpenAI-style
+    ("github_token", re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}")),  # GitHub tokens
+    ("github_pat", re.compile(r"github_pat_[A-Za-z0-9_]{20,}")),
+    ("aws_access_key_id", re.compile(r"AKIA[0-9A-Z]{16}")),  # AWS access key id
+    ("google_api_key", re.compile(r"AIza[0-9A-Za-z_\-]{35}")),  # Google API key
+    ("google_oauth_token", re.compile(r"ya29\.[0-9A-Za-z_\-]{20,}")),  # Google OAuth access token
+    ("google_refresh_token", re.compile(r"1//[0-9A-Za-z_\-]{20,}")),  # Google refresh token
+    # Vault/OpenBao service, batch, recovery tokens
+    ("vault_token", re.compile(r"(?<![A-Za-z0-9])hv[sbr]\.[A-Za-z0-9_\-]{24,}")),
+    # Vault/OpenBao tokens (older and short forms). Not glued to a preceding letter or digit, so code such as
+    # ``this.handleSubmitButtonClickedEvent`` or ``lib.someLongFunctionNameHere`` is not a token (2026-10-28).
+    ("vault_token_short", re.compile(r"(?<![A-Za-z0-9])(?:hvs|s|b)\.[A-Za-z0-9]{24,}")),
+    ("openbao_recovery_token", re.compile(r"(?<![A-Za-z0-9.])r\.[A-Za-z0-9]{24,}")),  # OpenBao recovery token (short)
     # Vault/OpenBao `operator init` output. The label is required, so a bare base64 string (a lockfile
-    # hash, a digest) never matches, nor does prose that only names an unseal key.
-    re.compile(r"(?i)\b(?:unseal|recovery) key(?: share)?\s*\d*\s*:\s*[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=_\-])"),
-    re.compile(r"(?i)\binitial root token\s*:\s*[A-Za-z0-9._\-]{20,}(?![A-Za-z0-9._\-])"),
-    re.compile(
+    # hash, a digest) never matches, nor does prose that only names an unseal key. ``\s*(?:\d+\s*)?:`` is the same
+    # language as ``\s*\d*\s*:`` without its quadratic backtracking over a long run of whitespace (2026-10-28).
+    ("vault_unseal_key", re.compile(
+        r"(?i)\b(?:unseal|recovery) key(?: share)?\s*(?:\d+\s*)?:\s*[A-Za-z0-9+/]{32,}={0,2}(?![A-Za-z0-9+/=_\-])")),
+    ("vault_root_token", re.compile(r"(?i)\binitial root token\s*:\s*[A-Za-z0-9._\-]{20,}(?![A-Za-z0-9._\-])")),
+    ("vault_init_json", re.compile(
         r'(?i)"(?:unseal|recovery)_keys_(?:b64|hex)"\s*:\s*\[\s*"[A-Za-z0-9+/=]{32,}"'
         r'(?:\s*,\s*"[A-Za-z0-9+/=]{32,}")*'
-    ),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/]{16,}=*"),
-    re.compile(r"(?i)((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s,;\"']{6,}"),
+    )),
+    ("slack_token", re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}")),
+    ("private_key_pem", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?" + _PEM_END)),
+    ("bearer_value", re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-~+/]{16,}=*")),
+    ("credential_assignment", re.compile(r"(?i)((?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)[^\s,;\"']{6,}")),
 ]
+_PATTERNS: list[re.Pattern[str]] = [p for _, p in _NAMED_PATTERNS]
 
 # Key-name rule: a mapping value is masked when its key names a credential as a whole word
 # (csrf_token, api_key, client_secret, Authorization) — but not counters/flags/hashes such as
@@ -126,13 +139,67 @@ def contains_secret(text: str) -> bool:
     return redact_text(text) != text
 
 
+REGISTERED_SECRET = "registered_secret"  # detector kind of a runtime secret value registered with register_secret()
+
+_PEM_END_RE = re.compile(_PEM_END)
+# A literal every match of the kind contains, checked on the lower-cased text before the pattern runs: a pattern that
+# starts with a look-behind gets no literal-prefix search from the regex engine, so on a multi-megabyte text it costs
+# tens of milliseconds even when nothing is there (the broker scans whole model requests, ADR-0127).
+_PREFILTER: dict[str, tuple[str, ...]] = {
+    "openrouter_key": ("sk-or-v1-",), "anthropic_key": ("sk-ant-",), "openai_style_key": ("sk-",),
+    "vault_token": ("hvs.", "hvb.", "hvr."), "openbao_recovery_token": ("r.",),
+    "vault_unseal_key": ("unseal key", "recovery key"), "vault_root_token": ("initial root token",),
+    "vault_init_json": ("_keys_",), "private_key_pem": ("private key-----",),
+}
+
+
+@dataclass(frozen=True)
+class SecretFinding:
+    """One high-confidence match: its detector kind and its span in the scanned text (never the text itself)."""
+
+    kind: str
+    start: int
+    end: int
+
+
+def _iter_high_confidence(text: str) -> Iterator[SecretFinding]:
+    with _lock:
+        values = list(_known_values)
+    for v in values:
+        i = text.find(v)
+        while i != -1:
+            yield SecretFinding(REGISTERED_SECRET, i, i + len(v))
+            i = text.find(v, i + len(v))
+    lowered: str | None = None
+    for kind, pat in _NAMED_PATTERNS:
+        if pat.groups:
+            continue
+        hints = _PREFILTER.get(kind)
+        if hints:
+            lowered = text.lower() if lowered is None else lowered
+            if not any(h in lowered for h in hints):
+                continue
+        endpos = len(text)
+        if kind == "private_key_pem":
+            # A BEGIN header with no END after it would make the lazy body scan run to the end of the text once per
+            # header (quadratic). Every match ends with an END marker, so the scan stops at the last one: linear.
+            endpos = max((m.end() for m in _PEM_END_RE.finditer(text)), default=0)
+            if not endpos:
+                continue
+        for m in pat.finditer(text, 0, endpos):
+            yield SecretFinding(kind, m.start(), m.end())
+
+
+def find_high_confidence_secrets(text: str) -> list[SecretFinding]:
+    """Every high-confidence match in *text* (the rule of contains_high_confidence_secret) with its detector kind and
+    span, for a caller that refuses content and must name what it found without repeating it (the broker's outgoing
+    model-request guard, ADR-0127). Time is linear in the length of the text."""
+    return list(_iter_high_confidence(text)) if text else []
+
+
 def contains_high_confidence_secret(text: str) -> bool:
     """Registered runtime secret values or token-shaped patterns only (no generic key=value rule),
     so prose like "token: string" is not a false positive."""
     if not text:
         return False
-    with _lock:
-        values = list(_known_values)
-    if any(v in text for v in values):
-        return True
-    return any(p.search(text) for p in _PATTERNS if not p.groups)
+    return next(_iter_high_confidence(text), None) is not None

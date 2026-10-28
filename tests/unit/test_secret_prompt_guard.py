@@ -137,7 +137,9 @@ def test_noisy_short_forms_are_skipped_on_purpose_and_still_exist_canonically() 
 
     for prefix in guard.SKIPPED_PATTERN_PREFIXES:
         assert any(p.pattern.startswith(prefix) for p in _PATTERNS), f"stale skip entry {prefix!r}"
-    noisy = "see model" + "s" + ".CustomerSubscriptionHistoryRecord"  # built from parts: secret_scan flags this shape
+    # built from parts: secret_scan flags this shape. Since ADR-0127 the canonical short form needs a separator before
+    # it (``models.Customer...`` is no longer a token), but a standalone ``s.`` member access still matches
+    noisy = "see " + "s" + ".CustomerSubscriptionHistoryRecord"
     assert contains_high_confidence_secret(noisy)  # why the guard skips the short Vault form
     assert _decide(noisy) is None
 

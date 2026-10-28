@@ -405,6 +405,49 @@ def test_upstream_quota_stops_run_without_burning_into_failure(settings, setup):
     assert te.state == "BLOCKED" and te.reason_code == "QUOTA_EXHAUSTED"
 
 
+def _sensitive_blocked_row(run_id: str) -> None:
+    """What the broker records for a model request it refused to send because it carried a credential (ADR-0127)."""
+    with session_factory()() as s:
+        run = s.get(WorkerRun, run_id)
+        s.add(BrokerRequest(grant_id="g", run_id=run_id, project_id=run.project_id, domain="PERSONAL",
+                            outcome="SENSITIVE_BLOCKED", status_code=403,
+                            error_summary="SENSITIVE_CONTENT_BLOCKED: github_token"))
+        s.commit()
+
+
+def test_a_request_the_broker_refused_as_sensitive_stops_the_run(settings, setup):
+    """ADR-0127: the run fails closed with a readable reason at the next heartbeat (the worker keeps going otherwise)."""
+    make, _ = setup
+    run_id, task_id = make("sleep")
+
+    def refuse():
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            r, _ = _load(run_id, task_id)
+            if r.execution_status == "RUNNING":
+                break
+            time.sleep(0.2)
+        _sensitive_blocked_row(run_id)
+
+    threading.Thread(target=refuse).start()
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, te = _load(run_id, task_id)
+    assert res["stop_reason"] == "SENSITIVE_CONTENT_BLOCKED" and res["status"] == "FAILED"
+    assert run.execution_status == "FAILED" and run.outcome_code == "SENSITIVE_CONTENT_BLOCKED"
+    assert te.state in ("REVIEW", "FAILED") and "credential" in te.reason
+
+
+def test_a_sensitive_refusal_after_the_last_heartbeat_still_fails_an_exit_zero_run(settings, setup):
+    """Near miss of the review path: exit 0 alone goes to REVIEW; with a refused request of the run it fails closed."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _sensitive_blocked_row(run_id)
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)  # no heartbeat: the outcome phase decides
+    run, te = _load(run_id, task_id)
+    assert res["exit_code"] == 0 and res["status"] == "FAILED", res
+    assert run.outcome_code == "SENSITIVE_CONTENT_BLOCKED" and te.state != "DONE"
+
+
 def test_start_blocked_without_sandbox_exception(settings, setup):
     make, _ = setup
     run_id, task_id = make("ok")

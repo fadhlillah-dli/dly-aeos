@@ -799,6 +799,29 @@ Wave 7 additions:
   the Control Center: Kesiapan -> the check -> **Tetapkan ambang pemilik**, PERSONAL session, entered as a percentage).
   Without it, measured failures are reported, never judged.
 
+## Outgoing model-request guard (ADR-0127)
+
+Owner request 2026-10-28: nothing sensitive leaves this host in a model request, so training-capable routes
+(OpenRouter `:free`, DeepSeek) and OpenCode Go can serve PUBLIC tasks. The broker scans every request before it is
+forwarded, on every route and pool, worker calls and feasibility probes alike. There is no setting to turn it off.
+
+| Question | Answer |
+|---|---|
+| Blocked | a credential shape that `aeos.core.redaction` knows (OpenRouter, Anthropic and OpenAI-style keys, GitHub tokens, AWS access key ids, Google keys and tokens, Vault/OpenBao tokens and labelled unseal/root material, Slack tokens, PEM private key blocks) and any secret value AEOS loaded at run time (provider keys, capability tokens, code-host tokens), anywhere in the request: system, user, assistant and tool messages, tool calls and their arguments, tool definitions |
+| Not blocked | personal data such as e-mail addresses (code is full of them), generic `password = ...` or `Bearer <opaque>` text, a low-entropy secret AEOS never loaded, shapes the redaction module does not define yet, encoded or split secrets. These are the residual risks of ADR-0127 |
+| What the worker sees | HTTP 403, code `SENSITIVE_CONTENT_BLOCKED`, a message naming only the detector kinds; nothing was sent and nothing is counted against the grant or a free-model limit |
+| What the run does | it is stopped at the next heartbeat (or when the worker exits) as FAILED with outcome code `SENSITIVE_CONTENT_BLOCKED`; the task goes to REVIEW (attempt failed, diagnosis required) or FAILED when no attempt is left |
+| A probe | refused with `SENSITIVE_CONTENT_BLOCKED` before anything is sent or counted |
+
+How to read it: in the Control Center open the run (**Pekerjaan Live**, run detail). Its timeline shows "Permintaan
+model ditahan, tidak dikirim: berisi kredensial (kinds)" (event `run.model_call_blocked`), and its outcome code is
+`SENSITIVE_CONTENT_BLOCKED`. In **Riwayat, Audit & Pemulihan** > Audit, the record
+`broker.model_proxy.sensitive_blocked` (DENIED, target = the route key) lists `kinds` and `findings`: each finding is
+a detector kind and the SHA-256 of the matched text, never the text. Two findings with the same hash are the same
+secret. What to do: find where the worker read the credential (a key file, an environment file, a log, a fixture),
+move it out of the repository or the task's inputs, rotate it if it is real (AGENTS.md invariant 12), then let the
+task run again. A fixture that only looks like a key is assembled from parts at run time instead of written literally.
+
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 
 The owner's standing rule for DLY AEOS and every project it creates or manages: every GitHub activity (commits as
