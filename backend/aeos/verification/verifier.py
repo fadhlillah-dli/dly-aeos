@@ -825,10 +825,7 @@ class _Verifier:
 
     def _binary_paths(self) -> list[str]:
         """Added/modified files git reports as binary (numstat ``-``): invisible to the added-line scan."""
-        status_by_path = {p: st for st, p in self.changed_entries}
-        return sorted(p for p, s in self.numstat.items()
-                      if s.get("added") is None and s.get("deleted") is None
-                      and not status_by_path.get(p, "").startswith("D"))
+        return scope.binary_changed_paths(self.changed_entries, self.numstat)
 
     def _static_scans(self, diff_text: str, snapshot: Path | None) -> None:
         lines = scope.added_lines(diff_text)

@@ -60,22 +60,24 @@ _SANDBOX_SAFE_NAMES = {RUN_MARKER, "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
 # Owner rule R44 (ADR-0132): git in a worker's environment refuses every remote transport, whatever the repository's
 # own config says (the ``worktree`` strategy shares the owner's repository config, remotes included). Command-line
 # config (``GIT_CONFIG_COUNT``) outranks the repository's: no credential helper, askpass and ssh replaced by a command
-# that fails (OpenSSH would otherwise find the OS account's ~/.ssh whatever HOME says), and only the file transport
-# for local work. The worker's own local git (status, diff) keeps working; it never needs a remote.
+# that fails (OpenSSH would otherwise find the OS account's ~/.ssh whatever HOME says), every transport disallowed
+# except ``file`` with git's own default ``user`` (a path the worker names itself; a submodule clone git starts on its
+# own is refused - ``always`` or ``GIT_ALLOW_PROTOCOL`` would undo that hardening). The worker's local git (status,
+# diff, commit, a clone of a local path) keeps working; it never needs a remote. Defence in depth: a worker with a
+# shell can change its own environment; the container's network is the boundary.
 GIT_REFUSING_COMMAND = "false"
 GIT_NO_REMOTE_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": GIT_REFUSING_COMMAND,
     "SSH_ASKPASS": GIT_REFUSING_COMMAND,
     "GIT_SSH_COMMAND": GIT_REFUSING_COMMAND,
-    "GIT_ALLOW_PROTOCOL": "file",
     "GIT_CONFIG_COUNT": "5",
     "GIT_CONFIG_KEY_0": "core.sshCommand",
     "GIT_CONFIG_VALUE_0": GIT_REFUSING_COMMAND,
     "GIT_CONFIG_KEY_1": "protocol.allow",
     "GIT_CONFIG_VALUE_1": "never",
     "GIT_CONFIG_KEY_2": "protocol.file.allow",
-    "GIT_CONFIG_VALUE_2": "always",
+    "GIT_CONFIG_VALUE_2": "user",
     "GIT_CONFIG_KEY_3": "credential.helper",
     "GIT_CONFIG_VALUE_3": "",
     "GIT_CONFIG_KEY_4": "core.askPass",

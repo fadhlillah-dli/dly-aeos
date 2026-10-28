@@ -8,7 +8,8 @@ What enforces it, seam by seam (each test has a near miss that shows the same op
   sandbox environment redirects HOME, empties the global git config, ignores the system config (where a credential
   helper such as the OS keychain lives) and disables prompts;
 * git in the worker's environment refuses every remote transport (``processes.GIT_NO_REMOTE_ENV``): only the file
-  transport is allowed, ssh and askpass are a command that fails, and command-line config outranks the repository's
+  transport, with git's default ``user`` (a submodule clone git starts on its own is refused), ssh and askpass are a
+  command that fails, and command-line config outranks the repository's
   own (the ``worktree`` strategy shares the owner's repository config with its remotes and any ``core.sshCommand``;
   OpenSSH would find the OS account's ~/.ssh whatever HOME says);
 * the isolated candidate (self-build) has no remote at all, so ``git push`` has no destination;
@@ -136,14 +137,38 @@ def test_git_in_the_worker_environment_refuses_every_remote_transport(tmp_path, 
     env = processes.build_sandbox_env(processes.SandboxDirs.create(tmp_path / "sbx"), run_id="run-no-remote")
     for args in (["push", "origin", "HEAD:refs/heads/aeos/worker"],
                  ["push", "fake-host:../remote.git", "HEAD:refs/heads/aeos/worker"],
-                 ["-c", "protocol.ssh.allow=always", "push", "origin", "HEAD:refs/heads/aeos/worker"],
                  ["ls-remote", "https://127.0.0.1:9/repository.git"]):
         refused = _git(args, cwd=src, env=env)
         assert refused.returncode != 0 and "not allowed" in refused.stderr, (args, refused.stderr)
+    # a worker that re-allows ssh on its own command line still meets the failing ssh command, never the fake ssh
+    refused = _git(["-c", "protocol.ssh.allow=always", "push", "origin", "HEAD:refs/heads/aeos/worker"], cwd=src,
+                   env=env)
+    assert refused.returncode != 0 and "Could not read from remote repository" in refused.stderr, refused.stderr
     assert log.read_text(encoding="utf-8").count("git-receive-pack") == 1, "ssh never ran for the worker"
     assert _git(["for-each-ref", "--format=%(refname)"], cwd=remote, env=owner).stdout.split() == [
         "refs/heads/aeos/owner"]
     assert _git(["status", "--porcelain"], cwd=src, env=env).returncode == 0  # local git still works
+
+
+def test_local_git_still_works_in_the_worker_environment_and_file_stays_user_only(tmp_path):
+    """L2: the worker's own git keeps working - status, commit, a clone of a local path it names - while a file clone
+    git starts on its own (a submodule, ``GIT_PROTOCOL_FROM_USER=0``) is refused, git's default ``user`` hardening."""
+    src = tmp_path / "source"
+    init_git_repo(src)
+    env = processes.build_sandbox_env(processes.SandboxDirs.create(tmp_path / "sbx"), run_id="run-local-git")
+    assert env["GIT_CONFIG_KEY_2"] == "protocol.file.allow" and env["GIT_CONFIG_VALUE_2"] == "user"
+    assert "GIT_ALLOW_PROTOCOL" not in env
+    assert _git(["status", "--porcelain"], cwd=src, env=env).returncode == 0
+    (src / "notes.md").write_text("local work\n", encoding="utf-8")
+    assert _git(["add", "-A"], cwd=src, env=env).returncode == 0
+    committed = _git(["-c", "user.name=Worker", "-c", "user.email=worker@example.invalid", "-c",
+                      "commit.gpgsign=false", "commit", "-q", "-m", "local"], cwd=src, env=env)
+    assert committed.returncode == 0, committed.stderr
+    cloned = _git(["clone", "-q", src.as_posix(), (tmp_path / "copy").as_posix()], cwd=tmp_path, env=env)
+    assert cloned.returncode == 0, cloned.stderr
+    implicit = _git(["clone", "-q", src.as_posix(), (tmp_path / "implicit").as_posix()], cwd=tmp_path,
+                    env={**env, "GIT_PROTOCOL_FROM_USER": "0"})
+    assert implicit.returncode != 0 and "not allowed" in implicit.stderr, implicit.stderr
 
 
 def test_the_isolated_candidate_has_no_remote_so_a_worker_push_has_no_destination(tmp_path, monkeypatch):

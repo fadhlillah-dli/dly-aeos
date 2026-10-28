@@ -261,6 +261,20 @@ class ScopeResult:
         }
 
 
+def binary_changed_paths(name_status: list[tuple[str, str]] | list[dict[str, Any]],
+                         numstat: dict[str, dict[str, Any]]) -> list[str]:
+    """Added/modified paths git reports as binary (numstat ``-`` for both counts): content no line diff shows. The
+    one rule for the verifier's binary secret scan and the checkpoint package (deletions show no new content).
+    ``name_status`` holds ``(status, path)`` pairs or ``{"status", "path"}`` entries."""
+    status_by_path: dict[str, str] = {}
+    for entry in name_status:
+        st, path = (entry.get("status"), entry.get("path")) if isinstance(entry, dict) else entry
+        status_by_path[str(path)] = str(st or "")
+    return sorted(p for p, s in numstat.items()
+                  if isinstance(s, dict) and s.get("added") is None and s.get("deleted") is None
+                  and not status_by_path.get(p, "").startswith("D"))
+
+
 def check_scope(changed: list[str], *, allowed: list[str], forbidden: list[str], protected: list[str]) -> ScopeResult:
     result = ScopeResult(changed=sorted(set(changed)), allowed=list(allowed), forbidden=list(forbidden),
                          protected=list(protected))

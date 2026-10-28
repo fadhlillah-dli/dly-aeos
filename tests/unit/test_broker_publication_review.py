@@ -30,7 +30,7 @@ from aeos.models.workforce import WorkerRun
 from aeos.verification import publication_review as gate
 from aeos.verification import review
 from aeos.workforce.integrations import QUARANTINE_TARGET_TYPE
-from tests.unit.review_gate_support import record_claude_review
+from tests.unit.review_gate_support import MISSING, record_claude_review, record_push
 from tests.unit.test_verification_support import (
     FakeBridge,
     FakeWorkforce,
@@ -317,6 +317,7 @@ def _pr_env(db, monkeypatch, secrets_memory, env) -> list[str]:
     broker.issue_grant(db, run_id=env["run"].id, project_id=env["run"].project_id, domain="PERSONAL",
                        kind="PR_CREATE", scope={"repo": REPO, "head": BRANCH, "base": "main"}, ttl_seconds=300,
                        max_requests=3)
+    record_push(db, env["run"], repo=REPO)  # the broker pushed this head first (ADR-0132 decision 3)
     return reads
 
 
@@ -373,6 +374,109 @@ def test_pr_is_allowed_with_a_pass_bound_to_the_head(db, env, monkeypatch, secre
     _pr_created(db, env)
 
 
+def _refused_not_pushed(db, env, reads, message: str) -> None:
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as e:
+            _create_pr(db, env)
+        assert not mock.calls, "no request reached GitHub"
+    assert e.value.code == "REVIEW_REQUIRED" and e.value.details["reason"] == "NOT_PUSHED", e.value.details
+    assert message in e.value.message and "push the branch through the broker first" in e.value.message
+    assert reads == [] and _grant_uses(db, env["run"], "PR_CREATE") == 0
+
+
+def test_pr_needs_a_recorded_push_of_exactly_this_head(db, env, monkeypatch, secrets_memory):
+    """The push is where the history is checked: a PR is opened only for a branch the broker pushed with this
+    head - not for a branch pushed by anyone else, nor for another head of the run."""
+    reads = _pr_env(db, monkeypatch, secrets_memory, env)
+    from aeos.models.broker_ext import BrokerSideEffect
+
+    db.query(BrokerSideEffect).delete()  # no push record at all
+    record_claude_review(db, env["run"])
+    _refused_not_pushed(db, env, reads, f"no reviewed push of head {env['head'][:12]} to {REPO}:{BRANCH}")
+    record_push(db, env["run"], repo=REPO, head=env["base"])  # a push of another head of the run
+    record_push(db, env["run"], repo="owner/other", head=env["head"])  # this head, another repository
+    _refused_not_pushed(db, env, reads, "NOT_PUSHED - the broker has no successful push of exactly this head")
+    res = git_broker.push_task_branch(db, run_id=env["run"].id, worktree=str(env["src"]), branch=BRANCH,
+                                      repo_full_name=REPO, remote_url=str(env["bare"]))  # near miss: the real push
+    assert res["ok"]
+    _pr_created(db, env)
+
+
+def test_a_pr_whose_reported_head_is_not_the_reviewed_head_is_not_counted(db, env, monkeypatch, secrets_memory):
+    _pr_env(db, monkeypatch, secrets_memory, env)
+    record_claude_review(db, env["run"])
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(f"https://api.github.com/repos/{REPO}/pulls").mock(return_value=httpx.Response(
+            201, json={"number": 5, "html_url": f"https://github.com/{REPO}/pull/5", "head": {"sha": "f" * 40}}))
+        res = _create_pr(db, env)
+    assert not res["ok"] and res["status"] == "FAILED"
+    assert res["error"].startswith(f"HEAD_MISMATCH: the pull request's head {'f' * 12} is not the reviewed head")
+    from aeos.models.broker_ext import BrokerSideEffect
+
+    se = db.get(BrokerSideEffect, res["side_effect_id"])
+    assert se.status == "FAILED" and se.kind == "CREATE_PR"
+
+
+# ----------------------------------------------------------------------------- binding edge cases (L3)
+def test_a_merge_commit_head_is_never_published(db, env):
+    """A merge whose first parent is the base still carries a second history the reviewer did not see."""
+    src, run = env["src"], env["run"]
+    _git(src, "checkout", "-q", "-b", "side", env["base"])
+    (src / "side.txt").write_text("side\n", encoding="utf-8")
+    _commit_all(src, "side work")
+    _git(src, "checkout", "-q", BRANCH)
+    _git(src, "reset", "-q", "--hard", env["base"])
+    _git(src, "merge", "-q", "--no-ff", "-m", "aeos: candidate", "side")
+    run.head_commit = _git(src, "rev-parse", "HEAD")
+    record_claude_review(db, run)
+    err = _history_refused(db, env, "the head's parents are")
+    assert f"{env['base'][:12]}, " in err.message  # two parents, the first one being the base
+
+
+def test_a_head_equal_to_the_base_is_never_published(db, env):
+    src, run = env["src"], env["run"]
+    _git(src, "reset", "-q", "--hard", env["base"])
+    run.head_commit = env["base"]
+    record_claude_review(db, run)
+    _history_refused(db, env, f"base {env['base'][:12]}..head is 0 commit(s) and the head's parents are none")
+
+
+def test_a_tampered_package_is_unbound(db, env, settings):
+    rec = record_claude_review(db, env["run"])
+    from aeos.models.evidence import EvidenceArtifact
+
+    ev = db.get(EvidenceArtifact, rec.package_evidence_id)
+    stored = settings.layout.root / ev.location
+    stored.write_bytes(stored.read_bytes().replace(b'"diff_truncated": false', b'"diff_truncated": true '))
+    _refused_push(db, env, "is not bound to a recorded head commit (no trusted, intact checkpoint package", "UNBOUND")
+
+
+@pytest.mark.parametrize("overrides", [{"diff_truncated": MISSING}, {"diff_truncated": "no"},
+                                       {"diff_available": MISSING}, {"diff_available": 1},
+                                       {"binary_paths": MISSING}, {"binary_paths": "assets/a.png"},
+                                       {"run": {"head_commit": "0" * 40}}])
+def test_a_package_without_well_formed_coverage_fields_is_unbound(db, env, overrides):
+    record_claude_review(db, env["run"], package_overrides=overrides)
+    _refused_push(db, env, "is not bound to a recorded head commit", "UNBOUND")
+
+
+# ----------------------------------------------------------------------------- what the reviewer could see (M1, M2)
+def test_a_review_whose_diff_was_unavailable_is_refused(db, env):
+    record_claude_review(db, env["run"], diff_available=False)
+    _refused_push(db, env, "the reviewer saw no diff (the verifier's diff evidence was missing or failed its "
+                           "content hash when the package was built)", "DIFF_UNAVAILABLE")
+    record_claude_review(db, env["run"])  # near miss
+    _pushed(db, env)
+
+
+def test_a_change_with_binary_files_is_refused(db, env):
+    record_claude_review(db, env["run"], binary_paths=["assets/logo.png"])
+    _refused_push(db, env, "the change adds or modifies binary file(s) the reviewer could not read "
+                           "(assets/logo.png)", "BINARY")
+    record_claude_review(db, env["run"], binary_paths=[])  # near miss: a text-only change publishes
+    _pushed(db, env)
+
+
 # ----------------------------------------------------------------------------- the real review paths bind the head
 @pytest.fixture
 def reviewed_world(db, monkeypatch):
@@ -416,6 +520,42 @@ def test_a_native_fable_review_never_opens_publication(db, monkeypatch):
     assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED"
     res = gate.publication_review(db, w.run, w.run.head_commit)
     assert not res.allowed and res.reason == "MODEL" and OPUS_ONLY in res.message
+
+
+def test_the_package_lists_the_binary_files_and_the_gate_refuses_them(db, monkeypatch):
+    FakeWorkforce().install(monkeypatch)
+    monkeypatch.setattr(review, "DEFAULT_REVIEW_MODEL", "opus")
+    w = make_world(db)
+    record_verification(db, w, changed=["backend/extra.py", "assets/logo.png", "assets/old.png"],
+                        numstat={"backend/extra.py": {"added": 1, "deleted": 0},
+                                 "assets/logo.png": {"added": None, "deleted": None},
+                                 "assets/old.png": {"added": None, "deleted": None}})
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload(), model=OPUS)).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    binding = gate.review_binding(db, out.review)
+    assert binding is not None and binding.binary_paths == ("assets/logo.png", "assets/old.png")
+    res = gate.publication_review(db, w.run, w.run.head_commit)
+    assert not res.allowed and res.reason == "BINARY" and "(assets/logo.png, assets/old.png)" in res.message
+
+
+def test_a_package_built_without_the_diff_evidence_is_refused(db, reviewed_world, monkeypatch, settings):
+    """M2: a DIFF evidence that fails its content hash gives the reviewer an empty excerpt - recorded, refused."""
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.verification.verifier import latest_report, related_evidence
+
+    w = reviewed_world
+    diff_ev = related_evidence(db, latest_report(db, w.run.id), "DIFF")
+    stored = settings.layout.root / diff_ev.location
+    stored.write_bytes(stored.read_bytes() + b"tampered")
+    assert isinstance(db.get(EvidenceArtifact, diff_ev.id), EvidenceArtifact)
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload(), model=OPUS)).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    binding = gate.review_binding(db, out.review)
+    assert binding is not None and binding.diff_available is False and binding.diff_truncated is False
+    res = gate.publication_review(db, w.run, w.run.head_commit)
+    assert not res.allowed and res.reason == "DIFF_UNAVAILABLE", res
 
 
 def test_a_manual_package_review_keeps_the_binding(db, reviewed_world, monkeypatch):

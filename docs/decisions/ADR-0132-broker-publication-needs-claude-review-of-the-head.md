@@ -44,8 +44,14 @@
    for) through its own checkpoint package evidence: `REVIEW_PACKAGE`, trusted, of this run, whose `environment`
    carries this review's `package_hash` and `target_hash` and names that head as `commit`, and whose stored package
    (read only while its bytes match the recorded hash) names the same head; a package that showed the reviewer the
-   whole diff (its `diff_truncated` flag is false: the reviewer sees at most `DIFF_EXCERPT_CHARS`, 60,000 characters,
-   so a larger change is split into smaller tasks); a PASS verdict (`PASS-STATIC` or better) that its own
+   whole diff: `diff_available` true (amendment, delta review: a DIFF evidence that was missing or failed its content
+   hash used to give the reviewer an empty excerpt; the package now records it and the gate refuses,
+   `DIFF_UNAVAILABLE`), `diff_truncated` false (the reviewer sees at most `DIFF_EXCERPT_CHARS`, 60,000 characters, so a
+   larger change is split into smaller tasks, `TRUNCATED`) and `binary_paths` empty (added or modified files git
+   marks binary, numstat `-`, one rule `scope.binary_changed_paths` shared with the verifier's binary secret scan;
+   deletions do not count; a binary change is refused, `BINARY`, rather than shown as raw bytes - the owner adds such
+   files outside a worker run). A package missing any of these fields, or with a non-boolean or non-list value, is
+   not bound (`UNBOUND`); a PASS verdict (`PASS-STATIC` or better) that its own
    HIGH/CRITICAL findings do not contradict (`clamp_verdict`, the rule the review was recorded with); answered by an
    **Opus** model: the resolved model's family must be in `PUBLICATION_REVIEWER_FAMILIES` (`opus` only), whatever the
    review requested, so a Fable request never validates itself (owner rule 2026-10-28: the checkpoint review is Opus,
@@ -64,11 +70,27 @@
    committed by itself is refused (`REVIEW_REQUIRED`, reason `HISTORY`, "...worker-made commits are never published:
    run the task again"), audited, outbox FAILED, nothing pushed; so is a run without a recorded base. The check runs
    in the broker's private mirror after the commit-identity check (whose codes stay first for identity problems) and
-   before the push. A PR is opened only for a branch the broker pushed after this check.
+   before the push. A PR is opened only for a branch the broker pushed after this check (amendment, delta review):
+   GitHub and Bitbucket PR creation first require a SUCCEEDED push record of this run, repository, branch and exactly
+   the run's head (`require_pushed_head`, reason `NOT_PUSHED`, before any grant, credential or request), and the head
+   the provider reports for the created PR must be that head (a prefix for Bitbucket's abbreviated hash); otherwise
+   the PR is not counted (`HEAD_MISMATCH`, outbox FAILED).
+   **What the reviewer saw (amendment, delta review).** A worker-written `.gitattributes` (`* -diff`, even nested
+   inside its allowed paths) turned every file into "Binary files differ" in the verifier's diff, so the excerpt
+   stayed small and complete while showing nothing. `GitReader.diff_run` now reads attributes from the empty tree
+   (`--attr-source=<empty tree>`) for the verifier's diff, numstat and changed-file reads: no attribute of the work
+   tree, index, candidate or base can shape what the reviewer sees, and only git's own content check marks a file
+   binary. The empty tree rather than the run's base: a base attribute (a `-diff` lockfile) hides content just the
+   same. `--attr-source` needs git 2.40 or newer and the minimum git version is not pinned; an older git refuses the
+   option and the verifier's diff fails closed with a message naming the version, never a silent fall-back (a
+   version-independent empty work tree and index did not stop git from applying the attributes, measured with git
+   2.50). `**/.gitattributes` is also a generic protected path (special review). The runtime's own patch evidence
+   (`workspace.collect_changes`) is not the reviewer's input and is unchanged.
 4. **Refusal.** `PolicyDenied` code `REVIEW_REQUIRED`, message `no Claude review PASS for head <sha12>: <why>`, details
-   `reason` (NO_HEAD, NO_REVIEW, NOT_CLAUDE, NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, TRUNCATED, NOT_PASS, FINDINGS,
-   MODEL, REVIEW_GATE_UNAVAILABLE; HISTORY from the push), `head_commit`, `review_id`, `reviewed_head`, `verdict`. An
-   audit record `broker.<operation>` DENIED carries the same. For every reason but HISTORY nothing is pushed, no grant
+   `reason` (NO_HEAD, NO_REVIEW, NOT_CLAUDE, NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, DIFF_UNAVAILABLE, TRUNCATED,
+   BINARY, NOT_PASS, FINDINGS, MODEL, REVIEW_GATE_UNAVAILABLE; HISTORY from the push; NOT_PUSHED from PR creation),
+   `head_commit`, `review_id`, `reviewed_head`, `verdict`. An audit record `broker.<operation>` DENIED carries the
+   same. For every reason but HISTORY nothing is pushed, no grant
    is consumed, no credential is read (HISTORY is decided in the mirror, after the grant and the remote read; nothing
    is pushed). The verification module missing refuses too (fail closed). Delivery keeps the code (`OWNER_RULE_CODES`), so
    `prepare-pr` answers `REVIEW_REQUIRED` instead of a generic broker failure, and the audit row persists.
@@ -83,8 +105,10 @@
    `prepare-pr` needs the owner's session. Amendment 2026-10-28 (blind review): the `worktree` strategy, the default
    for user projects, shares the owner's repository config with its remotes, and OpenSSH finds the OS account's
    `~/.ssh` whatever HOME says; so git in the worker environment (process sandbox and container,
-   `processes.GIT_NO_REMOTE_ENV`) now refuses every remote transport: `GIT_ALLOW_PROTOCOL=file` (also
-   `protocol.allow=never` with `protocol.file.allow=always`), `GIT_SSH_COMMAND` and `core.sshCommand`, `GIT_ASKPASS`,
+   `processes.GIT_NO_REMOTE_ENV`) now refuses every remote transport: `protocol.allow=never` with
+   `protocol.file.allow=user` (git's default for file: a local path the worker names works, a file clone git starts
+   on its own, such as a submodule, is refused; `always` or `GIT_ALLOW_PROTOCOL=file` would undo that hardening),
+   `GIT_SSH_COMMAND` and `core.sshCommand`, `GIT_ASKPASS`,
    `SSH_ASKPASS` and `core.askPass` set to a command that fails, `credential.helper` emptied, prompts off - as
    command-line config, which outranks the repository's. Tested with an ssh-style remote served by a fake ssh (never
    the owner's key): the owner's push works, the worker's push is refused and the fake ssh never runs. This is

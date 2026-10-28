@@ -97,6 +97,9 @@ GENERIC_RESTRICTED_AREAS: tuple[str, ...] = (
     "**/kubernetes/**",
     "**/helm/**",
     "**/.claude/**",
+    # owner rule R44 (ADR-0132): attributes decide what a diff shows (``* -diff`` hides a change from the reviewer);
+    # the verifier reads none of them, and a candidate that changes one goes to special review
+    "**/.gitattributes",
 )
 
 GENERIC_PROTECTED_PATHS: tuple[str, ...] = GENERIC_TRUSTED_PATHS + GENERIC_RESTRICTED_AREAS

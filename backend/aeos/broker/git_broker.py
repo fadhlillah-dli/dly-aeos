@@ -500,6 +500,41 @@ def guard_outbound_text(session: Session, run: WorkerRun, *, action: str, where:
         raise PolicyDenied(message, code="AI_ATTRIBUTION_IN_TEXT", details=details)
 
 
+def require_pushed_head(session: Session, run: WorkerRun, *, repo: str, branch: str, provider: str,
+                        action: str) -> None:
+    """Owner rule R44 (ADR-0132): a pull request is opened only for a branch the broker itself pushed with exactly the
+    run's head - the push is where the pushed history is checked against what the reviewer saw (``HISTORY``). Without
+    a SUCCEEDED push record of this run, repository, branch and head: ``PolicyDenied(REVIEW_REQUIRED)``, reason
+    ``NOT_PUSHED``, audited, before any grant, credential or request."""
+    head = run.head_commit or ""
+    rows = session.scalars(select(BrokerSideEffect).where(BrokerSideEffect.run_id == run.id,
+                                                          BrokerSideEffect.kind == "PUSH_BRANCH",
+                                                          BrokerSideEffect.status == "SUCCEEDED"))
+    for se in rows:
+        t = se.target or {}
+        if (head and se.commit_sha == head and t.get("repo") == repo and t.get("branch") == branch
+                and str(t.get("provider") or cid.GITHUB) == provider):
+            return
+    message = (f"no reviewed push of head {head[:12] or 'NONE'} to {repo}:{branch}: NOT_PUSHED - the broker has no "
+               "successful push of exactly this head (the push checks the history the reviewer saw); push the branch "
+               "through the broker first")
+    details = {"reason": "NOT_PUSHED", "head_commit": head, "repo": repo, "branch": branch, "provider": provider}
+    audit.record(session, actor_type="service", actor_id="broker", action=action, result="DENIED", target_type="run",
+                 target_id=run.id, project_id=run.project_id, domain=run.domain, reason=message[:500],
+                 details={"code": REVIEW_REQUIRED, **details})
+    raise PolicyDenied(message, code=REVIEW_REQUIRED, details=details)
+
+
+def pr_head_mismatch(run: WorkerRun, observed: str | None) -> str | None:
+    """Why the head a provider reports for a just-created PR is not the run's reviewed head (None = it is, or the
+    provider named none). Bitbucket reports an abbreviated hash: a prefix of the head matches."""
+    head = run.head_commit or ""
+    if not observed or (head and head.startswith(str(observed))):
+        return None
+    return (f"HEAD_MISMATCH: the pull request's head {str(observed)[:12]} is not the reviewed head {head[:12]} "
+            "(the branch moved after the broker's push); the PR is not counted")
+
+
 def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: str | None, work_root: Path,
                      commit_policy: CommitPolicy, expected_head: str | None = None,
                      basic_user: str = GITHUB_GIT_USER, reviewed_base: str | None = None) -> dict[str, Any]:
@@ -733,6 +768,8 @@ def create_pull_request(
     # Owner rule (AGENTS.md invariant 11): no AI attribution in what lands on GitHub - refused, never stripped.
     guard_outbound_text(session, run, action="broker.github.create_pr", where="GitHub pull request",
                         texts={"title": title, "body": body})
+    require_pushed_head(session, run, repo=repo_full_name, branch=head, provider=cid.GITHUB,
+                        action="broker.github.create_pr")
     target = {"repo": repo_full_name, "head": head, "base": base}
     grant = _require_grant(session, run, "PR_CREATE", target)
     _interlock(session, run, provider="github-repo", operation="create_pr", target=target, grant=grant)
@@ -777,6 +814,10 @@ def create_pull_request(
             detail = "timeout; reconciled" if pr else "timeout; outcome UNKNOWN until reconciled"
         except httpx.HTTPError as exc:
             detail = type(exc).__name__
+    observed = ((pr or {}).get("head") or {}).get("sha") if isinstance((pr or {}).get("head"), dict) else None
+    mismatch = pr_head_mismatch(run, observed) if outcome == "SUCCEEDED" else None
+    if mismatch:
+        outcome, detail = "FAILED", mismatch
     se.status = outcome
     if pr:
         se.external_id = str(pr.get("number"))

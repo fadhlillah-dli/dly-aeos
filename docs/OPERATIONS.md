@@ -864,15 +864,21 @@ right to commit, push, let alone merge, as the architecture says.
   runtime's single candidate commit on the run's base: the history that leaves is the diff the reviewer saw.
 * **Refusal.** `REVIEW_REQUIRED`: "no Claude review PASS for head <sha12>: <why>", audited as `broker.<operation>`
   DENIED with `details.reason`: `NO_REVIEW`, `OTHER_HEAD` (the review covers an older head: a worker commit came
-  after it), `TRUNCATED` (the package cut the diff: split the task into smaller ones), `HISTORY` (worker-made
+  after it), `TRUNCATED` (the package cut the diff: split the task into smaller ones), `BINARY` (a binary file was
+  added or changed: add it yourself outside the worker run), `DIFF_UNAVAILABLE` (the diff evidence was missing or
+  tampered when the package was built: verify again), `NOT_PUSHED` (PR creation before the broker pushed exactly this
+  head), `HISTORY` (worker-made
   commits between the base and the head, or no recorded base: run the task again), `NOT_PASS`, `FINDINGS`, `MODEL`
   (not Opus, or not the policy's identity), `NOT_COMPLETED` (waiting for quota or a manual result), `MOCK`,
   `NOT_CLAUDE`, `UNBOUND` (no intact checkpoint package binding), `NO_HEAD`, `REVIEW_GATE_UNAVAILABLE`. `prepare-pr`
   answers with the same code. Remedy: request the review of the current head and publish after its PASS; a FAIL
   verdict goes to a repair attempt, never to publication.
-* **Worker git.** Git in a worker's environment refuses every remote transport (only `file` is allowed; ssh and
-  askpass are a failing command; the credential helper is emptied), whatever the shared repository config of a
-  `worktree` candidate says.
+* **Worker git.** Git in a worker's environment refuses every remote transport (only `file`, with git's `user`
+  default; ssh and askpass are a failing command; the credential helper is emptied), whatever the shared repository
+  config of a `worktree` candidate says.
+* **What the reviewer sees.** The verifier's diff ignores every `.gitattributes` (it needs git 2.40 or newer; an older
+  git fails the verification with a message), so a worker cannot hide a change as "binary"; a `.gitattributes`
+  change itself goes to special review.
 
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 

@@ -13,8 +13,11 @@ package) is all of:
   the trusted collector for this run; evidence is append-only) carries the head the reviewer saw in
   ``environment.commit`` and in the stored package itself (read only while its bytes match the recorded hash), and
   the review's own package hash and artifact hash - a review of an older head never covers a newer one;
-* of a package that showed the reviewer the whole diff: a package whose diff excerpt was truncated
-  (``diff_truncated``, more than ``DIFF_EXCERPT_CHARS``) never counts - the task is split instead;
+* of a package that showed the reviewer the whole diff: the diff evidence was readable (``diff_available``; a missing
+  or tampered diff gave the reviewer nothing), the excerpt was not truncated (``diff_truncated``, more than
+  ``DIFF_EXCERPT_CHARS``: the task is split instead), and no added or modified file is binary (``binary_paths``,
+  numstat ``-``: content a line diff cannot show; the verifier's diff reads no ``.gitattributes``, so only git's own
+  content check makes a file binary);
 * a PASS verdict (``PASS_VERDICTS``) that its own HIGH/CRITICAL findings do not contradict (``clamp_verdict``, the
   rule a review is recorded with);
 * answered by an Opus model: the resolved model's family must be in ``PUBLICATION_REVIEWER_FAMILIES`` whatever was
@@ -61,8 +64,8 @@ PUBLICATION_REVIEWER_FAMILIES: frozenset[str] = frozenset({"opus"})
 @dataclass(frozen=True)
 class PublicationReview:
     """The gate's answer for one head. ``reason`` is PASS or why the write is refused: NO_HEAD, NO_REVIEW, NOT_CLAUDE,
-    NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, TRUNCATED, NOT_PASS, FINDINGS, MODEL (the broker adds HISTORY and
-    REVIEW_GATE_UNAVAILABLE)."""
+    NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, DIFF_UNAVAILABLE, TRUNCATED, BINARY, NOT_PASS, FINDINGS, MODEL (the
+    broker adds HISTORY, NOT_PUSHED and REVIEW_GATE_UNAVAILABLE)."""
 
     allowed: bool
     reason: str
@@ -78,16 +81,21 @@ class PublicationReview:
 
 @dataclass(frozen=True)
 class ReviewBinding:
-    """What a checkpoint review provably looked at: the head commit and whether its diff excerpt was cut."""
+    """What a checkpoint review provably looked at: the head commit, whether the diff was there at all, whether its
+    excerpt was cut, and which changed files were binary."""
 
     head: str
     diff_truncated: bool
+    diff_available: bool = True
+    binary_paths: tuple[str, ...] = ()
 
 
 def review_binding(session: Session, rec: ReviewRecord) -> ReviewBinding | None:
     """The head commit a checkpoint review is bound to, from its own checkpoint package evidence: the recorded
     environment and the stored package (verified against its content hash) must name the same head, and the
-    environment must carry this review's package and artifact hash. None = not provably bound (fail closed)."""
+    environment must carry this review's package and artifact hash; the package's ``diff_truncated`` and
+    ``diff_available`` must be booleans and ``binary_paths`` a list of paths (a package without them, from before these
+    fields, does not count). None = not provably bound (fail closed)."""
     if not rec.package_evidence_id:
         return None
     ev = session.get(EvidenceArtifact, rec.package_evidence_id)
@@ -100,13 +108,17 @@ def review_binding(session: Session, rec: ReviewRecord) -> ReviewBinding | None:
         return None
     commit = str(env.get("commit") or "")
     package = collector.read_json(ev)
-    run_part = package.get("run") if isinstance(package, dict) else None
+    if not isinstance(package, dict):
+        return None
+    run_part = package.get("run")
     if not valid_sha(commit) or not isinstance(run_part, dict) or run_part.get("head_commit") != commit:
         return None
-    truncated = package.get("diff_truncated") if isinstance(package, dict) else None
-    if not isinstance(truncated, bool):
+    truncated, available, binary = (package.get("diff_truncated"), package.get("diff_available"),
+                                    package.get("binary_paths"))
+    if not isinstance(truncated, bool) or not isinstance(available, bool) or not isinstance(binary, list) \
+            or not all(isinstance(b, str) for b in binary):
         return None
-    return ReviewBinding(head=commit, diff_truncated=truncated)
+    return ReviewBinding(head=commit, diff_truncated=truncated, diff_available=available, binary_paths=tuple(binary))
 
 
 def reviewed_head(session: Session, rec: ReviewRecord) -> str | None:
@@ -147,9 +159,18 @@ def publication_review(session: Session, run: WorkerRun, head_commit: str | None
     if bound != head:
         return refuse("OTHER_HEAD", f"the latest Claude checkpoint review covers head {bound[:12]}, not this head; "
                                     "request a review of this head", rec, bound)
+    if not binding.diff_available:
+        return refuse("DIFF_UNAVAILABLE", "the reviewer saw no diff (the verifier's diff evidence was missing or "
+                                          "failed its content hash when the package was built); verify the run again "
+                                          "and request a new review", rec, bound)
     if binding.diff_truncated:
         return refuse("TRUNCATED", "the reviewer saw only part of the diff (the checkpoint package excerpt was "
                                    "truncated); split the task into smaller changes and review each one", rec, bound)
+    if binding.binary_paths:
+        shown = ", ".join(binding.binary_paths[:5]) + (" ..." if len(binding.binary_paths) > 5 else "")
+        return refuse("BINARY", f"the change adds or modifies binary file(s) the reviewer could not read ({shown}); "
+                                "replace them with reviewable text or add them yourself outside the worker run", rec,
+                      bound)
     if rec.verdict not in PASS_VERDICTS:
         return refuse("NOT_PASS", f"the latest Claude checkpoint review verdict is {rec.verdict}", rec, bound)
     clamped, _notes = clamp_verdict(rec.verdict, has_controlled_evidence=True, has_staging_evidence=True,

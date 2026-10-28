@@ -88,8 +88,8 @@ graders or held-out tests").
 The canonical list lives in `backend/aeos/core/protected_paths.py` (compiler, runtime and verifier
 import it; `tests/unit/test_protected_paths.py` keeps it equal to this section). For every managed
 project the trusted pipeline/grader/policy/agent-config paths (`opencode.json`, `.opencode/**`,
-`AGENTS.md`, `CLAUDE.md`, CI files) and the restricted areas (IaC, IAM, secrets, deploy targets) are
-quarantined as well.
+`AGENTS.md`, `CLAUDE.md`, CI files) and the restricted areas (IaC, IAM, secrets, deploy targets, and
+`**/.gitattributes`, which decides what a diff shows the reviewer, ADR-0132) are quarantined as well.
 
 ## Engineering conventions
 

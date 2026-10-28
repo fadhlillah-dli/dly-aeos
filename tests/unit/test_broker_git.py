@@ -18,7 +18,7 @@ from aeos.core.errors import Blocked, PolicyDenied, ValidationFailed
 from aeos.models.audit import AuditEvent
 from aeos.models.broker_ext import BrokerSideEffect
 from aeos.models.workforce import WorkerRun
-from tests.unit.review_gate_support import record_claude_review
+from tests.unit.review_gate_support import record_claude_review, record_push
 from tests.unit.test_workforce_support import FakeModules, init_git_repo, make_project
 
 BRANCH = "aeos/task-a-1234abcd"
@@ -192,6 +192,7 @@ def _pr_env(db, monkeypatch, secrets_memory, repo_env, *, interlock=True):
     secrets_memory.put("personal/github", TOKEN, actor="test")
     _grant(db, repo_env["run"], kind="PR_CREATE", scope={"repo": "owner/repo", "head": BRANCH, "base": "main"},
            max_requests=3)
+    record_push(db, repo_env["run"], repo="owner/repo")  # the broker pushed this head first (ADR-0132)
     return fk
 
 

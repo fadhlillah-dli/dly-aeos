@@ -391,6 +391,7 @@ class GitReader:
         self.repo = repo
         self.timeout = timeout
         self.env = git_env()
+        self._empty_tree: str | None = None
 
     def _args(self, *args: str) -> list[str]:
         return [
@@ -432,8 +433,34 @@ class GitReader:
     def is_ancestor(self, base: str, head: str) -> bool:
         return self.run("merge-base", "--is-ancestor", base, head, check=False).returncode == 0
 
+    def empty_tree(self) -> str:
+        """The empty tree of this repository's hash algorithm (git knows it without storing it)."""
+        if self._empty_tree is None:
+            self._empty_tree = self.run("hash-object", "-t", "tree", "--stdin").stdout.decode().strip()
+        return self._empty_tree
+
+    def diff_run(self, *args: str) -> subprocess.CompletedProcess[bytes]:
+        """``git diff`` of two commits whose output no ``.gitattributes`` can shape (owner rule R44, ADR-0132).
+
+        Attributes are read from the empty tree (``--attr-source``), not from the candidate's work tree, index or
+        commits: a worker-written ``* -diff`` (even nested, inside its allowed paths) would otherwise turn every file
+        into "Binary files differ" and hide the change from the reviewer, and a base attribute can hide a file just
+        as well. Git's own content check still marks real binary files (numstat ``-``). ``--attr-source`` needs
+        git 2.40 or newer; an older git refuses the option and the diff fails (fail closed), never silently falls
+        back to the candidate's attributes."""
+        cp = self.run(f"--attr-source={self.empty_tree()}", *args, check=False)
+        if cp.returncode != 0:
+            err = redact_text(cp.stderr.decode("utf-8", "replace"))
+            if "attr-source" in err:
+                raise GitError("this git cannot read attributes from a fixed tree (--attr-source, git >= 2.40): "
+                               "the diff could be shaped by the candidate's .gitattributes, so it is refused; "
+                               "update git")
+            raise GitError(f"git diff failed: {err[:500]}")
+        return cp
+
     def changed_files(self, base: str, head: str) -> list[tuple[str, str]]:
-        raw = self.run("diff", "--name-status", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", base, head).stdout
+        raw = self.diff_run("diff", "--name-status", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", base,
+                            head).stdout
         parts = raw.decode("utf-8", "surrogateescape").split("\x00")
         out: list[tuple[str, str]] = []
         i = 0
@@ -445,7 +472,8 @@ class GitReader:
         return out
 
     def numstat(self, base: str, head: str) -> dict[str, dict[str, int | None]]:
-        raw = self.run("diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", base, head).stdout
+        raw = self.diff_run("diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", base,
+                            head).stdout
         stats: dict[str, dict[str, int | None]] = {}
         for rec in raw.decode("utf-8", "surrogateescape").split("\x00"):
             if not rec.strip():
@@ -459,7 +487,8 @@ class GitReader:
         return stats
 
     def diff_bytes(self, base: str, head: str) -> bytes:
-        return self.run("diff", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", base, head).stdout
+        return self.diff_run("diff", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", base,
+                             head).stdout
 
     def export_tree(self, commit: str, dest: Path, *, max_bytes: int) -> dict[str, object]:
         """Materialise exactly the blobs of *commit* into *dest* (no attributes/filters/hooks)."""

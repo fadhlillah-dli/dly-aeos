@@ -58,8 +58,10 @@ from aeos.broker.git_broker import (
     commit_policy,
     guard_outbound_text,
     http_client,
+    pr_head_mismatch,
     push_from_mirror,
     refuse_push,
+    require_pushed_head,
     validate_branch,
     validate_remote_url,
 )
@@ -348,6 +350,8 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
     # Owner rule (AGENTS.md invariant 11): no AI attribution in what lands on Bitbucket - refused, never stripped.
     guard_outbound_text(session, run, action="broker.bitbucket.create_pr", where="Bitbucket pull request",
                         texts={"title": title, "description": body})
+    require_pushed_head(session, run, repo=repo_full_name, branch=head, provider=PROVIDER,
+                        action="broker.bitbucket.create_pr")
     target = {"provider": PROVIDER, "repo": repo_full_name, "head": head, "base": base}
     grant = _require_grant(session, run, "PR_CREATE", {"repo": repo_full_name, "head": head, "base": base})
     _interlock(session, run, provider=PROVIDER, operation="create_pr", target=target, grant=grant)
@@ -382,6 +386,10 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
                     outcome, detail = "SUCCEEDED", "reconciled existing PR before retry (no second POST)"
         if pr is None and outcome != "UNKNOWN":
             pr, outcome, detail = _post_pr(client, api_base, repo_full_name, head, base, headers, payload)
+    observed = str((((pr or {}).get("source") or {}).get("commit") or {}).get("hash") or "") or None
+    mismatch = pr_head_mismatch(run, observed) if outcome == "SUCCEEDED" else None
+    if mismatch:
+        outcome, detail = "FAILED", mismatch
     se.status = outcome
     if pr:
         se.external_id = str(pr.get("id"))

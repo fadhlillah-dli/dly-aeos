@@ -38,7 +38,7 @@ from aeos.models.planning import Plan, PlanVersion, TaskSpec
 from aeos.models.portfolio import Project, ProjectIntegration, RepositoryReference
 from aeos.models.workforce import WorkerRun
 from tests.conftest import create_admin
-from tests.unit.review_gate_support import record_claude_review
+from tests.unit.review_gate_support import record_claude_review, record_push
 from tests.unit.test_workforce_support import init_git_repo
 
 REPO = "company_ws/svc"  # the underscore is valid for a Bitbucket workspace, invalid as a GitHub owner
@@ -477,6 +477,7 @@ def test_reconcile_and_readiness_refuse_a_target_the_company_did_not_approve(db,
                                                                             monkeypatch):
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -668,6 +669,7 @@ def test_push_credential_never_goes_to_another_host_or_repository(db, office_run
 def test_draft_pr_is_created_once_behind_the_interlock(db, office_run):
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         route = mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={
             "id": 5, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/5"}},
@@ -688,6 +690,7 @@ def test_draft_pr_is_created_once_behind_the_interlock(db, office_run):
 def test_pr_timeout_is_reconciled_or_unknown_and_reconcile_is_read_only(db, office_run):
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -710,6 +713,7 @@ def test_pr_retry_after_unknown_reads_first_and_never_posts_a_second_pr(db, offi
     an unreadable provider keeps it UNKNOWN without a POST, an existing PR is adopted without a POST."""
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -744,6 +748,7 @@ def test_reconcile_without_company_authorisation_never_reads_the_office_credenti
 
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -924,3 +929,30 @@ def test_bitbucket_push_and_pr_need_a_claude_pass_of_the_head(db, office_run, se
                                         title="t", body="b")
         assert route.called
     assert pr["ok"] and pr["head_sha"] == run.head_commit
+
+
+def test_bitbucket_pr_needs_a_recorded_push_of_exactly_this_head(db, office_run, secrets_memory, monkeypatch):
+    """ADR-0132 decision 3: a PR is opened only for a branch the broker pushed with this head (the push is where the
+    reviewed history is checked) - and a PR whose reported head is another commit is not counted."""
+    run = office_run["run"]
+    _grants(db, run)
+    reads = _count_secret_reads(monkeypatch, secrets_memory)
+    record_push(db, run, repo=REPO, provider="bitbucket", head="0" * 40)  # another head
+    record_push(db, run, repo=REPO, head=run.head_commit)  # this head, but a GitHub push record
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as e:
+            broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main", title="t",
+                                       body="b")
+        assert not mock.calls
+    assert e.value.code == "REVIEW_REQUIRED" and e.value.details["reason"] == "NOT_PUSHED"
+    assert f"no reviewed push of head {run.head_commit[:12]} to {REPO}:{BRANCH}: NOT_PUSHED" in e.value.message
+    assert reads == []
+    record_push(db, run, repo=REPO, provider="bitbucket")  # near miss: the broker's push of exactly this head
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={
+            "id": 8, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/8"}},
+            "source": {"commit": {"hash": "abcdef123456"}}}))
+        moved = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                           title="t", body="b")
+    assert not moved["ok"] and moved["status"] == "FAILED"
+    assert moved["error"].startswith("HEAD_MISMATCH: the pull request's head abcdef123456 is not the reviewed head")
