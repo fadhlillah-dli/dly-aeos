@@ -142,6 +142,7 @@
     "GET /api/secrets/status",
     "GET /api/tasks/{task_id}/admission",
     "GET /api/tasks/{task_id}/investigation",
+    "GET /api/usage/report",
     "GET /api/verification/asvs",
     "GET /api/verification/summary",
     "GET /api/worker-runtime/containment",

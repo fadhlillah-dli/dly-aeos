@@ -8,6 +8,7 @@ only to already-approved routes; no silent paid fallback or supervisor downgrade
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -137,6 +138,14 @@ def note_free_tier_rate_limited(session: Session, *, route_key: str, retry_after
 
     return impl(session, route_key=route_key, retry_after_seconds=retry_after_seconds, headers=headers, run_id=run_id,
                 source=source)
+
+
+def free_tier_status(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
+    """The OpenRouter free-model limits in force and this instance's count of ``:free`` requests (last minute, current
+    UTC day), with its state OK / LIMIT_REACHED. Read-only (additive, owner request R34 usage report)."""
+    from aeos.routing.free_tier import status as impl
+
+    return impl(session, now=now)
 
 
 def free_tier_count_lock(session: Session) -> bool:

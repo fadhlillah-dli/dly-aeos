@@ -63,6 +63,7 @@ that does not read it, when its "Source" does not match its readers, and when a 
 |---|---|---|---|---|
 | `AEOS_CANDIDATE_BUILD` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a candidate build. If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
 | `AEOS_CAPABILITY_TOKEN` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a process that holds a worker capability token (the name is listed, never a value). If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
+| `AEOS_CCUSAGE_EXPORT_PATH` | Settings field | `Settings` | unset (the usage report states that Claude Max use is measured by ccusage outside AEOS) | Path of an optional `ccusage daily --json` export file. `aeos usage report` only reads it and shows its token totals for the month, never a dollar figure; a missing or unreadable file is reported as FAILED (see "Usage value report") |
 | `AEOS_CLAUDE_BINARY` | Settings field | `Settings` | unset (the `claude` binary on `PATH`) | Path of the official `claude` binary; when set it is the only candidate (an unusable path is reported, `PATH` is not tried) |
 | `AEOS_COMMIT_AUTHOR_EMAIL` | Settings field | `Settings` | unset | Fallback commit e-mail for the **github** identity only; `commit_identities` wins (see "Commit identity and no AI attribution") |
 | `AEOS_COMMIT_AUTHOR_NAME` | Settings field | `Settings` | unset | Fallback commit name for the **github** identity only |
@@ -324,6 +325,27 @@ git-subprocess tests with a fake build runner and a fake failing rename ran on m
 compared); a `git pull` that changes only `frontend/` while the server runs is not shown by the banner (the served
 bundle is unchanged until the restart rebuilds it; the `post-merge` hook and `runtime.frontend_fresh` report it); the
 banner is proven by component tests with a mocked health response, not in a browser against a real rebuild.
+
+## Usage value report (owner request R34)
+
+`aeos usage report [--month YYYY-MM] [--json]` · `GET /api/usage/report?month=YYYY-MM`. Read-only: it adds, changes
+and deletes nothing and calls no network. Scope is PERSONAL only; an OFFICE session gets 403
+`USAGE_REPORT_PERSONAL_ONLY`. The month is a calendar month in UTC (default: the current one). It answers whether the
+two $10 plans are used well, from records AEOS already keeps:
+
+| Part | What it shows (computed from) |
+|---|---|
+| OpenCode Go | Per SUBSCRIPTION route: allowance used in the trailing 5h window, the trailing week (both for the current month only) and the month, against the window's limit (seeded monthly allowance x 20 %, 50 %, 100 %), in percent; the plan fee once; allowance used per fee dollar; WORKER routes never used in the month (usage ledger: the recorded `usage.opencode.allowance`, else the cost module's estimate) |
+| OpenRouter | `:free` requests counted today (UTC) against the daily cap; paid spend per route and per role, actual, estimate and UNKNOWN apart (usage ledger, worker runs); the GLOBAL and `openrouter/*` ROUTE budgets (limit, spent, held, remaining) and the key limit from the last `aeos routes refresh` |
+| Work | Tasks and runs per role; verifier pass rate per (route, role) (NOT_RUN is undecided, NOT_PROVEN is not a pass); escalation and overflow events of the paid admission (`NO_EVENTS` when none happened or that change is not installed); median run wall-clock and plan wall-clock per plan |
+| Claude | States that Claude Max token use is measured by ccusage outside AEOS. With `ccusage_export_path` set (`AEOS_CCUSAGE_EXPORT_PATH`), the token totals of that export for the month (an ESTIMATE, never dollars); beside it the NATIVE_CLAUDE rows AEOS recorded itself |
+
+Limits: AEOS counts only the calls made through this instance, so the provider's own count can be higher; the Go
+month is the calendar month, not the provider's billing cycle. The GLOBAL and ROUTE budget figures and the key limit
+cover every domain, so the API shows them only to a principal who can see every domain (the same rule as
+`GET /api/budgets`); the ccusage totals follow the same rule. Only route keys, role keys, plan ids, counts and
+amounts are output: no task text, error text, event payload or secret. Proven by unit tests on macOS arm64;
+NOT-PROVEN on Windows and Intel macOS until CI runs them.
 
 ## SLIs and alerts
 
