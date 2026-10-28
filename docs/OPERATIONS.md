@@ -543,7 +543,9 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   nothing else rejects and once per reference and eligibility call, never a value read and never a provider call;
   loopback LOCAL and `claude-native` routes need no key. Doctor: `route.registry` names the active routes kept out ("Dikecualikan: kunci belum disimpan");
   `route.worker_key` lists them as a non-blocking note while another route is eligible (both remedies: store the
-  key, or `aeos routes disable <key> --reason "..."`) and stays MISSING when no route is left. Storing or deleting a
+  key, or `aeos routes disable <key> --reason "..."`) and stays MISSING when no route is left. With no route left,
+  `route.registry` names the cause: a sealed or unreachable store gives UNKNOWN `SECRET_STORE_UNAVAILABLE` (restore
+  the store; no route needs activating), keyless active routes give the store-the-key remedy. Storing or deleting a
   `workers/*` or `personal/openrouter` key marks both checks STALE. Route activation and disable emit
   `route.activated` / `route.disabled` once from the routing service, so the CLI and the API record the same event.
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111; WORKER too):** activate the free (or local, or flat-fee

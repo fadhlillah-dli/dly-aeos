@@ -426,6 +426,7 @@ CREDENTIAL_ABSENT = "ABSENT"
 CREDENTIAL_STORE_UNAVAILABLE = "STORE_UNAVAILABLE"
 _STORE_KEY = "\0store"  # memo entry: the store already failed once in this eligibility call
 _NOT_STORED = re.compile(r"^credential (\S+) not stored: aeos secrets set \S+")
+_STORE_UNAVAILABLE = re.compile(r"^credential (\S+) cannot be checked: secret store unavailable")
 
 
 def credential_state(ref: str, states: dict[str, str] | None = None) -> str:
@@ -454,6 +455,13 @@ def credential_state(ref: str, states: dict[str, str] | None = None) -> str:
 def unstored_credential_ref(reason: str) -> str | None:
     """The reference named by a ``credential <ref> not stored: ...`` rejection reason, else None."""
     m = _NOT_STORED.match(reason or "")
+    return m.group(1) if m else None
+
+
+def store_unavailable_credential_ref(reason: str) -> str | None:
+    """The reference named by a ``credential <ref> cannot be checked: secret store unavailable`` rejection (the store
+    is sealed, unreachable or unknown, so the key's presence is not known), else None."""
+    m = _STORE_UNAVAILABLE.match(reason or "")
     return m.group(1) if m else None
 
 

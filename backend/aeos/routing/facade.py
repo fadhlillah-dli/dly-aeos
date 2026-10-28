@@ -149,3 +149,11 @@ def unstored_credential_ref(reason: str) -> str | None:
     from aeos.routing.service import unstored_credential_ref as impl
 
     return impl(reason)
+
+
+def store_unavailable_credential_ref(reason: str) -> str | None:
+    """The secret reference a ``credential <ref> cannot be checked: secret store unavailable`` rejection names
+    (additive, 2026-10-28): the store could not say whether the route's key is stored. None for any other reason."""
+    from aeos.routing.service import store_unavailable_credential_ref as impl
+
+    return impl(reason)

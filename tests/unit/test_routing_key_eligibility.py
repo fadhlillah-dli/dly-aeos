@@ -142,7 +142,25 @@ def test_bite_b_every_active_route_keyless_stays_missing(routes, settings, monke
     assert key.remedy is not None and f"routes disable {DS}" in key.remedy.operation
     reg = route_registry(_ctx(routes, settings))
     assert reg.status == "MISSING" and "Dikecualikan: kunci belum disimpan" in reg.summary
+    assert reg.error_code == "NO_ELIGIBLE_WORKER_ROUTE" and f"kunci belum disimpan: {ZEN_REF}" in reg.summary
+    # the remedy is the key (or disabling the route), not a new and possibly paid activation (review 2026-10-28)
+    assert reg.remedy is not None and reg.remedy.command is not None and f"secrets set {ZEN_REF}" in reg.remedy.command
+    assert f"routes disable {DS}" in reg.remedy.operation and "routes activate" not in reg.remedy.command
+    assert reg.requires_paid_write is False
     assert _can_run_worker(routes, monkeypatch, {"route.worker_key": key, "route.registry": reg}).status == "BLOCKED"
+
+
+def test_near_miss_a_route_rejected_for_another_reason_keeps_the_activation_remedy(routes, settings, monkeypatch,
+                                                                                    secrets_memory):
+    install_fakes(monkeypatch)
+    secrets_memory.put(ZEN_REF, "fake-zen-key-value", actor="test")
+    approve(routes, DS, kind="TRIAL")
+    service.get_route(routes, DS).availability = "MISSING"  # keyed, but gone from the provider catalog
+    routes.flush()
+    reg = route_registry(_ctx(routes, settings))
+    assert reg.status == "MISSING" and reg.error_code == "NO_ELIGIBLE_WORKER_ROUTE", reg.summary
+    assert "missing from the provider catalog" in reg.summary and reg.evidence["excluded_keyless"] == {}
+    assert reg.remedy is not None and "routes activate" in (reg.remedy.command or "")
 
 
 # ------------------------------------------------------------------------------ (c) store sealed/unreachable
@@ -159,6 +177,32 @@ def test_bite_c_a_store_that_cannot_answer_makes_a_keyed_route_ineligible(routes
     assert d.eligible == []
     assert any(f"credential {ZEN_REF} cannot be checked: secret store unavailable" in x and "fail closed" in x
                for x in d.rejected[DS]), d.rejected[DS]
+
+
+def test_bite_c_a_sealed_store_is_named_as_the_cause_in_route_registry(routes, settings, monkeypatch,
+                                                                       openrouter_key_only):
+    """Review 2026-10-28: with the store sealed, route.registry reported NO_ELIGIBLE_WORKER_ROUTE with an INTERNAL
+    data-class example and the paid activate remedy; the cause (the store cannot answer) was not shown."""
+    install_fakes(monkeypatch)
+    _worker(routes)  # keyed: openrouter :free WORKER TRIAL; the key is stored, but the store is now sealed
+    _install_store(monkeypatch, CountingStore({"workers/openrouter"}, down=True))
+    reg = route_registry(_ctx(routes, settings))
+    assert reg.status == "UNKNOWN" and reg.error_code == "SECRET_STORE_UNAVAILABLE", reg.summary
+    assert "secret store tidak tersedia" in reg.summary and FREE in reg.summary and "fail closed" in reg.summary
+    assert "data classification" not in reg.summary  # the example of another class is not the cause
+    assert reg.evidence["excluded_store_unavailable"] == {FREE: "workers/openrouter"}
+    assert reg.evidence["excluded_keyless"] == {}
+    assert reg.requires_paid_write is False and reg.remedy is not None
+    assert "vault unseal" in reg.remedy.operation and "routes activate" not in (reg.remedy.command or "")
+    assert "routes activate" not in reg.remedy.operation
+    key = route_worker_key(_ctx(routes, settings))
+    assert key.status == "MISSING" and key.error_code == "SECRET_STORE_UNAVAILABLE", key.summary
+    assert _can_run_worker(routes, monkeypatch, {"route.worker_key": key, "route.registry": reg}).status == "BLOCKED"
+
+    # near miss: the same store unsealed, nothing else changed -> the route is eligible again
+    _install_store(monkeypatch, CountingStore({"workers/openrouter"}))
+    reg = route_registry(_ctx(routes, settings))
+    assert reg.status == "CONFIGURED" and reg.evidence["excluded_store_unavailable"] == {}, reg.summary
 
 
 def test_one_status_lookup_per_reference_per_eligibility_call(routes, monkeypatch):

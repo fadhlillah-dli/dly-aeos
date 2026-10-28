@@ -97,19 +97,30 @@ def eligible_worker_routes_by_class(session: Any) -> tuple[dict[str, list[str]],
 def keyless_excluded(session: Any, rejected: dict[str, list[str]]) -> dict[str, str]:
     """{route key: missing secret reference} of the ACTIVE (TRIAL/APPROVED) WORKER routes that routing kept out because
     the key they need is not stored (``credential <ref> not stored``). Status lookups only, never a value."""
+    return _active_excluded(session, rejected, "unstored_credential_ref")
+
+
+def store_unavailable_excluded(session: Any, rejected: dict[str, list[str]]) -> dict[str, str]:
+    """{route key: secret reference} of the ACTIVE (TRIAL/APPROVED) WORKER routes that routing kept out because the
+    secret store could not say whether their key is stored (sealed, unreachable or unknown; fail closed)."""
+    return _active_excluded(session, rejected, "store_unavailable_credential_ref")
+
+
+def _active_excluded(session: Any, rejected: dict[str, list[str]], matcher: str) -> dict[str, str]:
     try:
         from aeos.routing import facade as routing
     except (ImportError, ModuleNotFoundError):
         return {}
     from aeos.models.routing import ModelRoute
 
+    match = getattr(routing, matcher)
     active = {k for (k,) in session.execute(select(ModelRoute.route_key).where(
         ModelRoute.pool == "WORKER", ModelRoute.status.in_(("APPROVED", "TRIAL"))))}
     out: dict[str, str] = {}
     for key in sorted(rejected):
         if key not in active:
             continue
-        ref = next((r for r in (routing.unstored_credential_ref(x) for x in rejected[key]) if r), None)
+        ref = next((r for r in (match(x) for x in rejected[key]) if r), None)
         if ref:
             out[key] = ref
     return out
@@ -161,8 +172,12 @@ def route_registry(ctx: CheckContext) -> Outcome:
     evidence["eligible_by_class"] = {c: keys for c, keys in by_class.items() if keys}
     evidence["rejected_decided"] = {k: v[:4] for k, v in rejected.items() if k in decided_keys}
     keyless = keyless_excluded(ctx.session, rejected) if not error else {}
+    store_down = store_unavailable_excluded(ctx.session, rejected) if not error else {}
     evidence["excluded_keyless"] = keyless
+    evidence["excluded_store_unavailable"] = store_down
     excluded_note = (f" Dikecualikan: kunci belum disimpan: {_keyless_text(keyless)}." if keyless else "")
+    if store_down:
+        excluded_note += f" Dikecualikan: secret store tidak tersedia: {_keyless_text(store_down)}."
     activate = Remedy(operation="Evaluasi lalu aktifkan satu route pekerja lewat keputusan manusia (ROUTE_ACTIVATION "
                       "atau TRIAL terikat hash konfigurasi; route berbayar butuh keputusan BUDGET, route langganan "
                       "butuh keputusan BUDGET untuk biaya paket bulanannya)",
@@ -194,12 +209,37 @@ def route_registry(ctx: CheckContext) -> Outcome:
         return Outcome("MISSING", "Belum ada route pekerja APPROVED/TRIAL; kandidat tidak otomatis aktif (§23).",
                        evidence=evidence, error_code="NO_APPROVED_WORKER_ROUTE", remedy=activate,
                        requires_paid_write=bool(paid or subscription))
+    if store_down:
+        # the store cannot answer, so whether the keys are stored is not known: the cause is the store, and the remedy
+        # restores it (no route activation, nothing paid); route.worker_key and secret.status say the same
+        return Outcome("UNKNOWN", f"{decided} route APPROVED/TRIAL tetapi eligibilitasnya tidak dapat dinilai: secret "
+                       f"store tidak tersedia (sealed, tidak terjangkau atau tidak dikenal), status kunci "
+                       f"{_keyless_text(store_down)} tidak dapat dibaca (fail closed).", evidence=evidence,
+                       error_code="SECRET_STORE_UNAVAILABLE", remedy=_store_remedy(store_down))
+    if keyless:
+        # an active route is kept out only for its key: storing it (or disabling the route) is the remedy, not a new
+        # activation; the example names that cause
+        ref = next(iter(keyless.values()))
+        return Outcome("MISSING", f"{decided} route APPROVED/TRIAL tetapi tidak ada yang eligible (kunci belum "
+                       f"disimpan: {ref}).{excluded_note}", evidence=evidence, error_code="NO_ELIGIBLE_WORKER_ROUTE",
+                       remedy=_keyless_remedy(keyless))
     first = next(iter(evidence["rejected_decided"].items()), None)
     why = f" (mis. {first[0]}: {first[1][0]})" if first and first[1] else ""
     return Outcome("MISSING", f"{decided} route APPROVED/TRIAL tetapi tidak ada yang eligible{why}.{excluded_note}",
                    evidence=evidence,
                    error_code="NO_ELIGIBLE_WORKER_ROUTE", remedy=activate,
                    requires_paid_write=bool(paid or subscription))
+
+
+def _store_remedy(store_down: dict[str, str]) -> Remedy:
+    """Restore the secret store; no route change. No single command: sealed and unreachable need different ones, and
+    the precise cause is in secret.status / secret.openbao_health."""
+    return Remedy(operation=f"Pulihkan secret store lalu jalankan ulang Doctor: buka segel OpenBao bila sealed "
+                  f"({aeos_cmd('vault unseal')}), jalankan bila tidak terjangkau ({aeos_cmd('vault start')}); penyebab "
+                  "persisnya ada di secret.status dan secret.openbao_health. Route tidak perlu diaktifkan ulang",
+                  source="SecretProvider (OpenBao / OS credential store, §26)",
+                  target=", ".join(store_down)[:300], privilege="pemilik", cost="tidak ada",
+                  evidence_to_collect="secret.status CONFIGURED, route.registry CONFIGURED")
 
 
 def _non_free_candidates(session: Any) -> tuple[list[str], list[str]]:
