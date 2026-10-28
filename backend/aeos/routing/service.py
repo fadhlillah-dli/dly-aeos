@@ -21,9 +21,17 @@ Fallback: only along the failed route's ``fallback_chain``, only to routes that 
   eligible, same pool, free — never a paid fallback and never a supervisor downgrade.
 Decision C (ADR-0041 amendment 2026-10-26, OpenRouter ``:free`` models only): a ``:free`` route the owner
   moved into WORKER (``set_route_pool``) and re-activated serves PUBLIC PERSONAL worker tasks while it is free
-  (``free_tier``), ranks ahead of every other eligible route, and when only its account-wide rate/daily limit keeps it
-  out, a selection that would land on a route that is not free waits (``FREE_TIER_LIMIT_REACHED``) instead. Any other
-  OpenRouter route keeps the rules above.
+  (``free_tier``), and when only its account-wide rate/daily limit keeps it out, a selection that would land on a
+  route that is not $0 marginal waits (``FREE_TIER_LIMIT_REACHED``) instead. Any other OpenRouter route keeps the rules
+  above.
+Decision C' and best-first (ADR-0124, owner decision 2026-10-28, amends decision C's "free first"): for PUBLIC tasks a
+  SUBSCRIPTION route within its plan ($0 marginal, OpenCode Go) ranks first and the free OpenRouter routes are the
+  fallback; INTERNAL ranking is unchanged (never ``:free``). The ranking is tier -> eval -> the agent's
+  ``route_policy.preferred_routes`` position (it only re-orders routes that already passed every hard filter) ->
+  priority -> key. The first ranked route that ``capacity`` does not skip for load (ROUTE_BUSY, ALLOWANCE_FIT,
+  PUBLIC_SHARE; a cool-down is a limit rejection) serves; after a skip or a limit only a $0-marginal route may serve,
+  otherwise the task waits (``ROUTE_CAPACITY``, or ``FREE_TIER_LIMIT_REACHED`` when a free route is at its limit) -
+  never a paid route.
 """
 
 from __future__ import annotations
@@ -46,11 +54,19 @@ from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.decisions import Decision
+from aeos.models.evidence import EvidenceArtifact
 from aeos.models.planning import TaskSpec
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
 from aeos.routing import free_tier
-from aeos.routing.facade import RouteDecision
+from aeos.routing.facade import (
+    TOOL_PROBE_ANSWERED,
+    TOOL_PROBE_COLLECTOR,
+    TOOL_PROBE_EVIDENCE_KIND,
+    TOOL_PROBE_MARK,
+    TOOL_PROBE_PASS,
+    RouteDecision,
+)
 
 log = logging.getLogger("aeos.routing")
 
@@ -767,6 +783,49 @@ def tool_set_rejections(route: ModelRoute, tools: list[str] | None) -> list[str]
     return [f"TaskSpec tools {missing} outside the route's reviewed tool set {sorted(reviewed)}"] if missing else []
 
 
+def tool_probe_pass(session: Session, route: ModelRoute) -> EvidenceArtifact | None:
+    """The newest trusted tool-call probe PASS bound to the route's CURRENT configuration hash (ADR-0125), else None.
+
+    Only the broker's tool-call probe writes it (``TOOL_PROBE_COLLECTOR``, a trusted ``collector`` origin, LIVE):
+    worker attachments and other evidence never count. The hash is recomputed from the live record, so evidence of an
+    older configuration is never inherited (the same rule as decisions and eval results)."""
+    current = compute_config_hash(route)
+    rows = session.scalars(
+        select(EvidenceArtifact).where(EvidenceArtifact.kind == TOOL_PROBE_EVIDENCE_KIND,
+                                       EvidenceArtifact.subject_type == TARGET_TYPE,
+                                       EvidenceArtifact.subject_id == route.route_key,
+                                       EvidenceArtifact.collector_identity == TOOL_PROBE_COLLECTOR,
+                                       EvidenceArtifact.trusted.is_(True), EvidenceArtifact.mode == "LIVE")
+        .order_by(EvidenceArtifact.created_at.desc()))
+    for ev in rows:
+        env = ev.environment if isinstance(ev.environment, dict) else {}
+        if env.get("probe") != TOOL_PROBE_MARK or env.get("config_hash") != current:
+            continue
+        # The newest answer the model actually gave decides: a later FAIL revokes an earlier PASS. A probe the
+        # provider never answered (rate limit, timeout, unreachable) says nothing about tool use and is skipped.
+        if env.get("outcome", TOOL_PROBE_ANSWERED) != TOOL_PROBE_ANSWERED:
+            continue
+        return ev if env.get("verdict") == TOOL_PROBE_PASS else None
+    return None
+
+
+def tool_capable(session: Session, route: ModelRoute) -> bool:
+    """Contract (b) (ADR-0125): ``supports_tools`` YES, or a tool-call probe PASS for the current configuration."""
+    return route.supports_tools == "YES" or tool_probe_pass(session, route) is not None
+
+
+def tool_probe_recorded(session: Session, *, route_key: str, verdict: str, evidence_id: str | None) -> None:
+    """After a tool-call probe: readiness checks that depend on routes go STALE (eligibility may have changed) and
+    ``route.tool_probe`` is emitted. ``supports_tools`` and the configuration hash are never touched."""
+    route = get_route(session, route_key)
+    notify_readiness(session, route.route_key, reason=f"tool-call probe {verdict}", pool=route.pool)
+    from aeos.events.service import emit
+
+    emit(session, source="routing", kind="route.tool_probe", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"verdict": verdict, "evidence_id": evidence_id,
+                                                    "tool_capable": tool_capable(session, route)})
+
+
 def _unavailable_regions(terms: dict[str, Any]) -> list[str]:
     return [str(x).strip().upper() for x in terms.get("unavailable_regions") or [] if str(x).strip()]
 
@@ -914,8 +973,9 @@ def _route_rejections(
         restriction = terms_restriction(route.data_terms or {}, route.identity_status)
         if restriction:
             reasons.append(f"{restriction}: only PUBLIC data may be sent")
-    if needs_tools and route.supports_tools != "YES":
-        reasons.append(f"tool support {route.supports_tools}: tool use not proven for this route")
+    if needs_tools and not tool_capable(session, route):
+        reasons.append(f"tool support {route.supports_tools}: tool use not proven for this route (no PASS tool-call "
+                       f"probe for its current configuration: aeos broker probe-route --tools {route.route_key})")
     reasons += tool_set_rejections(route, tools)
     if min_context:
         if not route.context_window:
@@ -941,7 +1001,10 @@ def _route_rejections(
     q = quota_exhausted(session, route)
     if q is not None:
         resets = q.resets_at.isoformat() if q.resets_at else "UNKNOWN"
-        limits.append(f"quota EXHAUSTED ({q.scope}, source {q.source}, resets {resets})")
+        cd = (q.details or {}).get("cooldown")
+        cooled = (f"; COOLDOWN after HTTP {(q.details or {}).get('status', 'UNKNOWN')} (streak {cd.get('streak')}): "
+                  "new tasks skip the route, a running attempt stays on it" if isinstance(cd, dict) else "")
+        limits.append(f"quota EXHAUSTED ({q.scope}, source {q.source}, resets {resets}){cooled}")
     counted = free_tier.route_limit_problem(session, route, now=now, observed=False)
     if counted is not None:
         limits.append(counted["reason"])
@@ -982,8 +1045,10 @@ def _eligibility(
     session: Session, *, domain: str, data_classification: str, needs_tools: bool = True,
     min_context: int | None = None, pool: str = "WORKER", tools: list[str] | None = None,
 ) -> tuple[RouteDecision, list[str]]:
-    """The eligibility decision and the decision C routes kept out by a rate/quota limit only (they would serve
-    once the limit resets)."""
+    """The eligibility decision and the $0-marginal routes (decision C free routes, Go routes in a cool-down) kept out
+    by a rate/quota limit only (they would serve once the limit resets)."""
+    from aeos.routing import capacity
+
     _validate_inputs(domain, data_classification, pool)
     office, office_reason = (_office_policy(session) if domain == Domain.OFFICE.value else (None, ""))
     eligible: list[str] = []
@@ -998,7 +1063,7 @@ def _eligibility(
                                             credential_states=credential_states)
         if reasons or limits:
             rejected[r.route_key] = reasons + limits
-            if limits and not reasons and free_tier.is_decision_c_route(r):
+            if limits and not reasons and (free_tier.is_decision_c_route(r) or capacity.zero_marginal(r)):
                 limited.append(r.route_key)
         else:
             eligible.append(r.route_key)
@@ -1016,6 +1081,8 @@ class RankedRoute:
     score: float | None
     basis: str  # EVAL | PRIORITY
     priority: int
+    tier: int = 1  # 0 ranks first (decision C' / decision C, see ``rank_tier``)
+    preferred: int | None = None  # position in the agent's ``route_policy.preferred_routes`` (None = not listed)
 
 
 def eval_score(route: ModelRoute, role: str | None) -> float | None:
@@ -1032,22 +1099,53 @@ def eval_score(route: ModelRoute, role: str | None) -> float | None:
 
 
 def free_first(route: ModelRoute) -> bool:
-    """Decision C "free first": an eligible free OpenRouter WORKER route ranks ahead of every other eligible route (the
-    OpenCode Go subscription routes included). It is eligible for PUBLIC data only, so INTERNAL tasks never see it."""
+    """Decision C: an eligible, effectively free OpenRouter WORKER route. It is eligible for PUBLIC data only, so
+    INTERNAL tasks never see it. Since decision C' (ADR-0124) it ranks right after the $0-marginal SUBSCRIPTION routes
+    for PUBLIC tasks (``rank_tier``): the free routes are the fallback."""
     return free_tier.is_decision_c_route(route) and is_effectively_free(route)
 
 
-def rank(session: Session, route_keys: list[str], role: str | None) -> list[RankedRoute]:
+def rank_tier(route: ModelRoute, data_classification: str | None) -> int:
+    """The first ranking key. PUBLIC (decision C', owner 2026-10-28): 0 a SUBSCRIPTION route within its plan (OpenCode
+    Go, $0 marginal), 1 a free OpenRouter WORKER route (decision C, the fallback), 2 any other route. Any other data
+    class (and a caller that names none): 0 a free OpenRouter WORKER route (never eligible for INTERNAL), 1 the rest -
+    the ranking INTERNAL tasks always had."""
+    if data_classification == DataClassification.PUBLIC.value:
+        from aeos.routing import capacity
+
+        if capacity.go_first(route):
+            return 0
+        return 1 if free_first(route) else 2
+    return 0 if free_first(route) else 1
+
+
+def preferred_list(value: Any) -> list[str]:
+    """The ordered ``preferred_routes`` of an agent's route policy (contract (a), ADR-0124): route keys only."""
+    if not isinstance(value, (list, tuple)):
+        return []
+    out: list[str] = []
+    for v in value:
+        if isinstance(v, str) and v and v not in out:
+            out.append(v)
+    return out
+
+
+def rank(session: Session, route_keys: list[str], role: str | None, *, preferred: list[str] | None = None,
+         data_classification: str | None = None) -> list[RankedRoute]:
+    """Order *route_keys* (routes that already passed every hard filter): tier -> eval -> preferred position ->
+    priority -> key. ``preferred`` only re-orders these keys; a key that is not among them is ignored, so a preference
+    can never make an ineligible route (ARENA, WATCHLIST, paid without BUDGET, ``:free`` for INTERNAL) selectable."""
     routes = {r.route_key: r for r in session.scalars(select(ModelRoute).where(ModelRoute.route_key.in_(route_keys)))}
+    order = [k for k in preferred_list(preferred) if k in routes]
     ranked = []
-    tier: dict[str, int] = {}
     for key in route_keys:
         r = routes[key]
         s = eval_score(r, role)
-        tier[key] = 0 if free_first(r) else 1
-        ranked.append(RankedRoute(key, s, "EVAL" if s is not None else "PRIORITY", r.priority))
-    ranked.sort(key=lambda x: (tier[x.route_key], 0 if x.score is not None else 1, -(x.score or 0.0), x.priority,
-                               x.route_key))
+        ranked.append(RankedRoute(key, s, "EVAL" if s is not None else "PRIORITY", r.priority,
+                                  rank_tier(r, data_classification), order.index(key) if key in order else None))
+    ranked.sort(key=lambda x: (x.tier, 0 if x.score is not None else 1, -(x.score or 0.0),
+                               x.preferred if x.preferred is not None else len(order), x.priority, x.route_key))
+    assert {x.route_key for x in ranked} == set(route_keys)  # a preference never adds a route
     return ranked
 
 
@@ -1113,7 +1211,8 @@ def _select_eval_route(session: Session, task: TaskSpec, pol: dict[str, Any], bo
 
 def _free_tier_wait(limited: list[str], rejected: dict[str, list[str]], *, would_serve: str | None) -> Blocked:
     """Decision C, no paid fallback: a free OpenRouter WORKER route kept out only by its (account-wide) rate/daily
-    limit would have ranked first, so the task waits for it instead of being served by a route that is not free."""
+    limit ranked ahead of what is left, so the task waits for it instead of being served by a route that is not $0
+    marginal."""
     return Blocked("the free OpenRouter WORKER route(s) eligible for this task are at their rate/daily limit; the task "
                    "waits for the limit to reset - no fallback to a route that is not free"
                    + (f" (would have been {would_serve})" if would_serve else ""),
@@ -1122,7 +1221,31 @@ def _free_tier_wait(limited: list[str], rejected: dict[str, list[str]], *, would
                             "would_serve": would_serve})
 
 
-def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
+def _limit_wait(session: Session, held: list[str], limited: list[str], rejected: dict[str, list[str]], *,
+                would_serve: str | None) -> Blocked:
+    """The task waits: every $0-marginal route ranked ahead of what is left is kept out by a limit (*limited*) or
+    skipped for load (*held*), and what is left - if anything - is not $0 marginal (never a paid route after a skip).
+    A free OpenRouter route at its limit keeps decision C's code (FREE_TIER_LIMIT_REACHED)."""
+    from aeos.routing import capacity
+
+    free = [k for k in limited if free_tier.is_decision_c_route(get_route(session, k))]
+    if free:
+        return _free_tier_wait(free, rejected, would_serve=would_serve)
+    keys = [*held, *[k for k in limited if k not in held]]
+    return Blocked("every $0-marginal route for this task is busy, cooling down or out of 5h allowance; the task waits "
+                   "- never a paid route" + (f" (would have been {would_serve})" if would_serve else ""),
+                   code=capacity.CODE_CAPACITY,
+                   details={"held": keys, "rejected": {k: rejected.get(k, []) for k in keys},
+                            "would_serve": would_serve,
+                            "reasons": [r for k in keys for r in rejected.get(k, [])][:5]})
+
+
+def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str] | None = None) -> RouteDecision:
+    """The route for *task* (§23): hard filters, then the ranking (``rank``), then the first ranked route the load
+    rules do not skip (``capacity``). *preferred_routes* is the implementing agent's ``route_policy.preferred_routes``:
+    it only re-orders eligible routes."""
+    from aeos.routing import capacity
+
     pol = _task_policy(task)
     try:
         from aeos.broker.facade import SERVED_POOLS as served
@@ -1130,7 +1253,17 @@ def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
         served = ("WORKER",)
     bound = _eval_serving(session, task)
     if bound.get("status") != "NOT_BOUND":
-        return _select_eval_route(session, task, pol, bound)
+        chosen = _select_eval_route(session, task, pol, bound)
+        assert chosen.route is not None  # _select_eval_route returns a route or raises
+        skip = capacity.capacity_skip(session, chosen.route, task=task, runs=capacity.in_flight_runs(session))
+        if skip is not None:  # ADR-0124: the evaluated route's load rules hold too; it waits, never another route
+            key = chosen.route.route_key
+            raise Blocked(f"the task is bound to evaluation {bound.get('eval_run_id')}; its route {key} cannot take it "
+                          "now (busy or out of 5h allowance); the task waits - never another or a paid route",
+                          code=capacity.CODE_CAPACITY,
+                          details={"held": [key], "rejected": {key: [f"{skip[0]}: {skip[1]}"]}, "would_serve": None,
+                                   "reasons": [f"{skip[0]}: {skip[1]}"], "eval_run_id": bound.get("eval_run_id")})
+        return chosen
     if pol["pool"] not in served:
         # §23: refuse at admission instead of failing at the worker's first model call (ADR-0106).
         raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "
@@ -1147,34 +1280,64 @@ def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
             rejected[key] = ["not in the approved TaskSpec route allow-list"]
         limited = [k for k in limited if k in pol["routes"]]
     role = task.role_key
+    runs = capacity.in_flight_runs(session)
     if pol["primary"]:
         primary = pol["primary"]
         if primary in eligible:
             route = get_route(session, primary)
+            skip = capacity.capacity_skip(session, route, task=task, runs=runs)
+            if skip is not None:  # a pinned primary waits for its own capacity, it is never swapped
+                rejected[primary] = [*rejected.get(primary, []), f"{skip[0]}: {skip[1]}"]
+                raise _limit_wait(session, [primary], [], rejected, would_serve=None)
             return RouteDecision(route=route, eligible=[primary, *[k for k in eligible if k != primary]],
                                  rejected=rejected, reason=f"primary route {primary} eligible")
         fb = _walk_fallback(session, get_route(session, primary), eligible, rejected)
         if fb is not None:
+            skip = capacity.capacity_skip(session, fb, task=task, runs=runs)
+            if skip is not None:  # the chain's free fallback is at capacity too: wait, never further
+                rejected[fb.route_key] = [*rejected.get(fb.route_key, []), f"{skip[0]}: {skip[1]}"]
+                raise _limit_wait(session, [fb.route_key], [], rejected, would_serve=None)
             return RouteDecision(route=fb, eligible=eligible, rejected=rejected,
                                  reason=f"primary {primary} ineligible; fallback {fb.route_key} along its chain")
-        if primary in limited:
+        if primary in limited and free_tier.is_decision_c_route(get_route(session, primary)):
             raise _free_tier_wait([primary], rejected, would_serve=None)
         raise Blocked("primary route ineligible and no eligible fallback along its chain - task waits",
                       code="NO_ELIGIBLE_ROUTE", details={"rejected": rejected, "primary": primary})
     if not eligible:
         if limited:
-            raise _free_tier_wait(limited, rejected, would_serve=None)
+            raise _limit_wait(session, [], limited, rejected, would_serve=None)
         raise Blocked("no approved route is eligible for this task", code="NO_ELIGIBLE_ROUTE",
                       details={"rejected": rejected, "domain": task.domain,
                                "classification": task.data_classification})
-    ranked = rank(session, eligible, role)
-    top = get_route(session, ranked[0].route_key)
-    if limited and not is_effectively_free(top):
-        raise _free_tier_wait(limited, rejected, would_serve=top.route_key)
-    basis = ranked[0].basis.lower()
-    return RouteDecision(route=top, eligible=[r.route_key for r in ranked], rejected=rejected,
-                         reason=(f"selected free first (decision C), then by {basis}, for role {role}"
-                                 if free_first(top) else f"selected by {basis} for role {role}"))
+    preferred = preferred_list(preferred_routes)
+    ranked = rank(session, [*eligible, *limited], role, preferred=preferred,
+                  data_classification=task.data_classification)
+    held: list[str] = []  # skipped for load (busy, allowance fit, PUBLIC share)
+    passed: list[str] = []  # skipped for a limit (free tier, cool-down)
+    for item in ranked:
+        key = item.route_key
+        if key in limited:
+            passed.append(key)
+            continue
+        route = get_route(session, key)
+        skip = capacity.capacity_skip(session, route, task=task, runs=runs)
+        if skip is not None:
+            rejected[key] = [*rejected.get(key, []), f"{skip[0]}: {skip[1]}"]
+            held.append(key)
+            continue
+        if (held or passed) and not capacity.zero_marginal(route):
+            raise _limit_wait(session, held, passed, rejected, would_serve=key)
+        serving = [r.route_key for r in ranked if r.route_key not in limited and r.route_key not in held]
+        basis = item.basis.lower()
+        tier = ("Go first (decision C')" if item.tier == 0 and task.data_classification == "PUBLIC"
+                else "free (decision C)" if free_first(route) else None)
+        how = f"{tier}, then by {basis}" if tier else f"by {basis}"
+        if item.preferred is not None:
+            how += f" and agent preference #{item.preferred + 1}"
+        skipped = f"; skipped {', '.join(held + passed)}" if held or passed else ""
+        return RouteDecision(route=route, eligible=serving, rejected=rejected,
+                             reason=f"selected {how} for role {role}{skipped}")
+    raise _limit_wait(session, held, passed, rejected, would_serve=None)
 
 
 def _walk_fallback(session: Session, failed: ModelRoute, eligible: list[str],
@@ -1828,6 +1991,35 @@ def set_local_endpoint(
 
 
 POOL_MOVES = frozenset({("ARENA", "WORKER"), ("WORKER", "ARENA")})
+# ADR-0125 (owner decision 2026-10-28): an OpenCode Go route moves between WATCHLIST and WORKER, only while it is an
+# untouched CANDIDATE with no decision at all (nothing the owner decided is ever voided by the move).
+GO_PROVIDER = "opencode-go"
+GO_POOL_MOVES = frozenset({("WATCHLIST", "WORKER"), ("WORKER", "WATCHLIST")})
+
+
+def route_decision_ids(session: Session, route: ModelRoute) -> list[str]:
+    """Every decision that names *route*, whatever its kind or status (INVALIDATED and expired ones too): decisions
+    targeting the route key, and BUDGET decisions listing it in ``auth_scope.routes``."""
+    ids = list(session.scalars(select(Decision.id).where(Decision.target_id == route.route_key)))
+    for d in session.scalars(select(Decision).where(Decision.kind == "BUDGET")):
+        routes = (d.auth_scope or {}).get("routes") if isinstance(d.auth_scope, dict) else None
+        if isinstance(routes, list) and route.route_key in routes and d.id not in ids:
+            ids.append(d.id)
+    return ids
+
+
+def _go_pool_move_problem(session: Session, route: ModelRoute) -> tuple[str, str, dict[str, Any]] | None:
+    """(code, message, details) when an OpenCode Go route may not move (ADR-0125), else None."""
+    if route.status != "CANDIDATE":
+        return ("ROUTE_POOL_MOVE_NOT_CANDIDATE",
+                f"only a CANDIDATE OpenCode Go route moves; {route.route_key} is {route.status} (a move would void the "
+                "owner's decision on it: disable it first, or keep its pool)", {"status": route.status})
+    ids = route_decision_ids(session, route)
+    if ids:
+        return ("ROUTE_POOL_MOVE_HAS_DECISIONS",
+                f"{route.route_key} already has {len(ids)} decision(s) (any status counts): an OpenCode Go route moves "
+                "only before any decision was recorded on it", {"decision_ids": ids})
+    return None
 
 
 def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: str) -> tuple[ModelRoute, dict[str, Any]]:
@@ -1837,18 +2029,29 @@ def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: st
     configuration identity, so a move is a new configuration: every decision bound to the route is invalidated (an
     ARENA TRIAL never carries over, and moving back does not revive it), eval results are not inherited and readiness
     goes STALE; the owner activates the new configuration with a new TRIAL. Nothing is moved automatically: the
-    catalog refresh and the seed never change a pool. Caller authenticates the human, audits and commits."""
+    catalog refresh and the seed never change a pool. Caller authenticates the human, audits and commits.
+
+    ADR-0125 (owner decision 2026-10-28): an OpenCode Go route moves between WATCHLIST and WORKER (either way) only
+    while it is CANDIDATE with no decision of any kind or status (``ROUTE_POOL_MOVE_NOT_CANDIDATE`` /
+    ``ROUTE_POOL_MOVE_HAS_DECISIONS`` otherwise), so the move never voids an owner decision; the owner then activates
+    the WORKER configuration as a TRIAL."""
     if len((rationale or "").strip()) < 10:
         raise ValidationFailed("rationale is required (min 10 characters)")
     target = str(pool or "").strip().upper()
     route = get_route(session, route_key)
     if route.mode in {"MOCK", "DEMO"}:
         raise ValidationFailed("fixture routes cannot be configured")
-    if not free_tier.is_free_model_route(route) or (route.pool, target) not in POOL_MOVES:
-        raise ValidationFailed(f"only an OpenRouter ':free' route moves, and only between ARENA and WORKER (decision C);"
-                               f" route {route.route_key} is {route.provider} {route.model_id} in {route.pool}, target "
-                               f"{target or '-'}", code="ROUTE_POOL_MOVE_UNSUPPORTED")
-    if target in free_tier.WORKER_POOLS:
+    go_move = route.provider == GO_PROVIDER and (route.pool, target) in GO_POOL_MOVES
+    if not go_move and (not free_tier.is_free_model_route(route) or (route.pool, target) not in POOL_MOVES):
+        raise ValidationFailed(f"only an OpenRouter ':free' route moves between ARENA and WORKER (decision C), and an "
+                               f"OpenCode Go route between WATCHLIST and WORKER (ADR-0125); route {route.route_key} is "
+                               f"{route.provider} {route.model_id} in {route.pool}, target {target or '-'}",
+                               code="ROUTE_POOL_MOVE_UNSUPPORTED")
+    if go_move:
+        problem = _go_pool_move_problem(session, route)
+        if problem:
+            raise ValidationFailed(problem[1], code=problem[0], details=problem[2])
+    elif target in free_tier.WORKER_POOLS:
         problems = free_tier.decision_c_problems(route)
         if problems:
             raise ValidationFailed(f"the route cannot become a free OpenRouter WORKER route (decision C): {problems[0]}",
@@ -1857,7 +2060,8 @@ def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: st
         route.config_hash = compute_config_hash(route)  # a known identity, so the change below invalidates
     previous = {"pool": route.pool, "config_hash": route.config_hash, "status": route.status}
     route.pool = target
-    reason = f"owner moved the route {previous['pool']} -> {target} (decision C): {redact_text(rationale.strip())[:120]}"
+    basis = "ADR-0125, OpenCode Go" if go_move else "decision C"
+    reason = f"owner moved the route {previous['pool']} -> {target} ({basis}): {redact_text(rationale.strip())[:120]}"
     changed = refresh_config_hash(session, route, reason=reason)  # invalidates the route's decisions, readiness STALE
     notify_readiness(session, route.route_key, reason=reason, pool=previous["pool"])  # the old pool's checks too
     session.flush()

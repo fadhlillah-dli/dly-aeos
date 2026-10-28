@@ -24,10 +24,20 @@ fast, at what reported cost, is it rate limited - is tested only through this pr
 The outcome is recorded as ``PROBE`` evidence (E3, subject ``model_route``), in the usage ledger and the audit
 trail; a 429 records the quota state. It is DATA for the owner's activation/evaluation decision - it never
 changes the route's status or eligibility.
+
+Tool-call probe (``tools=True``; ADR-0125, owner decision 2026-10-28): the same gates, the same single request, no
+retry and no other route, but the synthetic PUBLIC prompt carries ONE trivial function definition
+(``TOOL_PROBE_TOOLS``, ``tool_choice`` auto) under its own output cap ``TOOL_PROBE_MAX_TOKENS``. PASS only for an HTTP
+200 answer whose every tool call is well formed: ``id`` set, ``type`` function (or absent), the defined function name
+and ``arguments`` a JSON string of exactly ``{"status": "OK"}``; anything else is FAIL with the reason. The verdict is
+recorded as ``PROBE`` evidence marked ``probe: TOOL_CALL`` and bound to the route's configuration hash
+(``routing.facade`` TOOL_PROBE_* marks). It never changes ``supports_tools`` (a CONFIG_FIELD, changing it would void
+the TRIAL): routing reads the evidence instead (``routing.facade.tool_capable``).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -48,12 +58,27 @@ from aeos.models.routing import ModelRoute
 
 log = logging.getLogger("aeos.broker.feasibility")
 
-__all__ = ["PROBE_MAX_TOKENS", "PROBE_POOLS", "PROBE_PROMPT", "probe_route"]
+__all__ = ["PROBE_MAX_TOKENS", "PROBE_POOLS", "PROBE_PROMPT", "TOOL_PROBE_MAX_TOKENS", "TOOL_PROBE_PROMPT",
+           "TOOL_PROBE_TOOLS", "probe_route", "tool_call_verdict"]
 PROBE_PROMPT = "Feasibility check. Reply with the single word: OK"  # synthetic PUBLIC data, nothing else
 PROBE_MAX_TOKENS = 16
 # Upper bound of the probe's tokens when the upstream reports none (prompt characters >= its tokens, the output cap, a
 # margin for the chat template): what a subscription route's allowance estimate counts (ADR-0080 amendment 2026-10-26).
 PROBE_TOKEN_BOUND = len(PROBE_PROMPT) + PROBE_MAX_TOKENS + 64
+# Tool-call probe (ADR-0125): one trivial function, synthetic PUBLIC data. Its own output cap leaves room for the short
+# reasoning preamble of reasoning models (models.dev marks the Go candidates reasoning: true) before the call; 1024
+# output tokens are at most about 0.015 USD of plan allowance at the highest seeded Go rate (15 USD per 1M tokens).
+TOOL_PROBE_FUNCTION = "report_status"
+TOOL_PROBE_PROMPT = (f"Tool-call check. Call the function {TOOL_PROBE_FUNCTION} with status set to OK. "
+                     "Do not answer with text.")
+TOOL_PROBE_TOOLS: list[dict[str, Any]] = [{"type": "function", "function": {
+    "name": TOOL_PROBE_FUNCTION, "description": "Report the result of the tool-call check.",
+    "parameters": {"type": "object", "properties": {"status": {"type": "string", "enum": ["OK"]}},
+                   "required": ["status"], "additionalProperties": False}}}]
+TOOL_PROBE_MAX_TOKENS = 1024
+# upper bound when the upstream reports no usage: prompt and tool schema characters, the output cap and a margin for
+# the provider's tool-calling template
+TOOL_PROBE_TOKEN_BOUND = len(TOOL_PROBE_PROMPT) + len(json.dumps(TOOL_PROBE_TOOLS)) + TOOL_PROBE_MAX_TOKENS + 1024
 PROBE_TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
 # Errors raised before the request left this host: such a probe never reached the upstream and is not counted against
 # an OpenRouter free-model limit; every other outcome (an answer, a read timeout, a broken response) is counted.
@@ -109,8 +134,41 @@ def _outcome(status: int | None, error: str | None) -> str:
     return "UPSTREAM_ERROR"
 
 
-def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.Client | None = None) -> dict[str, Any]:
-    """Send the one synthetic probe to *route_key* and record the observation (caller commits)."""
+def tool_call_verdict(data: dict[str, Any], *, status: int | None, outcome: str) -> tuple[str, str]:
+    """(PASS|FAIL, reason) of a tool-call probe answer (ADR-0125): PASS only for a 200 answer whose every tool call is
+    well formed and calls the one defined function with exactly ``{"status": "OK"}``."""
+    from aeos.routing.facade import TOOL_PROBE_FAIL, TOOL_PROBE_PASS
+
+    if status != 200:
+        return TOOL_PROBE_FAIL, f"no answer to judge (outcome {outcome}, http {status})"
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    first = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = first.get("message") if isinstance(first.get("message"), dict) else None
+    if message is None:
+        return TOOL_PROBE_FAIL, "the answer has no message"
+    calls = message.get("tool_calls")
+    if not isinstance(calls, list) or not calls:
+        return TOOL_PROBE_FAIL, f"no tool call in the answer (finish_reason {first.get('finish_reason') or 'UNKNOWN'})"
+    for call in calls:
+        fn = call.get("function") if isinstance(call, dict) else None
+        if not isinstance(call, dict) or not isinstance(call.get("id"), str) or not call["id"].strip() \
+                or call.get("type", "function") != "function" or not isinstance(fn, dict):
+            return TOOL_PROBE_FAIL, "a malformed tool call (id, type or function missing)"
+        if fn.get("name") != TOOL_PROBE_FUNCTION:
+            return TOOL_PROBE_FAIL, "a tool call names a function that was not defined"
+        try:
+            args = json.loads(fn["arguments"]) if isinstance(fn.get("arguments"), str) else None
+        except ValueError:
+            args = None
+        if args != {"status": "OK"}:
+            return TOOL_PROBE_FAIL, 'the tool call arguments are not the JSON object {"status": "OK"}'
+    return TOOL_PROBE_PASS, f"{len(calls)} well-formed tool call(s) of {TOOL_PROBE_FUNCTION}"
+
+
+def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.Client | None = None,
+                tools: bool = False) -> dict[str, Any]:
+    """Send the one synthetic probe to *route_key* and record the observation (caller commits). ``tools=True`` sends
+    the tool-call probe instead (ADR-0125): the same gates, one function definition, PASS/FAIL evidence."""
     from aeos.broker.model_proxy import (
         SENSITIVE_CONTENT_BLOCKED,
         SENSITIVE_FINDINGS_RECORDED,
@@ -125,6 +183,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         sensitive_content_message,
     )
 
+    action = "broker.route_tool_probe" if tools else "broker.route_feasibility.probe"
     route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
     if route is None:
         raise NotFound(f"route {route_key} not found")
@@ -141,7 +200,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         upstream = resolve_upstream(session, route_key, domain="PERSONAL", pools=PROBE_POOLS)
     except ProxyError as exc:
         audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
-                     action="broker.route_feasibility.probe", result="DENIED", target_type="model_route",
+                     action=action, result="DENIED", target_type="model_route",
                      target_id=route_key, domain="PERSONAL", reason=f"{exc.code}: {exc.message}"[:500])
         raise PolicyDenied(f"route cannot be probed: {exc.message}", code=exc.code) from exc
     spend = _spend_problem(session, route, upstream.base_url)
@@ -158,8 +217,12 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     subscription = cost_facade.subscription_terms(route)[0] is not None
     # the route's own request shape (ADR-0041 amendment 2026-10-25): <endpoint>/chat/completions, the bare upstream
     # model id, the route's reasoning level when it states one - the probe tests the configuration that would serve
-    body: dict[str, Any] = {"model": upstream.model_id, "messages": [{"role": "user", "content": PROBE_PROMPT}],
-                            "max_tokens": PROBE_MAX_TOKENS, "temperature": 0, "stream": False, "n": 1}
+    prompt_text, max_tokens = (TOOL_PROBE_PROMPT, TOOL_PROBE_MAX_TOKENS) if tools else (PROBE_PROMPT, PROBE_MAX_TOKENS)
+    body: dict[str, Any] = {"model": upstream.model_id, "messages": [{"role": "user", "content": prompt_text}],
+                            "max_tokens": max_tokens, "temperature": 0, "stream": False, "n": 1}
+    if tools:
+        body["tools"] = TOOL_PROBE_TOOLS
+        body["tool_choice"] = "auto"
     if upstream.reasoning_effort:
         body["reasoning_effort"] = upstream.reasoning_effort
     if upstream.is_openrouter:
@@ -239,15 +302,21 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
             "answered": answered, "model_resolved": model_resolved, "prompt_tokens": prompt,
             "completion_tokens": completion, "cost_usd": cost if cost is not None else "UNKNOWN",
             "retry_after_seconds": retry_after, "error": redact_text(error or "")[:200],
-            "probe": {"prompt": PROBE_PROMPT, "data_class": "PUBLIC", "max_tokens": PROBE_MAX_TOKENS, "fallback": "NONE"},
+            "probe": {"prompt": prompt_text, "data_class": "PUBLIC", "max_tokens": max_tokens, "fallback": "NONE"},
             "checked_at": utcnow().isoformat(),
             "note": "feasibility observation only: route status and eligibility are unchanged (owner decision)",
         }
+        if tools:
+            verdict, why = tool_call_verdict(data, status=status, outcome=outcome)
+            result["probe"].update({"kind": "TOOL_CALL", "tools": [TOOL_PROBE_FUNCTION], "tool_choice": "auto"})
+            result["tool_call"] = {"verdict": verdict, "reason": why}
+            result["note"] = ("tool-call probe observation: supports_tools, the configuration hash and the route's status "
+                              "are unchanged; a PASS makes the route tool-capable for this configuration only")
         billing = _billing_of(data)
         if cost and not subscription:
             result["note"] += "; a free route reported a cost - review its pricing before any activation"
         if prompt is None and completion is None:
-            billing["charged_tokens"] = PROBE_TOKEN_BOUND  # the probe's own upper bound, never a guess
+            billing["charged_tokens"] = TOOL_PROBE_TOKEN_BOUND if tools else PROBE_TOKEN_BOUND  # own bound, no guess
         ledger, facts = _ledger(session, upstream, route_key, prompt, completion, cost, model_resolved, outcome, billing)
         if subscription:
             result["billing"] = {"billing": "SUBSCRIPTION", "allowance_usd": facts.get("allowance_usd") or "UNKNOWN",
@@ -263,11 +332,21 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         result["ledger"] = ledger
         ev = _evidence(session, route, result)
         result["evidence_id"] = ev
+        success = outcome == "REACHABLE"
+        if tools:
+            from aeos.routing import facade as routing
+
+            routing.tool_probe_recorded(session, route_key=route_key, verdict=result["tool_call"]["verdict"],
+                                        evidence_id=ev)
+            success = result["tool_call"]["verdict"] == routing.TOOL_PROBE_PASS
         audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
-                     action="broker.route_feasibility.probe", result="SUCCESS" if outcome == "REACHABLE" else "FAILED",
-                     target_type="model_route", target_id=route_key, domain="PERSONAL", reason=outcome,
+                     action=action,
+                     result="SUCCESS" if success else "FAILED",
+                     target_type="model_route", target_id=route_key, domain="PERSONAL",
+                     reason=f"{outcome} {result['tool_call']['verdict']}" if tools else outcome,
                      details={"pool": route.pool, "http_status": status, "latency_ms": latency_ms, "evidence_id": ev,
-                              "ledger": ledger, "upstream": _upstream_mark(sent)})
+                              "ledger": ledger, "upstream": _upstream_mark(sent),
+                              **({"tool_call": result["tool_call"]} if tools else {})})
         return result
     except AeosError:
         raise  # the free-model count was settled right after the attempt (or stays PENDING: still counted)
@@ -278,7 +357,7 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         what = _attempt_statement(sent=sent, counted=reservation is not None, settled=settled)
         try:
             audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
-                         action="broker.route_feasibility.probe", result="FAILED", target_type="model_route",
+                         action=action, result="FAILED", target_type="model_route",
                          target_id=route_key, domain="PERSONAL",
                          reason=f"PROBE_BOOKKEEPING_FAILED: {type(exc).__name__}: {what}"[:500],
                          details={"pool": route.pool, "http_status": status, "upstream": _upstream_mark(sent)})
@@ -447,16 +526,26 @@ def _evidence(session: Session, route: ModelRoute, result: dict[str, Any]) -> st
         from aeos.verification import facade as verification
     except ImportError:
         return None
+    environment = {"route_key": route.route_key, "pool": route.pool, "config_hash": route.config_hash,
+                   "model_id": route.model_id, "upstream_model": result["model_id"],
+                   "upstream_url": result["upstream_url"], "provider": route.provider,
+                   "checked_at": result["checked_at"]}
+    collector = "aeos-broker/route-feasibility"
+    claim = f"Route feasibility probe {route.route_key} ({route.pool}): {result['outcome']}"
+    if result.get("tool_call"):
+        # the marks routing reads back (routing.facade.tool_capable): bound to the configuration hash probed
+        from aeos.routing import facade as routing
+
+        collector = routing.TOOL_PROBE_COLLECTOR
+        environment.update({"probe": routing.TOOL_PROBE_MARK, "verdict": result["tool_call"]["verdict"],
+                            "outcome": result["outcome"]})
+        claim = (f"Route tool-call probe {route.route_key} ({route.pool}): {result['tool_call']['verdict']} "
+                 f"({result['outcome']})")
     try:
         ev = verification.collect_evidence(
-            session, kind="PROBE", origin="collector", collector_identity="aeos-broker/route-feasibility",
-            claim=f"Route feasibility probe {route.route_key} ({route.pool}): {result['outcome']}", content=result,
+            session, kind="PROBE", origin="collector", collector_identity=collector, claim=claim, content=result,
             evidence_level="E3", subject_type="model_route", subject_id=route.route_key, domain="PERSONAL",
-            classification="PUBLIC",
-            environment={"route_key": route.route_key, "pool": route.pool, "config_hash": route.config_hash,
-                         "model_id": route.model_id, "upstream_model": result["model_id"],
-                         "upstream_url": result["upstream_url"], "provider": route.provider,
-                         "checked_at": result["checked_at"]})
+            classification="PUBLIC", environment=environment)
     except AeosError:
         return None
     return ev.id

@@ -130,7 +130,7 @@ def upstream_request_shape(route: ModelRoute) -> dict[str, Any]:
     return impl(route)
 
 
-def probe_route(session: Session, *, route_key: str, actor: str) -> dict[str, Any]:
+def probe_route(session: Session, *, route_key: str, actor: str, tools: bool = False) -> dict[str, Any]:
     """§23 route feasibility: one synthetic PUBLIC request to a free, human-activated (TRIAL/APPROVED, hash-bound)
     PERSONAL route of ``PROBE_POOLS``; records PROBE evidence (E3) + ledger + audit and changes nothing about the
     route. Raises PolicyDenied when the route may not be probed (additive, ADR-0111; caller commits).
@@ -138,10 +138,14 @@ def probe_route(session: Session, *, route_key: str, actor: str) -> dict[str, An
     Precondition (decision C, ADR-0041 amendment 2026-10-26): for an OpenRouter ``:free`` route the *session* holds no
     uncommitted write - the probe records its free-model count in its own committed transaction before sending, which
     would otherwise wait on the caller's own write lock. Refused up front with ``Conflict(PROBE_SESSION_NOT_CLEAN)``,
-    nothing sent. The API and the CLI start a probe with a clean session."""
+    nothing sent. The API and the CLI start a probe with a clean session.
+
+    ``tools=True`` (additive, ADR-0125, owner decision 2026-10-28): the tool-call probe - the same gates and one request
+    with one trivial function definition; PASS/FAIL PROBE evidence bound to the route's configuration hash, which
+    ``routing.facade.tool_capable`` reads. ``supports_tools`` is never changed."""
     from aeos.broker.feasibility import probe_route as impl
 
-    return impl(session, route_key, actor=actor)
+    return impl(session, route_key, actor=actor, tools=tools)
 
 
 def reconcile_side_effect(session: Session, *, side_effect_id: str, actor: str) -> dict[str, Any]:

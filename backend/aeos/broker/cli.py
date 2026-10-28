@@ -43,9 +43,13 @@ def grants_cmd(active: bool = typer.Option(False, help="Only active grants"),
 
 
 @app.command("probe-route")
-def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/COMPARATOR/LOCAL/WORKER pool)")) -> None:
+def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/COMPARATOR/LOCAL/WORKER pool)"),
+                    tools: bool = typer.Option(False, "--tools", help="Tool-call probe: one trivial function "
+                                               "definition; PASS makes the route tool-capable for its current "
+                                               "configuration (supports_tools is not changed)")) -> None:
     """One synthetic PUBLIC feasibility request to an owner-activated (TRIAL) route that spends no money: free, local
-    loopback, or a flat-fee subscription (it consumes plan allowance); evidence only."""
+    loopback, or a flat-fee subscription (it consumes plan allowance); evidence only. --tools sends the tool-call
+    probe instead (ADR-0125)."""
     from aeos.broker.feasibility import probe_route
     from aeos.cli import ensure_database
     from aeos.core.db import session_scope
@@ -55,7 +59,7 @@ def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/
     try:
         with session_scope() as s:
             try:
-                out = probe_route(s, route_key, actor="cli:local-operator")
+                out = probe_route(s, route_key, actor="cli:local-operator", tools=tools)
             except AeosError:
                 s.commit()  # keep the DENIED/FAILED audit record (a probe that reached OpenRouter still counts)
                 raise
@@ -71,6 +75,8 @@ def probe_route_cmd(route_key: str = typer.Argument(..., help="Route key (ARENA/
         if b.get("beyond_plan_usd") is not None:
             _out(f"BEYOND THE PLAN: {b['beyond_plan_usd']} USD - route refused (SUBSCRIPTION_BEYOND_PLAN) until you "
                  "check Extra Usage is OFF and re-activate it")
+    if out.get("tool_call"):
+        _out(f"tool call: {out['tool_call']['verdict']} - {out['tool_call']['reason']}")
     _out(f"evidence {out['evidence_id']}; {out['note']}")
 
 

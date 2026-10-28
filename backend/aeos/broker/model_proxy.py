@@ -49,7 +49,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
-from datetime import UTC, timedelta
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -834,12 +834,25 @@ def _record_quota(s: Any, p: Prepared, retry_after: int, rate_limit: dict[str, A
     from aeos.cost import facade as cost_facade
 
     now = utcnow()
+    resets_at = now + timedelta(seconds=retry_after)
+    cooldown: dict[str, Any] | None = None
+    try:
+        # ADR-0124 cool-down: 60 s doubling per repeat up to 30 minutes, or the provider's longer Retry-After; new
+        # tasks skip the route until it ends, a running attempt stays on it (no other route is tried here)
+        from aeos.routing import facade as routing
+
+        cooldown = routing.route_cooldown(s, provider=p.upstream.provider, route_key=p.upstream.route_key,
+                                          reported_seconds=(rate_limit or {}).get("retry_after"))
+        resets_at = max(resets_at, datetime.fromisoformat(str(cooldown["resets_at"])))
+    except (ImportError, AttributeError, KeyError, ValueError):
+        log.warning("routing unavailable: 429 for %s recorded without a cool-down", p.upstream.route_key)
     try:
         cost_facade.set_quota_state(
             s, provider=p.upstream.provider, state="EXHAUSTED", source="observed-429", scope=p.upstream.route_key,
             details={"status": 429, "run_id": p.run_id, "retry_after_seconds": retry_after,
-                     "note": "observed by broker; no fallback route used"},
-            observed_at=now, resets_at=now + timedelta(seconds=retry_after))
+                     "note": "observed by broker; no fallback route used",
+                     **({"cooldown": cooldown} if cooldown else {})},
+            observed_at=now, resets_at=resets_at)
     except ImportError:
         log.warning("cost module unavailable: 429 for %s not recorded as quota state", p.upstream.route_key)
     if p.upstream.is_openrouter and p.upstream.model_id.endswith(":free"):
@@ -852,6 +865,21 @@ def _record_quota(s: Any, p: Prepared, retry_after: int, rate_limit: dict[str, A
                                                 headers=info.get("headers"), run_id=p.run_id)
         except (ImportError, AttributeError):
             log.warning("routing unavailable: free-model 429 for %s recorded on the route only", p.upstream.route_key)
+
+
+def _note_cooldown(p: Prepared, status: int, reported: int | None) -> None:
+    """A provider 5xx starts a cool-down of the route (ADR-0124): new tasks skip it until it ends; the running attempt
+    keeps its route and its requests are not refused for it. Never a fallback route here."""
+    try:
+        from aeos.routing import facade as routing
+
+        with session_factory()() as s:
+            routing.note_route_cooldown(s, provider=p.upstream.provider, route_key=p.upstream.route_key, status=status,
+                                        reported_seconds=reported, run_id=p.run_id)
+            s.commit()
+    except (ImportError, AttributeError):
+        log.warning("routing unavailable: provider %s for %s recorded without a cool-down", status,
+                    p.upstream.route_key)
 
 
 def reported_retry_after(resp: httpx.Response) -> int | None:
@@ -1001,6 +1029,8 @@ async def _upstream_failure(p: Prepared, resp: httpx.Response, started: float) -
         return _error(429, "UPSTREAM_RATE_LIMITED",
                       "upstream quota/rate limit reached; no fallback model is used", retry_after=ra)
     await run_in_threadpool(_finish, p, status=resp.status_code, outcome="UPSTREAM_ERROR", latency_ms=latency, error=text)
+    if 500 <= resp.status_code < 600:
+        await run_in_threadpool(_note_cooldown, p, resp.status_code, reported_retry_after(resp))
     if resp.status_code in (401, 403):
         return _error(502, "UPSTREAM_AUTH_FAILED", "upstream rejected the broker credential")
     if 400 <= resp.status_code < 500:

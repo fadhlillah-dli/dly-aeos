@@ -151,6 +151,30 @@ GO_WATCH: tuple[tuple[str, str, float, dict[str, float]], ...] = (
     ("kimi-k3.1-pro", "Kimi K3.1 Pro", 15, {"input": 2.00, "output": 10.00}),
     ("mimo-v2.6-pro", "MiMo-V2.6-Pro", 15, {"input": 0.435, "output": 0.87}),
 )
+# ---- OpenCode Go WORKER candidates of owner decision R31 (2026-10-28, ADR-0125; E1 reading, not exercised live) ----
+# Allowance and data terms: https://opencode.ai/go (read 2026-10-28: $15/month each, not used for training, 0-day
+# retention); API family: models.dev providers/opencode-go (chat-completions, ``tool_call`` true). models.dev's
+# tool flag is a catalog claim, not proof: these routes stay supports_tools UNKNOWN until the owner's tool-call probe
+# (``aeos broker probe-route --tools``) records a PASS for their configuration.
+GO_R31_READ = "2026-10-28"
+GO_R31_READ_AT = datetime(2026, 10, 28, tzinfo=UTC)
+GO_R31_SOURCES = [
+    "S07",
+    f"https://opencode.ai/go (monthly allowance and privacy table, read {GO_R31_READ})",
+    f"https://models.dev/api.json providers/opencode-go (chat-completions API family, tool_call, rates; read "
+    f"{GO_R31_READ})",
+    f"{GO_DOCS} (read {GO_R31_READ})",
+]
+GO_R31_TERMS: dict[str, Any] = {
+    **GO_TERMS,
+    "read_for_research": f"{GO_R31_READ} (opencode.ai/go privacy table reading for owner decision R31; not an owner "
+                         "terms review)",
+}
+# (model, display, monthly allowance USD, allowance rate per 1M tokens per models.dev)
+GO_WORKERS_R31: tuple[tuple[str, str, float, dict[str, float]], ...] = (
+    ("kimi-k3", "Kimi K3", 15, {"input": 3.00, "output": 15.00, "cached_read": 0.30}),
+    ("step-5-preview", "Step 5 Preview", 15, {"input": 1.00, "output": 2.70, "cached_read": 0.10}),
+)
 # §23 "mode/thinking params" of the native supervisor routes: the bridge passes no --effort/thinking flag, so the
 # Claude Code default applies; stated explicitly so that a caller passing a level is a configuration change.
 SUPERVISOR_MODE_PARAMS = {"effort": "CLI_DEFAULT", "thinking": "CLI_DEFAULT"}
@@ -193,7 +217,7 @@ def _zen(model: str, display: str, *, pool: str, terms: dict[str, Any], classes:
     }
 
 
-def _go_pricing(allowance: float, rates: dict[str, float], **extra: Any) -> dict[str, Any]:
+def _go_pricing(allowance: float, rates: dict[str, float], *, checked_at: str = GO_READ, **extra: Any) -> dict[str, Any]:
     """A Go subscription is not a per-token price: the rates only say how fast a request consumes the model's monthly
     dollar allowance (``usage.cost`` is 0 within the limits; part 2 of decision A gives the cost module these
     semantics). No ``input_per_mtok``/``output_per_mtok`` keys, so nothing reads them as a metered price."""
@@ -203,12 +227,13 @@ def _go_pricing(allowance: float, rates: dict[str, float], **extra: Any) -> dict
             "basis": "OpenCode Go subscription ($10/month): per-model monthly dollar allowance consumed at the listed "
                      "rates (5h 20%, week 50%, month 100%); requests blocked at a limit while Extra Usage is OFF (Go "
                      "docs; HTTP 429 per OpenCode client test fixture, NOT-PROVEN)",
-            "checked_at": GO_READ}
+            "checked_at": checked_at}
 
 
 def _go(model: str, display: str, *, pool: str, pricing: dict[str, Any], priority: int, tools: str = "UNKNOWN",
         classes: list[str] | None = None, terms: dict[str, Any] | None = None, notes: str = "",
-        expires_note: str | None = None) -> dict[str, Any]:
+        expires_note: str | None = None, source_refs: list[str] | None = None,
+        pricing_checked_at: datetime = GO_READ_AT) -> dict[str, Any]:
     """An OpenCode Go route (ADR-0041 amendment 2026-10-26). Not ``_zen``: Go allows other clients, so no client
     restriction is attached, and its tool support is the documented one, not UNKNOWN for every paid route."""
     return {
@@ -219,7 +244,8 @@ def _go(model: str, display: str, *, pool: str, pricing: dict[str, Any], priorit
         "data_terms": copy.deepcopy(terms or GO_TERMS), "eligible_domains": ["PERSONAL"],
         "allowed_data_classes": classes or [P, I], "supports_tools": tools, "identity_status": "PROVIDER_CLAIMED",
         "priority": priority, "fallback_chain": [],  # never a paid fallback (§42): Go routes carry no chain
-        "expires_note": expires_note, "source_refs": ["S07"], "notes": notes, "pricing_checked_at": GO_READ_AT,
+        "expires_note": expires_note, "source_refs": list(source_refs or ["S07"]), "notes": notes,
+        "pricing_checked_at": pricing_checked_at,
         "terms_checked_at": None,
         "mode_params": {"credential_ref": GO_CREDENTIAL_REF, "upstream_model": model, "upstream_api": UPSTREAM_API_CHAT,
                         "reasoning": WORKER_REASONING},
@@ -241,6 +267,16 @@ def _go_routes() -> list[dict[str, Any]]:
         _go(model, display, pool="WORKER", pricing=_go_pricing(allowance, rates), priority=1 + i, tools=tools,
             notes=worker_note(tools))
         for i, (model, display, allowance, rates, tools) in enumerate(GO_WORKERS)
+    ]
+    r31_note = ("OpenCode Go WORKER candidate (owner decision R31, 2026-10-28, ADR-0125): priority after the earlier Go "
+                f"WORKER pilots, not a ranking. Tool calling UNKNOWN: {GO_TOOLS_SOURCE.replace(GO_READ, GO_R31_READ)} "
+                "states tool_call true (a catalog claim); the route serves tool-using tasks only after a PASS of "
+                "`aeos broker probe-route --tools` for its configuration. " + paid)
+    out += [
+        _go(model, display, pool="WORKER", pricing=_go_pricing(allowance, rates, checked_at=GO_R31_READ),
+            priority=1 + len(GO_WORKERS) + i, tools="UNKNOWN", terms=GO_R31_TERMS, notes=r31_note,
+            source_refs=GO_R31_SOURCES, pricing_checked_at=GO_R31_READ_AT)
+        for i, (model, display, allowance, rates) in enumerate(GO_WORKERS_R31)
     ]
     out += [
         _go(model, display, pool="WATCHLIST", pricing=_go_pricing(allowance, rates), priority=510 + i,

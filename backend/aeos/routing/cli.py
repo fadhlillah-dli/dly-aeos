@@ -206,12 +206,15 @@ def set_endpoint_cmd(
 
 @app.command("set-pool")
 def set_pool_cmd(
-    route_key: str = typer.Argument(..., help="An OpenRouter route, e.g. openrouter/cohere/north-mini-code:free"),
-    pool: str = typer.Option(..., help="WORKER (serves PUBLIC worker tasks, decision C) or ARENA (evaluation only)"),
+    route_key: str = typer.Argument(..., help="An OpenRouter :free route, e.g. openrouter/cohere/north-mini-code:free, "
+                                               "or an OpenCode Go route, e.g. opencode-go/kimi-k3.1-pro"),
+    pool: str = typer.Option(..., help="WORKER (serves worker tasks), ARENA (OpenRouter :free, evaluation only) or "
+                                       "WATCHLIST (OpenCode Go, not served)"),
     as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username"),
     rationale: str = typer.Option(..., help="Why (min 10 chars)"),
 ) -> None:
-    """Move an OpenRouter route between ARENA and WORKER (decision C: free routes, PUBLIC data, PERSONAL only).
+    """Move an OpenRouter :free route between ARENA and WORKER (decision C: PUBLIC data, PERSONAL only), or an OpenCode
+    Go route between WATCHLIST and WORKER (ADR-0125: only a CANDIDATE with no decision at all).
 
     A new configuration: every decision bound to the route (an ARENA TRIAL included) stops applying; activate a new
     TRIAL afterwards. The catalog refresh never changes a pool."""

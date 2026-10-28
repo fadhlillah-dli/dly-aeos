@@ -119,6 +119,26 @@ def probe_route_feasibility(route_key: str, principal: AdminPrincipal, domain: A
     return out
 
 
+@router.post("/api/broker/routes/{route_key:path}/tool-probe")
+def probe_route_tools(route_key: str, principal: AdminPrincipal, domain: ActiveDomain, db: DB) -> dict[str, Any]:
+    """Tool-call probe (ADR-0125): the feasibility probe's gates and one request with one trivial function definition;
+    PASS/FAIL evidence bound to the route's configuration hash. ``supports_tools`` and the route's status never change."""
+    from aeos.broker.feasibility import probe_route
+    from aeos.core.enums import Domain
+    from aeos.core.errors import AeosError, PolicyDenied
+
+    if domain != Domain.PERSONAL:
+        raise PolicyDenied("route tool-call probes run in the PERSONAL domain only (OFFICE default deny, §23)",
+                           code="OFFICE_DEFAULT_DENY")
+    try:
+        out = probe_route(db, route_key, actor=f"user:{principal.user.id}", tools=True)
+    except AeosError:
+        db.commit()  # keep the DENIED audit record
+        raise
+    db.commit()
+    return out
+
+
 @router.post("/api/broker/side-effects/{side_effect_id}/reconcile")
 def reconcile_side_effect(side_effect_id: str, principal: AdminPrincipal, domain: ActiveDomain,
                           db: DB) -> dict[str, Any]:

@@ -75,6 +75,8 @@ that does not read it, when its "Source" does not match its readers, and when a 
 | `AEOS_ENVIRONMENT` | Settings field | `Settings` | `local` | Environment label shown in the Control Center header |
 | `AEOS_EXTRA_ALLOWED_ORIGINS` | Settings field | `Settings` | empty (JSON list) | Extra allowed origins; only loopback `http` origins with a port are accepted |
 | `AEOS_GATES_PYTHON` | script | `scripts/git-hooks/pre-push`, `scripts/run_tests.sh`, `scripts/claude_hooks/session_facts.py` | unset (the `.venv` of the checkout or of the main checkout, then `python3` or `python` on `PATH` with a warning) | Python interpreter for the pre-push gates, `scripts/run_tests.sh` and the Claude Code session-facts hook; it must be an existing executable file |
+| `AEOS_GO_MAX_ACTIVE_TOTAL` | Settings field | `Settings` | `2` | Tasks running at once across every SUBSCRIPTION route of one provider (the OpenCode Go key), 1 to 2 (the scheduler's HARD_MAX_ACTIVE). A Go route past it is skipped (`ROUTE_BUSY`) and the next ranked route is tried (ADR-0124) |
+| `AEOS_GO_PUBLIC_SHARE` | Settings field | `Settings` | `0.5` | Share of each Go route's trailing 5h allowance window that PUBLIC tasks may use, 0 to 1. Past it a PUBLIC task skips the route (`PUBLIC_SHARE`) and goes to the free OpenRouter routes; INTERNAL tasks are not limited by it (decision C', ADR-0124) |
 | `AEOS_HOST` | Settings field | `Settings` | `127.0.0.1` | Bind address; loopback only (`127.0.0.1`, `::1`, `localhost`), anything else refuses to start |
 | `AEOS_KEYRING_SERVICE` | Settings field + script | `Settings`, `scripts/dev.ps1`, `scripts/dev.sh` | `dly-aeos` | OS credential store service name; the dev scripts use `dly-aeos-dev`, and `aeos serve --dev` refuses the default one unless `--dev-with-real-credentials` is passed |
 | `AEOS_LOGIN_LOCKOUT_SECONDS` | Settings field | `Settings` | `300` | Window in seconds in which failed logins are counted; a login stays throttled while the failures in the window are at the limit |
@@ -88,10 +90,13 @@ that does not read it, when its "Source" does not match its readers, and when a 
 | `AEOS_OPENBAO_BINARY` | Settings field | `Settings` | unset (found in `<data>/bin` or on `PATH`) | Path of the `bao` binary; an unusable path is authoritative and reported, never skipped |
 | `AEOS_OPENCODE_BINARY` | Settings field + direct read | `Settings`, `backend/aeos/worker_runtime/opencode.py` | unset (`opencode` on `PATH`) | Path of the OpenCode executable; `Settings` (so `aeos.yaml` too) is used first, `worker_runtime/opencode.py` falls back to the environment variable, then to `PATH` |
 | `AEOS_OPENROUTER_FREE_DAILY_LIMIT` | Settings field | `Settings` | `50` | Requests per UTC day for `:free` models; 1 to 1000 (1000 only after at least 10 credits were bought). The cap in force is the lower of this value and the limit the OpenRouter key endpoint reported at the last catalog refresh |
+| `AEOS_OPENROUTER_FREE_MAX_ACTIVE` | Settings field | `Settings` | `1` | Tasks running at once across every OpenRouter `:free` route (one account-wide rate limit), 1 to 2. A free route past it is skipped (`ROUTE_BUSY`) (ADR-0124) |
 | `AEOS_OPENROUTER_FREE_RPM_LIMIT` | Settings field | `Settings` | `20` | Requests per minute for `:free` models; 1 to 20 |
 | `AEOS_PLATFORM_REPO_SLUG` | Settings field | `Settings` | `fadhlillah-dli/dly-aeos` | `owner/name` of this platform repository, used by the Doctor repository and delivery checks and the research registry seed |
 | `AEOS_PORT` | Settings field | `Settings` | `8787` | Port of the control plane. `aeos serve --port` sets it for its own process |
 | `AEOS_PUSH_WITHOUT_FULL_SUITE` | script | `scripts/gates.py` | unset (a push needs a passing full-suite record) | A non-empty reason lets the pre-push hook (`scripts/gates.py --hook`) push a commit whose tree has no passing full-suite record from `scripts/run_tests.sh`; the `full-suite` guard is then SKIPPED with the reason printed, never PASS (LESSONS L8). Set it for one push only: `AEOS_PUSH_WITHOUT_FULL_SUITE='docs only' git push` in sh (macOS, Git Bash); in cmd `cmd /c "set "AEOS_PUSH_WITHOUT_FULL_SUITE=docs only" && git push"` (a bare `set` keeps it for every later push from that window); the PowerShell form is in `CONTRIBUTING.md`. On Windows the record comes from `scripts/run_tests.sh` run with Git Bash; a direct `python -m pytest` writes none |
+| `AEOS_ROUTE_MAX_ACTIVE` | Settings field | `Settings` | empty (JSON object) | Per-route concurrency cap, `{"<route_key>": 1 or 2}`. Unset for a route: 1 for a SUBSCRIPTION route with a monthly allowance of at most 30 USD, else 2. Not part of the route's configuration identity, so changing it never voids a TRIAL (ADR-0124) |
+| `AEOS_ROUTE_RESELECT_AFTER_MINUTES` | Settings field | `Settings` | `30` | Between attempts only: a task the executor stopped at a rate limit moves to another ACTIVE $0-marginal route of its data class when the expected wait for its route is longer than this, 1 to 1440; otherwise it waits for its route. A running attempt never moves (ADR-0124) |
 | `AEOS_RUN_ID` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a worker run; the worker runtime writes it as the run marker of every child it starts (`worker_runtime/processes.py`, `container.py`). If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it |
 | `AEOS_SANDBOX` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present inside a worker sandbox. If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
 | `AEOS_SECURE_COOKIES` | Settings field | `Settings` | `false` | Mark session cookies `Secure`; off because `http://127.0.0.1` has no TLS |
@@ -678,8 +683,23 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   `client-terms=OWNER_DECISION_REQUIRED`.
 * **OpenCode Go routes (owner decision A, ADR-0041 amendment 2026-10-26):** `aeos seed` adds the `opencode-go/*`
   CANDIDATE routes. In the WORKER pool they rank above the Zen pilots: glm-5.3-flash, mimo-v2.6-flash,
-  minimax-m3.1-flash, hy3 (no documented tool support) and kimi-k2.7-code. The other chat-completions models are on
-  the WATCHLIST.
+  minimax-m3.1-flash, hy3 (no documented tool support) and kimi-k2.7-code, then the R31 candidates kimi-k3 and
+  step-5-preview (owner decision 2026-10-28, ADR-0125; tool support UNKNOWN until a tool-call probe PASS). The other
+  chat-completions models are on the WATCHLIST.
+  * **WATCHLIST to WORKER (ADR-0125).** `aeos routes set-pool opencode-go/<id> --pool WORKER|WATCHLIST --as <admin>
+    --rationale "..."` (or `POST /api/routes/<key>/pool`) moves an OpenCode Go route between WATCHLIST and WORKER only
+    while it is CANDIDATE and no decision of any kind or status names it (its key as the target, or a BUDGET decision
+    listing it): otherwise `ROUTE_POOL_MOVE_NOT_CANDIDATE` / `ROUTE_POOL_MOVE_HAS_DECISIONS`. The move is a new
+    configuration hash, audited (`route.set_pool`) and emitted (`route.pool_set`); the seed and the catalog refresh
+    never change a pool.
+  * **Tool-call probe (ADR-0125).** `aeos broker probe-route --tools <key>` / `POST /api/broker/routes/<key>/tool-probe`
+    runs the feasibility probe's gates (TRIAL/APPROVED, PERSONAL, PUBLIC, no money) and sends one synthetic PUBLIC
+    request with one trivial function (`report_status`, `tool_choice` auto, output cap `TOOL_PROBE_MAX_TOKENS` 1024).
+    PASS needs a 200 answer whose every tool call has an id, the defined name and the arguments `{"status": "OK"}`;
+    anything else is FAIL with the reason. The verdict is PROBE evidence (E3) bound to the route's configuration hash
+    (audit `broker.route_tool_probe`, event `route.tool_probe`, readiness STALE). A route is tool-capable
+    (`routing.facade.tool_capable`) when `supports_tools` is YES or such a PASS exists for its CURRENT hash; the probe
+    never changes `supports_tools`, so the owner's TRIAL stays valid, and a new configuration needs a new probe.
   * **Request.** The broker calls `https://opencode.ai/inference/go/openai/v1/chat/completions` with the bare model
     id and the key `workers/opencode-go`, sent only to https://opencode.ai. It also sends `User-Agent:
     dly-aeos-broker/<version>` and a stable `x-opencode-session` per worker run (a hash, never a secret), as the Go
@@ -722,8 +742,8 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
       task admission answer show the plan and the allowance per window (advisory windows marked), never per-token
       spend; the figures are hidden from a principal who cannot see every domain. `aeos routes list` only flags
       `billing=SUBSCRIPTION`; the Control Center pages do not show the windows yet.
-  * **Probe.** `aeos broker probe-route opencode-go/<id>` is allowed on an activated Go route. It consumes allowance,
-    not money, and is refused with the same codes (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`,
+  * **Probe.** `aeos broker probe-route [--tools] opencode-go/<id>` is allowed on an activated Go route. It consumes
+    allowance, not money, and is refused with the same codes (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`,
     `SUBSCRIPTION_ALLOWANCE_UNKNOWN`, `SUBSCRIPTION_BEYOND_PLAN`). A per-token paid route is still refused
     (`ROUTE_NOT_FREE`). Everything about Go is E1 (docs read 2026-10-26) until a probe or TRIAL run.
 * **LOCAL route endpoint:** start an OpenAI-compatible server on this host, then `aeos routes set-endpoint

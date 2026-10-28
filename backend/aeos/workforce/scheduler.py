@@ -57,14 +57,17 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "DOCS_NOT_READY",
                         "DOCS_READINESS_UNVERIFIED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
-                        "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN", "FREE_TIER_LIMIT_REACHED"})
+                        "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN", "FREE_TIER_LIMIT_REACHED",
+                        "ROUTE_CAPACITY"})
 # ADR-0080 amendment 2026-10-26, flat-fee routes: SUBSCRIPTION_ALLOWANCE_EXHAUSTED (the 5h window used up) and
 # SUBSCRIPTION_ALLOWANCE_UNKNOWN (an uncountable call in it, at most 5 hours) clear with time, like a quota;
 # SUBSCRIPTION_BEYOND_PLAN (a call billed beyond the plan) clears only when the owner re-activates the route.
 # ADR-0041 amendment 2026-10-26, decision C: FREE_TIER_LIMIT_REACHED (the free OpenRouter WORKER route is at the
 # account's requests/minute or requests/UTC-day limit) clears with time; the task never moves to a route that is not free.
+# ADR-0124 (owner decision 2026-10-28): ROUTE_CAPACITY (every $0-marginal route is busy, cooling down or out of 5h
+# allowance) clears with time; the task never moves to a paid route.
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
-                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "FREE_TIER_LIMIT_REACHED"})
+                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "FREE_TIER_LIMIT_REACHED", "ROUTE_CAPACITY"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
 # SENSITIVE_CONTENT_BLOCKED (ADR-0127): an investigation run's model request carried a credential; a new attempt
 # waits until the owner has removed it from what the worker reads.
@@ -819,10 +822,38 @@ def route_quota_exhausted(session: Session, route_key: str | None) -> str | None
 
 
 def _quota_wait(session: Session, te: TaskExecution) -> str | None:
+    """The quota a task stopped at a provider quota still waits for on its previous run's route. ADR-0124 (owner decision
+    2026-10-28): between attempts only, when the expected wait is known and longer than the owner setting
+    ``route_reselect_after_minutes``, the task stops waiting for that route; admission then re-selects, and accepts
+    only an ACTIVE $0-marginal route of the same data class (``_reselection_problem``). A running attempt is never
+    moved."""
     run = session.get(WorkerRun, te.active_run_id) if te.active_run_id else None
     if run is None or not run.model_route_key:
         return None
-    return route_quota_exhausted(session, run.model_route_key)
+    wait = route_quota_exhausted(session, run.model_route_key)
+    if wait and ext.reselect_allowed(session, run.model_route_key):
+        return None
+    return wait
+
+
+def _last_quota_stop(session: Session, task_id: str) -> WorkerRun | None:
+    """The task's latest attempt when the executor stopped it at a provider quota (else None)."""
+    last = session.scalar(select(WorkerRun).where(WorkerRun.task_id == task_id, WorkerRun.run_type != "REVIEW")
+                          .order_by(WorkerRun.created_at.desc(), WorkerRun.attempt.desc()).limit(1))
+    return last if last is not None and last.outcome_code == QUOTA_STOP_CODE else None
+
+
+def _reselection_problem(session: Session, task: TaskSpec, route: ModelRoute) -> str | None:
+    """ADR-0124: a task whose last attempt stopped at a quota on another route may move only to a $0-marginal route
+    (free, loopback LOCAL, a SUBSCRIPTION within its plan); eligibility already demands an ACTIVE decision and the
+    task's data class. Otherwise it keeps waiting for its own route."""
+    prev = _last_quota_stop(session, task.id)
+    if prev is None or not prev.model_route_key or prev.model_route_key == route.route_key:
+        return None
+    if ext.zero_marginal(route):
+        return None
+    return (f"the last attempt stopped at a quota on {prev.model_route_key}; a re-selection between attempts may only "
+            f"move to a $0-marginal route, not {route.route_key} - waiting (no paid route)")
 
 
 def refresh_readiness(session: Session, plan_version_id: str, *, actor: str = "system:scheduler") -> dict[str, int]:
@@ -1559,7 +1590,9 @@ def admission_check(session: Session, task_id: str) -> Admission:
         if vp["suite"].get("code") in ("TRUSTED_SUITE_TAMPERED", "TRUSTED_SUITE_MISSING"):
             # a registered suite that no longer verifies would end every attempt BLOCKED after spending budget
             adm.waits.append(("VERIFIER_UNAVAILABLE", f"trusted suite {vp['suite']['code']}: {vp['suite'].get('reason')}"))
-    route, rreasons, rcode = ext.select_route_detail(session, task)
+    preferred = (agent.route_policy or {}).get("preferred_routes") if agent is not None else None
+    route, rreasons, rcode = ext.select_route_detail(
+        session, task, preferred_routes=[str(k) for k in preferred] if isinstance(preferred, list) and preferred else None)
     implementer = agent if agent is not None and agent.harness == "opencode" and \
         agent.agent_key not in REVIEWER_AGENT_KEYS else None
     eval_route = route is not None and route.pool != "WORKER" and ext.eval_served(session, task, route)
@@ -1583,6 +1616,18 @@ def admission_check(session: Session, task_id: str) -> Admission:
         quota = route_quota_exhausted(session, route.route_key)
         if quota:
             adm.waits.append(("QUOTA_EXHAUSTED", quota + "; waiting (no fallback to another route)"))
+        moved = _reselection_problem(session, task, route)
+        if moved:
+            adm.waits.append(("QUOTA_EXHAUSTED", moved))
+        # ADR-0124: the route's cap, its active tasks and the allowance estimate the run holds while in flight (figures
+        # span domains: the admission API shows them only to a principal who may see every domain)
+        rcap = ext.route_capacity(session, task, route)
+        adm.answers["route_capacity"] = rcap
+        cap_wait = rcap.get("wait") if isinstance(rcap, dict) else None
+        if isinstance(cap_wait, dict) and cap_wait.get("code"):
+            # enforced for every selection (an evaluation-bound task included): never two runs over a route's cap or a
+            # start that does not fit its 5h window; the reason carries no allowance figures
+            adm.waits.append((str(cap_wait["code"]), str(cap_wait.get("reason") or "")))
         est_usd, est_tokens, cost_unknown = _cost_estimate(task, route)
         if est_usd is None:
             adm.waits.append(("COST_UNKNOWN", cost_unknown))
@@ -1701,6 +1746,8 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
                           if k in ("memory_mb", "cpus", "status", "enforced", "memory_enforced", "cpu_enforced",
                                    "sandbox_kind")},
               "context_estimate": adm.answers.get("context"),
+              # ADR-0124: the allowance estimate this run holds on a SUBSCRIPTION route while it is in flight
+              "allowance_hold": (adm.answers.get("route_capacity") or {}).get("hold"),
               "verifier_path": adm.answers.get("verifier"),
               "role_eligibility": adm.answers.get("role_eligibility")},
     )
