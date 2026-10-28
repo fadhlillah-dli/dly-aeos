@@ -34,8 +34,9 @@ GO_KEY = "go-test-" + "t" * 40  # visibly fake
 WATCH = "opencode-go/kimi-k3.1-pro"  # seeded WATCHLIST CANDIDATE
 runner = CliRunner()
 
-# config hash (sha256 hex, first 20 characters) of every route seeded on main before ADR-0125, computed with the worker
-# prompt revision pinned (the prompt revision is a separate invariant): a change here voids an owner's ACTIVE TRIAL
+# config hash (sha256 hex, first 20 characters) of every route seeded on main before ADR-0129 (ADR-0125 added kimi-k3 and
+# step-5-preview), computed with the worker prompt revision pinned (the prompt revision is a separate invariant): a
+# change here voids an owner's ACTIVE TRIAL
 GOLDEN_SEED_HASHES = {
     "claude-native/fable": "ac8c68cea8b5c05592d8",
     "claude-native/opus": "62a5b7880ff53024f10e",
@@ -47,11 +48,13 @@ GOLDEN_SEED_HASHES = {
     "opencode-go/glm-5.3-flash": "e7e1cd8b203b86f90124",
     "opencode-go/hy3": "99d29d4f17ae68d2cfa9",
     "opencode-go/kimi-k2.7-code": "87cc4dddc3e6b34cf652",
+    "opencode-go/kimi-k3": "db957c76ad4ad224a406",
     "opencode-go/kimi-k3.1-pro": "87c88e86472440186b68",
     "opencode-go/longcat-2.0": "6e37ff492142b2874229",
     "opencode-go/mimo-v2.6-flash": "8b314eb15ebf30cedeb1",
     "opencode-go/mimo-v2.6-pro": "7a097c99a1a7b4c1fd83",
     "opencode-go/minimax-m3.1-flash": "2fc78182b8194aa011a6",
+    "opencode-go/step-5-preview": "28dd68b7a9dd034c3a17",
     "opencode-zen/beam-free": "70135ed2e8ea820dc84e",
     "opencode-zen/big-pickle": "532b41a7489a721e3ba7",
     "opencode-zen/deepseek-v4.1-flash-free": "aebd561c180baeacc1b5",
@@ -98,10 +101,16 @@ def pinned_prompt(monkeypatch):
     monkeypatch.setattr(seed, "_worker_prompt_revision", lambda: PINNED_PROMPT_REVISION)
 
 
-def test_every_existing_seeded_route_keeps_its_config_hash_and_the_r31_routes_are_added(db, pinned_prompt):
+# the routes owner decision R34 adds (ADR-0129); every other seeded route is pinned above
+R34_ROUTES = {f"opencode-go/{m}" for m in ("deepseek-v4-pro", "hy4-preview", "mimo-v2.5", "mimo-v2.5-pro",
+                                            "gemini-4-argon", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-plus",
+                                            "minimax-m3")}
+
+
+def test_every_existing_seeded_route_keeps_its_config_hash_and_the_r34_routes_are_added(db, pinned_prompt):
     assert _seed_drift(db) == []
     new = {r.route_key for r in db.scalars(select(ModelRoute))} - set(GOLDEN_SEED_HASHES)
-    assert new == {"opencode-go/kimi-k3", "opencode-go/step-5-preview"}
+    assert new == R34_ROUTES
     for key in new:
         r = service.get_route(db, key)
         assert (r.pool, r.status, r.supports_tools, r.mode_params["upstream_api"]) == (

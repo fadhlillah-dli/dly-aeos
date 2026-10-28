@@ -547,6 +547,32 @@ Copy the route key and its config hash from the `routes list` output.
      with this route key: the BUDGET decision for the plan fee, the TRIAL with tools UNKNOWN, and the tool-call probe
      (step 6). `opencode-go/deepseek-v4.1-flash` stays PUBLIC only and needs the Global region (its route notes).
   4. To undo a move before you record any decision on it: the same command with `--pool WATCHLIST`.
+* **OpenCode Go routes of owner decision R34 (ADR-0129).** `./aeos seed` adds nine more Go WORKER candidates, all
+  CANDIDATE with tool support UNKNOWN. Nothing is activated, and nothing is spent: each one is a Go plan allowance.
+  * **Direct chat-completions models.** `opencode-go/hy4-preview` ($30/month) and `opencode-go/deepseek-v4-pro`
+    ($15/month). DeepSeek V4 Pro is **PUBLIC only**. It needs the Global region of the Go workspace, which changes the
+    region for every model, and its zero-retention agreement runs only through 2026-10-31.
+  * **Superseded, overflow only.** `opencode-go/mimo-v2.5` and `opencode-go/mimo-v2.5-pro`. They come last in the
+    pool and in every ranking. Activate them only if you want their own allowance used when the others are busy.
+  * **Translation candidates (NOT PROVEN).** `opencode-go/gemini-4-argon`, `opencode-go/qwen3.8-max`,
+    `opencode-go/qwen3.8-flash`, `opencode-go/qwen3.7-plus` and `opencode-go/minimax-m3`. Go serves them natively on
+    the google or anthropic API. AEOS calls them on chat-completions and relies on the Console's API translation, which
+    is NOT PROVEN until both probes pass.
+
+  To activate one:
+  1. Pause scheduling first, so the TRIAL cannot take a real task before its probes (`./aeos work pause --reason "Go
+     probe"`).
+  2. Do steps 1 to 5 of the OpenCode Go routes above with its route key: refresh, terms, Extra Usage OFF, the BUDGET
+     decision for the plan fee, then the TRIAL with `--region`.
+  3. Run the plain probe, `./aeos broker probe-route <route_key>`. For a translation candidate it must answer OK. If it
+     does not, disable the route (`./aeos routes disable "<route_key>" --reason "Go translation probe failed"`).
+  4. Run the tool-call probe, `./aeos broker probe-route --tools <route_key>`. Until it prints `tool call: PASS`, the
+     route serves only tasks that need no tools.
+  5. Resume scheduling (`./aeos work resume`).
+
+  These are the same commands as steps 1 to 6 above, with another key. Each probe uses a little plan allowance and no
+  money. The role ranking already lists these routes (ADR-0129): Argon first for Long Agentic, Reasoning and Data
+  Analysis, and the superseded pair last. A ranking only re-orders routes that are already eligible.
 * **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models (ids ending in
   `:free`) may serve worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes;
   CONFIDENTIAL never goes to a worker route. Other OpenRouter routes keep the rules above (a paid route needs a BUDGET

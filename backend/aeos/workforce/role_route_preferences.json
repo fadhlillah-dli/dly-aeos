@@ -2,30 +2,38 @@
  "schema_version": "1",
  "generated_by": "scripts/role_route_ranking.py",
  "inputs": "docs/evidence/livebench-2026-10-28/role-ranking-inputs.json",
- "inputs_sha256": "e7af84271920dd976a43a24ed5367f1bcb0f6f76b239836db122e0a27dd2882b",
- "decision": "owner decision R31, 2026-10-28 (ADR-0126): best models first, matched to each role's needs",
+ "inputs_sha256": "6dddc7ab32bd919345706077a29c064a0ec83238e17866957894d56e67062daf",
+ "decision": "owner decision R31, 2026-10-28 (ADR-0126): best models first, matched to each role's needs; owner decision R34, 2026-10-28 (ADR-0129): every Go model incl. the translation candidates, the paid OpenRouter DeepSeek route for escalation and overflow only",
  "method": {
   "release_per_category": {
    "2.0": "2026-10-25",
    "v1": "2026-06-25"
   },
+  "served_build": "a route in served_builds takes the LiveBench 2026-10-14 score of the build it serves, only in a category where 2026-10-14 and 2026-10-25 give every model they both score the same score (comparable); otherwise it is unscored there",
   "noise_band": "1.96 * 50 / sqrt(nq) points (95% half-width, worst case p=0.5)",
   "v1_nq": "not published in the v1 table; 50 assumed (NOT-PROVEN)",
   "order": "best first: category score, highest first; an equal score: larger monthly allowance, then route key (owner 2026-10-28: 'model-model terbaik saat ini yang berjalan, selanjutnya model lainnya')",
   "band": "metadata only (source_refs[].band, for later load spreading): a band takes every model within the noise band of its best remaining score; it never re-orders against the score",
   "unscored": "never omitted; after the scored routes of the tier: LiveBench v1 overall where present (highest first), then larger monthly allowance, then route key (order_evidence)",
-  "tiers": "OPENCODE_GO first, then OPENROUTER_FREE (PUBLIC only: eligibility filters it for INTERNAL)",
-  "never_listed": "Gemini 4 Argon and the Qwen family (API family the broker does not support), any Claude-family model, meta-routers (aeos.workforce.role_agents.NEVER_PREFERRED)",
+  "tiers": "OPENCODE_GO first (the superseded routes last, overflow only), then OPENROUTER_FREE (PUBLIC only: eligibility filters it for INTERNAL), then OPENROUTER_PAID (escalation and overflow only, never PUBLIC: paid_use)",
+  "never_listed": "any Claude-family model and meta-routers (aeos.core.model_policy, AGENTS.md invariant 6); Gemini 4 Argon and the Qwen models are listed since owner answer R34 (serving NOT PROVEN until their probes pass)",
   "effect": "re-orders routes that are already eligible; never makes a route eligible"
  },
  "aliases": {
   "2.0:deepseek-v4.1-flash-1017": {
-   "route_key": "opencode-go/deepseek-v4.1-flash",
-   "reason": "LiveBench 2.0 release 2026-10-25 lists exactly one build of the model, the 1017 update (research refs S41, S61: the official update of deepseek-v4.1-flash); Go serves deepseek-v4.1-flash without a date, so that it serves this build is NOT-PROVEN. The v1 build deepseek-v4.1-flash-max is an effort variant and is not mapped"
+   "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+   "reason": "the OpenRouter id names the 1017 build exactly (canonical slug deepseek/deepseek-v4.1-flash-20261017, catalog read 2026-10-28); Go serves deepseek-v4.1-flash without a date, and OpenRouter's undated id dates 2026-09-10 like models.dev dates the Go model, so the 1017 score is not given to the Go route (SERVED_BUILDS). The v1 build deepseek-v4.1-flash-max is an effort variant and is not mapped"
   },
   "2.0:gemma-4-31b": {
    "route_key": "openrouter/google/gemma-4-31b-it:free",
    "reason": "LiveBench lists the instruction-tuned release without the -it suffix"
+  }
+ },
+ "served_builds": {
+  "opencode-go/deepseek-v4.1-flash": {
+   "livebench_id": "deepseek-v4.1-flash",
+   "release": "2026-10-14",
+   "reason": "Go serves deepseek-v4.1-flash without a date (models.dev release date 2026-09-10, the original build; that Go serves exactly that build is NOT-PROVEN); release 2026-10-14 scored the original build, release 2026-10-25 only the 1017 update (owner R34, ADR-0129)"
   }
  },
  "agents": {
@@ -37,19 +45,28 @@
    "nq_used_for_band": 18,
    "noise_band": 23.1,
    "preferred_routes": [
-    "opencode-go/deepseek-v4.1-flash",
+    "opencode-go/gemini-4-argon",
     "opencode-go/kimi-k3.1-pro",
     "opencode-go/mimo-v2.6-pro",
+    "opencode-go/qwen3.8-max",
     "opencode-go/minimax-m3.1-flash",
     "opencode-go/kimi-k3",
     "opencode-go/step-5-preview",
     "opencode-go/glm-5.3-flash",
     "opencode-go/glm-5.3",
     "opencode-go/glm-5.2",
+    "opencode-go/deepseek-v4-pro",
     "opencode-go/kimi-k2.7-code",
+    "opencode-go/minimax-m3",
+    "opencode-go/deepseek-v4.1-flash",
     "opencode-go/hy3",
     "opencode-go/longcat-2.0",
     "opencode-go/mimo-v2.6-flash",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/mimo-v2.5-pro",
     "openrouter/google/gemma-4-31b-it:free",
     "openrouter/thinkingmachines/inkling:free",
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -64,25 +81,27 @@
     "openrouter/poolside/laguna-xs-2.1:free",
     "openrouter/recursive/flint-v1.0:free",
     "openrouter/thinkingmachines/inkling-small:free",
-    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "openrouter/deepseek/deepseek-v4.1-flash-1017"
    ],
    "entries": [
     {
-     "route_key": "opencode-go/deepseek-v4.1-flash",
+     "route_key": "opencode-go/gemini-4-argon",
      "tier": "OPENCODE_GO",
-     "score": 40.9,
-     "allowance_usd_month": 80.0,
+     "score": 61.2,
+     "allowance_usd_month": 30.0,
      "source_refs": [
       {
        "url": "https://livebench.ai/data/20261025/table.csv",
        "release": "2026-10-25",
        "category": "Long Agentic",
-       "score": 40.9,
+       "score": 61.2,
        "nq": 18,
        "band": 1,
        "date": "2026-10-28"
       }
-     ]
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/kimi-k3.1-pro",
@@ -113,10 +132,28 @@
        "category": "Long Agentic",
        "score": 35.2,
        "nq": 18,
-       "band": 1,
+       "band": 2,
        "date": "2026-10-28"
       }
      ]
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-max",
+     "tier": "OPENCODE_GO",
+     "score": 29.9,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 29.9,
+       "nq": 18,
+       "band": 2,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/minimax-m3.1-flash",
@@ -130,7 +167,7 @@
        "category": "Long Agentic",
        "score": 28.8,
        "nq": 18,
-       "band": 1,
+       "band": 2,
        "date": "2026-10-28"
       }
      ]
@@ -147,7 +184,7 @@
        "category": "Long Agentic",
        "score": 26.4,
        "nq": 18,
-       "band": 1,
+       "band": 2,
        "date": "2026-10-28"
       }
      ]
@@ -164,7 +201,7 @@
        "category": "Long Agentic",
        "score": 19.4,
        "nq": 18,
-       "band": 1,
+       "band": 2,
        "date": "2026-10-28"
       }
      ]
@@ -181,7 +218,7 @@
        "category": "Long Agentic",
        "score": 19.0,
        "nq": 18,
-       "band": 1,
+       "band": 2,
        "date": "2026-10-28"
       }
      ]
@@ -215,6 +252,20 @@
      }
     },
     {
+     "route_key": "opencode-go/deepseek-v4-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 71.57
+     }
+    },
+    {
      "route_key": "opencode-go/kimi-k2.7-code",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -226,6 +277,33 @@
       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
       "release": "2026-06-25",
       "value": 68.41
+     }
+    },
+    {
+     "route_key": "opencode-go/minimax-m3",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 67.26
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/deepseek-v4.1-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 80.0,
+     "source_refs": [],
+     "note": "LiveBench release 2026-10-14 scored its served build deepseek-v4.1-flash, but that release is not comparable with 2026-10-25 in Long Agentic (11 models scored in both differ: the category was re-run), so it stays unscored here",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 80.0
      }
     },
     {
@@ -263,6 +341,70 @@
       "basis": "monthly allowance USD",
       "value": 60.0
      }
+    },
+    {
+     "route_key": "opencode-go/qwen3.7-plus",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/hy4-preview",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     }
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-flash: listed after every other Go route (owner R34)"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 15.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-pro: listed after every other Go route (owner R34)"
     },
     {
      "route_key": "openrouter/google/gemma-4-31b-it:free",
@@ -455,6 +597,24 @@
       "basis": "monthly allowance USD",
       "value": null
      }
+    },
+    {
+     "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+     "tier": "OPENROUTER_PAID",
+     "score": 40.9,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 40.9,
+       "nq": 18,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "paid_use": "paid per token (owner R34: the credit goes to this route): only as an escalation after two failed $0-marginal attempts of the task, or as overflow when every $0-marginal route of the role is at capacity, in allowance fit or in cool-down; never for PUBLIC tasks (they have the free fallback); never without the owner's BUDGET decision"
     }
    ]
   },
@@ -466,19 +626,28 @@
    "nq_used_for_band": 150,
    "noise_band": 8.0,
    "preferred_routes": [
+    "opencode-go/gemini-4-argon",
     "opencode-go/deepseek-v4.1-flash",
     "opencode-go/kimi-k3.1-pro",
     "opencode-go/kimi-k3",
+    "opencode-go/qwen3.8-max",
     "opencode-go/glm-5.3-flash",
     "opencode-go/mimo-v2.6-pro",
     "opencode-go/minimax-m3.1-flash",
     "opencode-go/step-5-preview",
     "opencode-go/glm-5.3",
     "opencode-go/glm-5.2",
+    "opencode-go/deepseek-v4-pro",
     "opencode-go/kimi-k2.7-code",
+    "opencode-go/minimax-m3",
     "opencode-go/hy3",
     "opencode-go/longcat-2.0",
     "opencode-go/mimo-v2.6-flash",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/mimo-v2.5-pro",
     "openrouter/thinkingmachines/inkling:free",
     "openrouter/google/gemma-4-31b-it:free",
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -493,25 +662,45 @@
     "openrouter/poolside/laguna-xs-2.1:free",
     "openrouter/recursive/flint-v1.0:free",
     "openrouter/thinkingmachines/inkling-small:free",
-    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "openrouter/deepseek/deepseek-v4.1-flash-1017"
    ],
    "entries": [
     {
-     "route_key": "opencode-go/deepseek-v4.1-flash",
+     "route_key": "opencode-go/gemini-4-argon",
      "tier": "OPENCODE_GO",
-     "score": 79.5,
-     "allowance_usd_month": 80.0,
+     "score": 85.2,
+     "allowance_usd_month": 30.0,
      "source_refs": [
       {
        "url": "https://livebench.ai/data/20261025/table.csv",
        "release": "2026-10-25",
        "category": "Data Analysis",
-       "score": 79.5,
+       "score": 85.2,
        "nq": 150,
        "band": 1,
        "date": "2026-10-28"
       }
-     ]
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/deepseek-v4.1-flash",
+     "tier": "OPENCODE_GO",
+     "score": 79.3,
+     "allowance_usd_month": 80.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261014/table.csv",
+       "release": "2026-10-14",
+       "category": "Data Analysis",
+       "score": 79.3,
+       "nq": 150,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "served_build": "Go serves deepseek-v4.1-flash without a date (models.dev release date 2026-09-10, the original build; that Go serves exactly that build is NOT-PROVEN); release 2026-10-14 scored the original build, release 2026-10-25 only the 1017 update (owner R34, ADR-0129)"
     },
     {
      "route_key": "opencode-go/kimi-k3.1-pro",
@@ -548,6 +737,24 @@
      ]
     },
     {
+     "route_key": "opencode-go/qwen3.8-max",
+     "tier": "OPENCODE_GO",
+     "score": 78.4,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 78.4,
+       "nq": 150,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
      "route_key": "opencode-go/glm-5.3-flash",
      "tier": "OPENCODE_GO",
      "score": 76.4,
@@ -559,7 +766,7 @@
        "category": "Data Analysis",
        "score": 76.4,
        "nq": 150,
-       "band": 1,
+       "band": 2,
        "date": "2026-10-28"
       }
      ]
@@ -576,7 +783,7 @@
        "category": "Data Analysis",
        "score": 72.3,
        "nq": 150,
-       "band": 1,
+       "band": 2,
        "date": "2026-10-28"
       }
      ]
@@ -610,7 +817,7 @@
        "category": "Data Analysis",
        "score": 63.5,
        "nq": 150,
-       "band": 2,
+       "band": 3,
        "date": "2026-10-28"
       }
      ]
@@ -644,6 +851,20 @@
      }
     },
     {
+     "route_key": "opencode-go/deepseek-v4-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 71.57
+     }
+    },
+    {
      "route_key": "opencode-go/kimi-k2.7-code",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -656,6 +877,21 @@
       "release": "2026-06-25",
       "value": 68.41
      }
+    },
+    {
+     "route_key": "opencode-go/minimax-m3",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 67.26
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/hy3",
@@ -692,6 +928,70 @@
       "basis": "monthly allowance USD",
       "value": 60.0
      }
+    },
+    {
+     "route_key": "opencode-go/qwen3.7-plus",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/hy4-preview",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     }
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-flash: listed after every other Go route (owner R34)"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 15.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-pro: listed after every other Go route (owner R34)"
     },
     {
      "route_key": "openrouter/thinkingmachines/inkling:free",
@@ -884,6 +1184,24 @@
       "basis": "monthly allowance USD",
       "value": null
      }
+    },
+    {
+     "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+     "tier": "OPENROUTER_PAID",
+     "score": 79.5,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 79.5,
+       "nq": 150,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "paid_use": "paid per token (owner R34: the credit goes to this route): only as an escalation after two failed $0-marginal attempts of the task, or as overflow when every $0-marginal route of the role is at capacity, in allowance fit or in cool-down; never for PUBLIC tasks (they have the free fallback); never without the owner's BUDGET decision"
     }
    ]
   },
@@ -896,18 +1214,27 @@
    "noise_band": 18.2,
    "preferred_routes": [
     "opencode-go/deepseek-v4.1-flash",
+    "opencode-go/gemini-4-argon",
     "opencode-go/step-5-preview",
     "opencode-go/minimax-m3.1-flash",
     "opencode-go/kimi-k3.1-pro",
     "opencode-go/mimo-v2.6-pro",
     "opencode-go/glm-5.3-flash",
+    "opencode-go/qwen3.8-max",
     "opencode-go/kimi-k3",
     "opencode-go/glm-5.3",
     "opencode-go/glm-5.2",
+    "opencode-go/deepseek-v4-pro",
     "opencode-go/kimi-k2.7-code",
+    "opencode-go/minimax-m3",
     "opencode-go/hy3",
     "opencode-go/longcat-2.0",
     "opencode-go/mimo-v2.6-flash",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/mimo-v2.5-pro",
     "openrouter/thinkingmachines/inkling:free",
     "openrouter/google/gemma-4-31b-it:free",
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -922,25 +1249,45 @@
     "openrouter/poolside/laguna-xs-2.1:free",
     "openrouter/recursive/flint-v1.0:free",
     "openrouter/thinkingmachines/inkling-small:free",
-    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "openrouter/deepseek/deepseek-v4.1-flash-1017"
    ],
    "entries": [
     {
      "route_key": "opencode-go/deepseek-v4.1-flash",
      "tier": "OPENCODE_GO",
-     "score": 96.0,
+     "score": 90.2,
      "allowance_usd_month": 80.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261014/table.csv",
+       "release": "2026-10-14",
+       "category": "Coding",
+       "score": 90.2,
+       "nq": 29,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "served_build": "Go serves deepseek-v4.1-flash without a date (models.dev release date 2026-09-10, the original build; that Go serves exactly that build is NOT-PROVEN); release 2026-10-14 scored the original build, release 2026-10-25 only the 1017 update (owner R34, ADR-0129)"
+    },
+    {
+     "route_key": "opencode-go/gemini-4-argon",
+     "tier": "OPENCODE_GO",
+     "score": 89.7,
+     "allowance_usd_month": 30.0,
      "source_refs": [
       {
        "url": "https://livebench.ai/data/20261025/table.csv",
        "release": "2026-10-25",
        "category": "Coding",
-       "score": 96.0,
+       "score": 89.7,
        "nq": 29,
        "band": 1,
        "date": "2026-10-28"
       }
-     ]
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/step-5-preview",
@@ -1028,6 +1375,24 @@
      ]
     },
     {
+     "route_key": "opencode-go/qwen3.8-max",
+     "tier": "OPENCODE_GO",
+     "score": 60.3,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 60.3,
+       "nq": 29,
+       "band": 2,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
      "route_key": "opencode-go/kimi-k3",
      "tier": "OPENCODE_GO",
      "score": 59.3,
@@ -1073,6 +1438,20 @@
      }
     },
     {
+     "route_key": "opencode-go/deepseek-v4-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 71.57
+     }
+    },
+    {
      "route_key": "opencode-go/kimi-k2.7-code",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -1085,6 +1464,21 @@
       "release": "2026-06-25",
       "value": 68.41
      }
+    },
+    {
+     "route_key": "opencode-go/minimax-m3",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 67.26
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/hy3",
@@ -1121,6 +1515,70 @@
       "basis": "monthly allowance USD",
       "value": 60.0
      }
+    },
+    {
+     "route_key": "opencode-go/qwen3.7-plus",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/hy4-preview",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     }
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-flash: listed after every other Go route (owner R34)"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 15.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-pro: listed after every other Go route (owner R34)"
     },
     {
      "route_key": "openrouter/thinkingmachines/inkling:free",
@@ -1313,6 +1771,24 @@
       "basis": "monthly allowance USD",
       "value": null
      }
+    },
+    {
+     "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+     "tier": "OPENROUTER_PAID",
+     "score": 96.0,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 96.0,
+       "nq": 29,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "paid_use": "paid per token (owner R34: the credit goes to this route): only as an escalation after two failed $0-marginal attempts of the task, or as overflow when every $0-marginal route of the role is at capacity, in allowance fit or in cool-down; never for PUBLIC tasks (they have the free fallback); never without the owner's BUDGET decision"
     }
    ]
   },
@@ -1325,18 +1801,27 @@
    "noise_band": 19.6,
    "preferred_routes": [
     "opencode-go/deepseek-v4.1-flash",
+    "opencode-go/qwen3.8-max",
     "opencode-go/mimo-v2.6-pro",
     "opencode-go/kimi-k3.1-pro",
     "opencode-go/glm-5.3-flash",
     "opencode-go/kimi-k3",
     "opencode-go/step-5-preview",
     "opencode-go/minimax-m3.1-flash",
+    "opencode-go/gemini-4-argon",
     "opencode-go/glm-5.3",
     "opencode-go/glm-5.2",
+    "opencode-go/deepseek-v4-pro",
     "opencode-go/kimi-k2.7-code",
+    "opencode-go/minimax-m3",
     "opencode-go/hy3",
     "opencode-go/longcat-2.0",
     "opencode-go/mimo-v2.6-flash",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/mimo-v2.5-pro",
     "openrouter/google/gemma-4-31b-it:free",
     "openrouter/thinkingmachines/inkling:free",
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -1351,25 +1836,45 @@
     "openrouter/poolside/laguna-xs-2.1:free",
     "openrouter/recursive/flint-v1.0:free",
     "openrouter/thinkingmachines/inkling-small:free",
-    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "openrouter/deepseek/deepseek-v4.1-flash-1017"
    ],
    "entries": [
     {
      "route_key": "opencode-go/deepseek-v4.1-flash",
      "tier": "OPENCODE_GO",
-     "score": 83.4,
+     "score": 79.2,
      "allowance_usd_month": 80.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261014/table.csv",
+       "release": "2026-10-14",
+       "category": "Design",
+       "score": 79.2,
+       "nq": 25,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "served_build": "Go serves deepseek-v4.1-flash without a date (models.dev release date 2026-09-10, the original build; that Go serves exactly that build is NOT-PROVEN); release 2026-10-14 scored the original build, release 2026-10-25 only the 1017 update (owner R34, ADR-0129)"
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-max",
+     "tier": "OPENCODE_GO",
+     "score": 78.6,
+     "allowance_usd_month": 15.0,
      "source_refs": [
       {
        "url": "https://livebench.ai/data/20261025/table.csv",
        "release": "2026-10-25",
        "category": "Design",
-       "score": 83.4,
+       "score": 78.6,
        "nq": 25,
        "band": 1,
        "date": "2026-10-28"
       }
-     ]
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/mimo-v2.6-pro",
@@ -1474,6 +1979,24 @@
      ]
     },
     {
+     "route_key": "opencode-go/gemini-4-argon",
+     "tier": "OPENCODE_GO",
+     "score": 73.7,
+     "allowance_usd_month": 30.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 73.7,
+       "nq": 25,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
      "route_key": "opencode-go/glm-5.3",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -1502,6 +2025,20 @@
      }
     },
     {
+     "route_key": "opencode-go/deepseek-v4-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 71.57
+     }
+    },
+    {
      "route_key": "opencode-go/kimi-k2.7-code",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -1514,6 +2051,21 @@
       "release": "2026-06-25",
       "value": 68.41
      }
+    },
+    {
+     "route_key": "opencode-go/minimax-m3",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 67.26
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/hy3",
@@ -1550,6 +2102,70 @@
       "basis": "monthly allowance USD",
       "value": 60.0
      }
+    },
+    {
+     "route_key": "opencode-go/qwen3.7-plus",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/hy4-preview",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     }
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-flash: listed after every other Go route (owner R34)"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 15.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-pro: listed after every other Go route (owner R34)"
     },
     {
      "route_key": "openrouter/google/gemma-4-31b-it:free",
@@ -1742,6 +2358,24 @@
       "basis": "monthly allowance USD",
       "value": null
      }
+    },
+    {
+     "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+     "tier": "OPENROUTER_PAID",
+     "score": 83.4,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 83.4,
+       "nq": 25,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "paid_use": "paid per token (owner R34: the credit goes to this route): only as an escalation after two failed $0-marginal attempts of the task, or as overflow when every $0-marginal route of the role is at capacity, in allowance fit or in cool-down; never for PUBLIC tasks (they have the free fallback); never without the owner's BUDGET decision"
     }
    ]
   },
@@ -1753,8 +2387,10 @@
    "nq_used_for_band": 202,
    "noise_band": 6.9,
    "preferred_routes": [
+    "opencode-go/gemini-4-argon",
     "opencode-go/kimi-k3.1-pro",
     "opencode-go/kimi-k3",
+    "opencode-go/qwen3.8-max",
     "opencode-go/deepseek-v4.1-flash",
     "opencode-go/step-5-preview",
     "opencode-go/minimax-m3.1-flash",
@@ -1762,10 +2398,17 @@
     "opencode-go/glm-5.3-flash",
     "opencode-go/glm-5.3",
     "opencode-go/glm-5.2",
+    "opencode-go/deepseek-v4-pro",
     "opencode-go/kimi-k2.7-code",
+    "opencode-go/minimax-m3",
     "opencode-go/hy3",
     "opencode-go/longcat-2.0",
     "opencode-go/mimo-v2.6-flash",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/mimo-v2.5-pro",
     "openrouter/thinkingmachines/inkling:free",
     "openrouter/google/gemma-4-31b-it:free",
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -1780,9 +2423,28 @@
     "openrouter/poolside/laguna-xs-2.1:free",
     "openrouter/recursive/flint-v1.0:free",
     "openrouter/thinkingmachines/inkling-small:free",
-    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "openrouter/deepseek/deepseek-v4.1-flash-1017"
    ],
    "entries": [
+    {
+     "route_key": "opencode-go/gemini-4-argon",
+     "tier": "OPENCODE_GO",
+     "score": 95.1,
+     "allowance_usd_month": 30.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 95.1,
+       "nq": 202,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
     {
      "route_key": "opencode-go/kimi-k3.1-pro",
      "tier": "OPENCODE_GO",
@@ -1818,21 +2480,40 @@
      ]
     },
     {
-     "route_key": "opencode-go/deepseek-v4.1-flash",
+     "route_key": "opencode-go/qwen3.8-max",
      "tier": "OPENCODE_GO",
-     "score": 89.1,
-     "allowance_usd_month": 80.0,
+     "score": 88.2,
+     "allowance_usd_month": 15.0,
      "source_refs": [
       {
        "url": "https://livebench.ai/data/20261025/table.csv",
        "release": "2026-10-25",
        "category": "Reasoning",
-       "score": 89.1,
+       "score": 88.2,
        "nq": 202,
        "band": 1,
        "date": "2026-10-28"
       }
-     ]
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/deepseek-v4.1-flash",
+     "tier": "OPENCODE_GO",
+     "score": 86.7,
+     "allowance_usd_month": 80.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261014/table.csv",
+       "release": "2026-10-14",
+       "category": "Reasoning",
+       "score": 86.7,
+       "nq": 202,
+       "band": 2,
+       "date": "2026-10-28"
+      }
+     ],
+     "served_build": "Go serves deepseek-v4.1-flash without a date (models.dev release date 2026-09-10, the original build; that Go serves exactly that build is NOT-PROVEN); release 2026-10-14 scored the original build, release 2026-10-25 only the 1017 update (owner R34, ADR-0129)"
     },
     {
      "route_key": "opencode-go/step-5-preview",
@@ -1880,7 +2561,7 @@
        "category": "Reasoning",
        "score": 79.6,
        "nq": 202,
-       "band": 2,
+       "band": 3,
        "date": "2026-10-28"
       }
      ]
@@ -1897,7 +2578,7 @@
        "category": "Reasoning",
        "score": 77.6,
        "nq": 202,
-       "band": 2,
+       "band": 3,
        "date": "2026-10-28"
       }
      ]
@@ -1931,6 +2612,20 @@
      }
     },
     {
+     "route_key": "opencode-go/deepseek-v4-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 71.57
+     }
+    },
+    {
      "route_key": "opencode-go/kimi-k2.7-code",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -1943,6 +2638,21 @@
       "release": "2026-06-25",
       "value": 68.41
      }
+    },
+    {
+     "route_key": "opencode-go/minimax-m3",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 67.26
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/hy3",
@@ -1979,6 +2689,70 @@
       "basis": "monthly allowance USD",
       "value": 60.0
      }
+    },
+    {
+     "route_key": "opencode-go/qwen3.7-plus",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/hy4-preview",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     }
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-flash: listed after every other Go route (owner R34)"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 15.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-pro: listed after every other Go route (owner R34)"
     },
     {
      "route_key": "openrouter/thinkingmachines/inkling:free",
@@ -2171,6 +2945,24 @@
       "basis": "monthly allowance USD",
       "value": null
      }
+    },
+    {
+     "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+     "tier": "OPENROUTER_PAID",
+     "score": 89.1,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 89.1,
+       "nq": 202,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "paid_use": "paid per token (owner R34: the credit goes to this route): only as an escalation after two failed $0-marginal attempts of the task, or as overflow when every $0-marginal route of the role is at capacity, in allowance fit or in cool-down; never for PUBLIC tasks (they have the free fallback); never without the owner's BUDGET decision"
     }
    ]
   },
@@ -2183,18 +2975,27 @@
    "noise_band": 20.89,
    "preferred_routes": [
     "opencode-go/deepseek-v4.1-flash",
+    "opencode-go/gemini-4-argon",
     "opencode-go/kimi-k3",
     "opencode-go/kimi-k3.1-pro",
     "opencode-go/mimo-v2.6-pro",
     "opencode-go/step-5-preview",
     "opencode-go/minimax-m3.1-flash",
     "opencode-go/glm-5.3-flash",
+    "opencode-go/qwen3.8-max",
     "opencode-go/glm-5.3",
     "opencode-go/glm-5.2",
+    "opencode-go/deepseek-v4-pro",
     "opencode-go/kimi-k2.7-code",
+    "opencode-go/minimax-m3",
     "opencode-go/hy3",
     "opencode-go/longcat-2.0",
     "opencode-go/mimo-v2.6-flash",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/mimo-v2.5-pro",
     "openrouter/thinkingmachines/inkling:free",
     "openrouter/google/gemma-4-31b-it:free",
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -2209,25 +3010,45 @@
     "openrouter/poolside/laguna-xs-2.1:free",
     "openrouter/recursive/flint-v1.0:free",
     "openrouter/thinkingmachines/inkling-small:free",
-    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "openrouter/deepseek/deepseek-v4.1-flash-1017"
    ],
    "entries": [
     {
      "route_key": "opencode-go/deepseek-v4.1-flash",
      "tier": "OPENCODE_GO",
-     "score": 79.5,
+     "score": 86.8,
      "allowance_usd_month": 80.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261014/table.csv",
+       "release": "2026-10-14",
+       "category": "Research",
+       "score": 86.8,
+       "nq": 22,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "served_build": "Go serves deepseek-v4.1-flash without a date (models.dev release date 2026-09-10, the original build; that Go serves exactly that build is NOT-PROVEN); release 2026-10-14 scored the original build, release 2026-10-25 only the 1017 update (owner R34, ADR-0129)"
+    },
+    {
+     "route_key": "opencode-go/gemini-4-argon",
+     "tier": "OPENCODE_GO",
+     "score": 83.1,
+     "allowance_usd_month": 30.0,
      "source_refs": [
       {
        "url": "https://livebench.ai/data/20261025/table.csv",
        "release": "2026-10-25",
        "category": "Research",
-       "score": 79.5,
+       "score": 83.1,
        "nq": 22,
        "band": 1,
        "date": "2026-10-28"
       }
-     ]
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/kimi-k3",
@@ -2332,6 +3153,24 @@
      ]
     },
     {
+     "route_key": "opencode-go/qwen3.8-max",
+     "tier": "OPENCODE_GO",
+     "score": 69.9,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 69.9,
+       "nq": 22,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
      "route_key": "opencode-go/glm-5.3",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -2360,6 +3199,20 @@
      }
     },
     {
+     "route_key": "opencode-go/deepseek-v4-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 71.57
+     }
+    },
+    {
      "route_key": "opencode-go/kimi-k2.7-code",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -2372,6 +3225,21 @@
       "release": "2026-06-25",
       "value": 68.41
      }
+    },
+    {
+     "route_key": "opencode-go/minimax-m3",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "LiveBench v1 overall",
+      "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+      "release": "2026-06-25",
+      "value": 67.26
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/hy3",
@@ -2408,6 +3276,70 @@
       "basis": "monthly allowance USD",
       "value": 60.0
      }
+    },
+    {
+     "route_key": "opencode-go/qwen3.7-plus",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/hy4-preview",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     }
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-flash: listed after every other Go route (owner R34)"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 15.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-pro: listed after every other Go route (owner R34)"
     },
     {
      "route_key": "openrouter/thinkingmachines/inkling:free",
@@ -2600,6 +3532,24 @@
       "basis": "monthly allowance USD",
       "value": null
      }
+    },
+    {
+     "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+     "tier": "OPENROUTER_PAID",
+     "score": 79.5,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 79.5,
+       "nq": 22,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "paid_use": "paid per token (owner R34: the credit goes to this route): only as an escalation after two failed $0-marginal attempts of the task, or as overflow when every $0-marginal route of the role is at capacity, in allowance fit or in cool-down; never for PUBLIC tasks (they have the free fallback); never without the owner's BUDGET decision"
     }
    ]
   },
@@ -2611,19 +3561,28 @@
    "nq_used_for_band": 50,
    "noise_band": 13.86,
    "preferred_routes": [
+    "opencode-go/qwen3.8-max",
     "opencode-go/kimi-k3",
     "opencode-go/glm-5.3",
+    "opencode-go/deepseek-v4-pro",
     "opencode-go/glm-5.2",
+    "opencode-go/minimax-m3",
     "opencode-go/kimi-k2.7-code",
     "opencode-go/glm-5.3-flash",
     "opencode-go/deepseek-v4.1-flash",
     "opencode-go/hy3",
     "opencode-go/longcat-2.0",
     "opencode-go/mimo-v2.6-flash",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/gemini-4-argon",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
     "opencode-go/minimax-m3.1-flash",
     "opencode-go/kimi-k3.1-pro",
     "opencode-go/mimo-v2.6-pro",
     "opencode-go/step-5-preview",
+    "opencode-go/mimo-v2.5",
+    "opencode-go/mimo-v2.5-pro",
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
     "openrouter/cohere/north-mini-code:free",
     "openrouter/dots-studio/dots-3-note-preview:free",
@@ -2638,9 +3597,28 @@
     "openrouter/recursive/flint-v1.0:free",
     "openrouter/thinkingmachines/inkling-small:free",
     "openrouter/thinkingmachines/inkling:free",
-    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+    "openrouter/deepseek/deepseek-v4.1-flash-1017"
    ],
    "entries": [
+    {
+     "route_key": "opencode-go/qwen3.8-max",
+     "tier": "OPENCODE_GO",
+     "score": 74.08,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 74.08,
+       "nq": null,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
     {
      "route_key": "opencode-go/kimi-k3",
      "tier": "OPENCODE_GO",
@@ -2676,6 +3654,23 @@
      ]
     },
     {
+     "route_key": "opencode-go/deepseek-v4-pro",
+     "tier": "OPENCODE_GO",
+     "score": 62.35,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 62.35,
+       "nq": null,
+       "band": 1,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
      "route_key": "opencode-go/glm-5.2",
      "tier": "OPENCODE_GO",
      "score": 62.29,
@@ -2691,6 +3686,24 @@
        "date": "2026-10-28"
       }
      ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3",
+     "tier": "OPENCODE_GO",
+     "score": 57.51,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 57.51,
+       "nq": null,
+       "band": 2,
+       "date": "2026-10-28"
+      }
+     ],
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
     },
     {
      "route_key": "opencode-go/kimi-k2.7-code",
@@ -2775,6 +3788,57 @@
      }
     },
     {
+     "route_key": "opencode-go/qwen3.7-plus",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/gemini-4-argon",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
+     "route_key": "opencode-go/hy4-preview",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     }
+    },
+    {
+     "route_key": "opencode-go/qwen3.8-flash",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 30.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 30.0
+     },
+     "serving": "served through OpenCode Console API translation - NOT PROVEN until the plain and --tools probes pass"
+    },
+    {
      "route_key": "opencode-go/minimax-m3.1-flash",
      "tier": "OPENCODE_GO",
      "score": null,
@@ -2821,6 +3885,32 @@
       "basis": "monthly allowance USD",
       "value": 15.0
      }
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 60.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-flash: listed after every other Go route (owner R34)"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.5-pro",
+     "tier": "OPENCODE_GO",
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": 15.0
+     },
+     "overflow_only": "superseded by opencode-go/mimo-v2.6-pro: listed after every other Go route (owner R34)"
     },
     {
      "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -3006,6 +4096,19 @@
       "basis": "monthly allowance USD",
       "value": null
      }
+    },
+    {
+     "route_key": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+     "tier": "OPENROUTER_PAID",
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25",
+     "order_evidence": {
+      "basis": "monthly allowance USD",
+      "value": null
+     },
+     "paid_use": "paid per token (owner R34: the credit goes to this route): only as an escalation after two failed $0-marginal attempts of the task, or as overflow when every $0-marginal route of the role is at capacity, in allowance fit or in cool-down; never for PUBLIC tasks (they have the free fallback); never without the owner's BUDGET decision"
     }
    ]
   }

@@ -50,6 +50,7 @@ from sqlalchemy.orm import Session
 from aeos.core.enums import DataClassification, Domain
 from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash
+from aeos.core.model_policy import invariant6_refusal
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
@@ -937,6 +938,10 @@ def _route_rejections(
         reasons.append("configuration changed without a recorded re-review (stored hash differs)")
     if route.mode in {"MOCK", "DEMO"}:
         reasons.append(f"mode {route.mode}: fixtures are never routable")
+    family = invariant6_refusal(route.route_key, route.model_id, (route.mode_params or {}).get("upstream_model"),
+                                provider=route.provider)
+    if family:
+        reasons.append(family)  # a registry row that slipped in by another path never serves (ADR-0129)
     status = route.status
     if status == "APPROVED":
         if find_route_decision(session, kind="ROUTE_ACTIVATION", route=route) is None:
