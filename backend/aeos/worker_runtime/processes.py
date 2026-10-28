@@ -543,6 +543,10 @@ def _running(p: psutil.Process) -> bool:
 
 
 def _marker_sweep(run_id: str) -> list[psutil.Process]:
+    """Processes that carry the run's marker. A process whose environment cannot be read is not the run's: it is
+    never killed on a guess. That includes macOS's ``SystemError`` from psutil for a process the kernel is tearing
+    down (``sysctl(KERN_PROCARGS2)`` fails with errno 0; LESSONS L15, the same error the verifier's process group
+    handles) - one unrelated process exiting during the sweep must not abort the kill of the run's own processes."""
     found: list[psutil.Process] = []
     me = os.getpid()
     for p in psutil.process_iter(["pid"]):
@@ -551,7 +555,7 @@ def _marker_sweep(run_id: str) -> list[psutil.Process]:
         try:
             if p.environ().get(RUN_MARKER) == run_id:
                 found.append(p)
-        except (psutil.Error, OSError, ValueError):
+        except (psutil.Error, OSError, ValueError, SystemError):
             continue
     return found
 
