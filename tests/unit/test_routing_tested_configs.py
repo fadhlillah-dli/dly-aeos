@@ -22,6 +22,9 @@ from aeos.routing.facade import eligible_routes, note_rate_limited, select_route
 from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS, client_terms_for, install_fakes
 from tests.unit.test_routing_service import DS, GLM, approve, task
 
+# routing keeps a route whose worker key is not stored out of eligibility: these tests store fake keys
+pytestmark = pytest.mark.usefixtures("worker_keys")
+
 LIMITS = {"max_attempts": 2, "max_minutes": 30, "max_cost_usd": 0}
 # §44 DecisionRecord for adopting an evaluated route (APPROVED activation)
 RECORD = {"options": ["keep TRIAL", "APPROVED"], "goal": "production worker route for small slices",

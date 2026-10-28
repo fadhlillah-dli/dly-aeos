@@ -269,6 +269,19 @@ def secrets_memory() -> Iterator[object]:
     set_provider_override(None)
 
 
+# Worker-model keys a test route may need: routing keeps a route whose key is not stored out of eligibility.
+FAKE_WORKER_KEY_REFS = ("workers/openrouter", "workers/opencode-zen", "workers/opencode-go", "workers/gemini")
+
+
+@pytest.fixture
+def worker_keys(secrets_memory: Any) -> Any:
+    """The worker-model keys stored in the in-memory test store (fake values, never a real key; hermetic: the
+    SecretGuard still hides the real keyring and vault). A test that needs eligible remote routes requests it."""
+    for ref in FAKE_WORKER_KEY_REFS:
+        secrets_memory.put(ref, f"fake-{ref.replace('/', '-')}-value", actor="test")
+    return secrets_memory
+
+
 # ------------------------------------------------------------------ hermetic secret stores (LESSONS L20)
 # On the owner's Mac a real OpenBao listens on loopback and its AppRole login lives in the macOS Keychain, so a test
 # that resolved a secret used the owner's real GitHub token against the live API (CI has neither and stayed green).

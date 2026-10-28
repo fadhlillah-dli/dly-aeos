@@ -147,4 +147,15 @@ def run_init(addr: str, *, shares: int, threshold: int, bootstrap: KeyringBootst
                 res.steps.append(f"revoked root token NOT removed from the OS keyring ({type(exc).__name__})")
     except Exception as exc:  # see comment above: never lose the init material
         res.error = f"{type(exc).__name__}: {exc}"
+    if "unsealed" in res.steps:
+        _store_changed(res)
     return res
+
+
+def _store_changed(res: InitResult) -> None:
+    """The new vault answers now (unsealed by this init): one ``secret:store`` signal after the last step, so the
+    checks that saw the store down re-run against the final state (also when a later step failed). Never raises."""
+    from aeos.secrets.readiness import store_state_changed
+
+    done = "set up" if res.error is None else "unsealed, setup incomplete"
+    store_state_changed(f"OpenBao initialised ({done})", transition="initialised")

@@ -9,7 +9,8 @@ from aeos.routing.service import credential_rejections
 from tests.unit.test_operations_fakes import block_module
 
 
-def test_route_needing_a_broker_credential_is_ineligible_while_the_broker_is_unavailable(db, monkeypatch):
+def test_route_needing_a_broker_credential_is_ineligible_while_the_broker_is_unavailable(db, monkeypatch,
+                                                                                      worker_keys):
     zen = ModelRoute(route_key="z", pool="WORKER", provider="opencode-zen",
                      endpoint="https://opencode.ai/inference/openai/v1",  # S07 (ADR-0041 amendment 2026-10-25)
                      model_id="m", mode_params={"credential_ref": "workers/opencode-zen"})
