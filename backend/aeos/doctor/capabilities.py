@@ -66,7 +66,9 @@ class CapRule:
 
 RULES: dict[Capability, CapRule] = {
     Capability.CAN_OPEN_DASHBOARD: CapRule(
-        "Membuka dashboard lokal", (*BASE, "host.port", "runtime.frontend_dist"), required=("auth.admins",),
+        # runtime.frontend_fresh: a stale or unverified bundle still opens the dashboard -> DEGRADED, not BLOCKED
+        "Membuka dashboard lokal", (*BASE, "host.port", "runtime.frontend_dist"),
+        required=("auth.admins", "runtime.frontend_fresh"),
         guard=("auth.http_guard",),
         advisory=("host.platform", "host.disk", "host.clock", "runtime.node", "repo.root", "repo.install_manifest",
                   "secret.no_raw_exposure", "host.vscode", "host.resource_budget"),

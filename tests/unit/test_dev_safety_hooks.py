@@ -583,13 +583,15 @@ def _repo_with_scripts(tmp_path: Path) -> Path:
     (root / "scripts" / "a.sh").write_text("#!/bin/sh\n", encoding="utf-8")
     (root / "scripts" / "tool.py").write_text("", encoding="utf-8")
     (root / "scripts" / "git-hooks" / "pre-push").write_text("#!/bin/sh\n", encoding="utf-8")
+    (root / "scripts" / "git-hooks" / "post-merge").write_text("#!/bin/sh\n", encoding="utf-8")
     return root
 
 
 def test_the_shellcheck_gate_runs_ci_s_files_and_fails_when_shellcheck_does(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root = _repo_with_scripts(tmp_path)
-    assert gates.shell_files(root) == ["scripts/a.sh", "scripts/b.sh", "scripts/git-hooks/pre-push"]
+    assert gates.shell_files(root) == ["scripts/a.sh", "scripts/b.sh", "scripts/git-hooks/pre-push",
+                                       "scripts/git-hooks/post-merge"]
     assert gates.SHELLCHECK_COMMAND == SHELLCHECK_CMD  # the same command as the CI step
     seen: list[list[str]] = []
 
@@ -605,7 +607,8 @@ def test_the_shellcheck_gate_runs_ci_s_files_and_fails_when_shellcheck_does(
     monkeypatch.setattr(gates, "resolve_argv", stand_in(0))
     green = gates.shellcheck_result(root, gates.clean_env())
     assert green.status == gates.PASS
-    assert seen[-1] == ["shellcheck", "scripts/a.sh", "scripts/b.sh", "scripts/git-hooks/pre-push"]
+    assert seen[-1] == ["shellcheck", "scripts/a.sh", "scripts/b.sh", "scripts/git-hooks/pre-push",
+                        "scripts/git-hooks/post-merge"]
 
 
 def test_the_shellcheck_gate_is_skipped_with_a_reason_without_the_tool_or_without_scripts(
@@ -1171,7 +1174,7 @@ def test_the_shell_scripts_follow_the_conventions():
 
 
 # ------------------------------------------------------------------ shellcheck in CI
-SHELLCHECK_CMD = "shellcheck scripts/*.sh scripts/git-hooks/pre-push"
+SHELLCHECK_CMD = "shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge"
 
 
 def test_ci_runs_shellcheck_in_the_static_job_that_runs_on_main_too():

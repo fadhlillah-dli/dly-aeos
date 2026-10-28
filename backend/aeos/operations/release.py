@@ -670,14 +670,19 @@ def _checkout_commit(root: Path) -> tuple[str | None, bool | None]:
     return head, dirty
 
 
+def release_id_of_root(settings: Settings, root: Path) -> str | None:
+    """The release id when *root* is an extracted release under the data dir, otherwise None (a checkout)."""
+    root = root.resolve()
+    return root.name if settings.layout.released_controller.resolve() in root.parents else None
+
+
 def code_identity(settings: Settings, code_root: Path | None = None) -> dict[str, Any]:
     """Identity of the code this process runs: ``release`` when AEOS is imported from an extracted release
     under the data dir, otherwise ``checkout`` (the editable source tree, which ``git pull`` or a local edit
     can change without any promotion)."""
     root = (code_root or repo_root()).resolve()
-    releases_dir = settings.layout.released_controller.resolve()
-    if releases_dir in root.parents:
-        release_id = root.name
+    release_id = release_id_of_root(settings, root)
+    if release_id is not None:
         try:
             prov = load_provenance(settings, release_id)
         except AeosError:

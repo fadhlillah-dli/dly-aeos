@@ -53,6 +53,19 @@ def _controller_not_elevated(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _no_real_ui_build(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``aeos serve`` rebuilds a stale Control Center bundle (aeos.operations.freshness). Tests never run a real npm
+    build: a test that wants one injects a fake ``BUILD_RUNNER``; any other attempt fails the build (the server still
+    starts with ui_build STALE)."""
+    from aeos.operations import freshness
+
+    def refuse(argv: list[str], cwd: Path, timeout: float, log_path: Path) -> int:
+        raise OSError("a real npm build is disabled in tests (inject freshness.BUILD_RUNNER)")
+
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", refuse)
+
+
+@pytest.fixture(autouse=True)
 def _no_os_signature_probe(monkeypatch: pytest.MonkeyPatch) -> None:
     """The bridge checks the OS code signature of the claude binary before a native call (§12). Test binaries
     are fakes, so the OS check (PowerShell Authenticode / codesign) is not spawned per test; the gate itself is

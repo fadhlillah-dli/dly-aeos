@@ -75,10 +75,10 @@ jobs:
       - name: G1 static — secret + PII scan (blueprints, contracts, docs)
         run: python scripts/secret_scan.py
       # shellcheck is preinstalled on ubuntu-latest. The shell scripts are the macOS bootstrap and dev helpers, the
-      # local test runner and the pre-push hook; a quoting slip in them fails here instead of on the owner's machine.
+      # local test runner and the git hooks; a quoting slip in them fails here instead of on the owner's machine.
       # It lives in this job (not in the pull-request-only commit-subjects job) so that it runs on main as well.
-      - name: G1 static — shellcheck (scripts/*.sh and the pre-push hook)
-        run: shellcheck scripts/*.sh scripts/git-hooks/pre-push
+      - name: G1 static — shellcheck (scripts/*.sh and the git hooks)
+        run: shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge
       # actionlint lints the workflows themselves (expressions, contexts, matrix keys, and, through the preinstalled
       # shellcheck, every `run:` block). The release is pinned by version and by the SHA-256 of its linux_amd64
       # tarball (taken from that release's checksums file): the download is compared before anything is extracted,

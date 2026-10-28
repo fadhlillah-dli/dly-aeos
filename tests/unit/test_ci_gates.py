@@ -539,7 +539,7 @@ G1_STATIC_STEPS = (("ruff", "python -m ruff check backend tests scripts"),
                    ("mypy darwin", "python -m mypy --platform darwin"),
                    ("mypy win32", "python -m mypy --platform win32"),
                    ("secret + PII scan", "python scripts/secret_scan.py"),
-                   ("shellcheck", "shellcheck scripts/*.sh scripts/git-hooks/pre-push"),
+                   ("shellcheck", "shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge"),
                    ("actionlint", "actionlint"),
                    (BITE_CONTROL_STEP, None))  # a script of its own, checked by _actionlint_problems
 
@@ -739,7 +739,7 @@ def test_the_actionlint_checks_bite_on_a_missing_or_late_checksum_a_pipe_and_a_m
     assert mutated(lambda j: j[STATIC_JOB]["steps"].remove(
         next(s for s in j[STATIC_JOB]["steps"] if "shellcheck" in str(s.get("run")))))
     assert mutated(lambda j: j["commit-subjects"]["steps"].append(
-        {"name": "G1 static — shellcheck", "run": "shellcheck scripts/*.sh scripts/git-hooks/pre-push"}))
+        {"name": "G1 static — shellcheck", "run": "shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge"}))
 
 
 # Any reference to the ``github`` context in an ``if:`` can make a job or step depend on the event (github.event_name,
