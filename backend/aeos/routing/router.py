@@ -237,7 +237,8 @@ def _free_tier_view(session: Session, r: ModelRoute) -> dict[str, Any] | None:
     view = free_tier.status(session)
     if free_tier.is_decision_c_route(r):
         problems = free_tier.worker_problems(session, r)
-        view["decision_c"] = {"status": "INELIGIBLE" if problems else "ELIGIBLE_IF_ACTIVATED", "problems": problems,
+        status = free_tier.DECISION_C_INELIGIBLE if problems else free_tier.DECISION_C_ELIGIBLE
+        view["decision_c"] = {"status": status, "problems": problems,
                               "data_classes": ["PUBLIC"], "domains": ["PERSONAL"],
                               "note": "Rute OpenRouter gratis di pool WORKER (keputusan C): hanya data PUBLIC, PERSONAL, "
                                       "selama gratis; peringkat pertama untuk task PUBLIC; tanpa fallback berbayar."}

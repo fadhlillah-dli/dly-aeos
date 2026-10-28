@@ -8,6 +8,7 @@ import { useAuth, type Domain } from "../auth/AuthContext";
 import { StatusBadge } from "../components/StatusBadge";
 import { Button } from "../components/ui";
 import { useEventStream, type StreamStatus } from "../lib/events";
+import { useEventInvalidation } from "../lib/eventInvalidation";
 import { absoluteTime, relativeTime } from "../lib/format";
 import { useTheme } from "../lib/theme";
 import type { Overview } from "../pages/overview/types";
@@ -245,6 +246,8 @@ export function AppShell() {
       qc.invalidateQueries({ queryKey: ["decision-queue"] });
     }, 750);
   }, !!session);
+  // One shared event -> query invalidation map for every page (Tools, Models, System Map, Decisions)
+  useEventInvalidation(!!session);
   useEffect(
     () => () => {
       if (queueTimer.current) clearTimeout(queueTimer.current);

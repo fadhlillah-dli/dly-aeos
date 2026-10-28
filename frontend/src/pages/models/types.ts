@@ -164,6 +164,34 @@ export interface RouteItem {
   budget_note?: string | null;
   /** plan + allowance per window of a SUBSCRIPTION route (cost module); null for any other route */
   subscription?: SubscriptionStatus | null;
+  /** OpenRouter `:free` route only (null for every other route): account-wide free-model limits, this instance's count
+   * and, for a WORKER route, the decision C eligibility. Absent on older servers. */
+  free_tier?: FreeTierView | null;
+}
+
+export interface FreeTierView {
+  provider: string;
+  scope: string;
+  rpm_limit: number;
+  daily_limit: number;
+  /** OWNER_SETTING | KEY_ENDPOINT (the limit the provider key endpoint reported, when lower) */
+  daily_basis: string;
+  requests_last_minute: number;
+  requests_today_utc: number;
+  /** OK | LIMIT_REACHED */
+  state: string;
+  reason: string | null;
+  /** what the count covers: only requests this AEOS instance sent, so the provider's own 429 stays authoritative */
+  counted: string;
+  checked_at: string;
+  decision_c?: {
+    /** INELIGIBLE | ELIGIBLE_IF_ACTIVATED */
+    status: string;
+    problems: string[];
+    data_classes: string[];
+    domains: string[];
+    note: string;
+  };
 }
 
 export interface UpstreamRequest {

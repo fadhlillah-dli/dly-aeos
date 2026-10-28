@@ -1,14 +1,12 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, Loading, Mono, Notice, PageHeader, Table, inputClass } from "../../components/ui";
-import { relativeTime } from "../../lib/format";
-import { useEventStream } from "../../lib/events";
+import { absoluteTime, relativeTime } from "../../lib/format";
 import { CopyCommand } from "../integrations/CopyCommand";
 import { useRefreshCatalog, useRoutes } from "./api";
-import { Badge } from "./badges";
+import { Badge, FreeTierBadge, RouteStatusBadge } from "./badges";
 import { RouteDrawer, freeLabel } from "./RouteDrawer";
 import { SupervisorSection } from "./SupervisorSection";
 import { POOL_LABELS, type RouteItem } from "./types";
@@ -16,9 +14,11 @@ import { POOL_LABELS, type RouteItem } from "./types";
 const POOLS = ["WORKER", "COMPARATOR", "ARENA", "WATCHLIST", "LOCAL"];
 const STATUSES = ["CANDIDATE", "UNTESTED", "TRIAL", "APPROVED", "DISABLED"];
 
+/** TRIAL and APPROVED are the two active states (a human decision bound to the current config hash). */
+const isActiveRoute = (r: RouteItem) => r.status === "TRIAL" || r.status === "APPROVED";
+
 export default function ModelsPage() {
   const { isAdmin } = useAuth();
-  const qc = useQueryClient();
   const routes = useRoutes();
   const refresh = useRefreshCatalog();
   const [pool, setPool] = useState("");
@@ -26,22 +26,28 @@ export default function ModelsPage() {
   const [domain, setDomain] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
 
-  useEventStream((e) => {
-    if (e.source === "routing") qc.invalidateQueries({ queryKey: ["routes"] });
-    if (e.source === "claude_bridge") qc.invalidateQueries({ queryKey: ["claude-status"] });
-  });
+  // Live refresh is installed once for the whole app (lib/eventInvalidation.ts, in AppShell), not per page.
 
+  // Active routes (TRIAL/APPROVED) first, so what is switched on is not buried under 30+ catalogue rows; the API
+  // order (pool, priority) is kept inside each group.
   const items = useMemo(
     () =>
-      (routes.data?.items ?? []).filter(
-        (r) =>
-          r.pool !== "SUPERVISOR" &&
-          (!pool || r.pool === pool) &&
-          (!status || r.status === status) &&
-          (!domain || r.eligible_domains.includes(domain)),
-      ),
+      (routes.data?.items ?? [])
+        .filter(
+          (r) =>
+            r.pool !== "SUPERVISOR" &&
+            (!pool || r.pool === pool) &&
+            (!status || r.status === status) &&
+            (!domain || r.eligible_domains.includes(domain)),
+        )
+        .map((r, i) => ({ r, i }))
+        .sort((a, b) => Number(isActiveRoute(b.r)) - Number(isActiveRoute(a.r)) || a.i - b.i)
+        .map(({ r }) => r),
     [routes.data, pool, status, domain],
   );
+  // From the API counts (computed on the server for every route); the list is only the fallback for an older server.
+  const total = routes.data?.counts?.total ?? routes.data?.items.length ?? 0;
+  const active = routes.data?.counts?.approved ?? (routes.data?.items ?? []).filter(isActiveRoute).length;
 
   const columns = [
     { header: "Pool", cell: (r: RouteItem) => <span className="text-xs">{POOL_LABELS[r.pool] ?? r.pool}</span> },
@@ -64,7 +70,16 @@ export default function ModelsPage() {
       header: "Versi teresolusi",
       cell: (r: RouteItem) => (r.resolved_version === "UNKNOWN" ? <StatusBadge status="UNKNOWN" /> : <Mono>{r.resolved_version}</Mono>),
     },
-    { header: "Gratis/berbayar", cell: (r: RouteItem) => <div className="space-y-0.5">{freeLabel(r)}{r.expires_note && <div className="text-xs text-ink-3">{r.expires_note}</div>}</div> },
+    {
+      header: "Gratis/berbayar",
+      cell: (r: RouteItem) => (
+        <div className="space-y-0.5">
+          {freeLabel(r)}
+          {r.free_tier && <div data-testid="free-tier-badge"><FreeTierBadge tier={r.free_tier} /></div>}
+          {r.expires_note && <div className="text-xs text-ink-3">{r.expires_note}</div>}
+        </div>
+      ),
+    },
     {
       header: "Data terms",
       cell: (r: RouteItem) => (
@@ -79,7 +94,10 @@ export default function ModelsPage() {
       header: "Status",
       cell: (r: RouteItem) => (
         <div className="flex flex-col gap-1">
-          <StatusBadge status={r.status} />
+          <RouteStatusBadge status={r.status} />
+          {isActiveRoute(r) && r.active_decision?.expires_at && (
+            <span className="text-xs text-ink-2" data-testid="route-valid-until">s/d {absoluteTime(r.active_decision.expires_at)}</span>
+          )}
           {r.mode !== "LIVE" && <StatusBadge status={r.mode} />}
           {r.quota.state === "EXHAUSTED" && <Badge status="EXHAUSTED" />}
           {r.client_restriction?.status === "OWNER_DECISION_REQUIRED" && (
@@ -142,6 +160,11 @@ export default function ModelsPage() {
           Entri bertanda DESIGN berasal dari master §23 dan katalog penyedia (E1). Tidak ada rute yang disetujui oleh seed; OFFICE
           selalu ditolak sampai otorisasi perusahaan tercatat; tidak ada fallback berbayar otomatis.
         </Notice>
+        {routes.data && (
+          <p className="mt-3 text-sm font-medium" data-testid="routes-active-summary" title="Hitungan dari API (semua pool, termasuk pengawas Max)">
+            Aktif: {active} dari {total} rute (TRIAL/APPROVED) · sisanya katalog kandidat
+          </p>
+        )}
         {refresh.error && <div className="mt-3"><ErrorBox error={refresh.error} /></div>}
         {refresh.data && (
           <div className="mt-3">
