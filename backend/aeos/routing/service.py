@@ -1335,8 +1335,12 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
                and paid.per_token_paid(get_route(session, x.route_key))}
     if charged and paid.escalation_active(session, task):
         # ADR-0128 ESCALATION: after 2 quality failures on $0-marginal routes the paid routes are tried first (in their
-        # own order); a busy paid route still leaves the $0-marginal ones after it
-        ranked = [*[x for x in ranked if x.route_key in charged], *[x for x in ranked if x.route_key not in charged]]
+        # own order); a busy paid route still leaves the $0-marginal ones after it. After a quota stop only the stopped
+        # route itself may go first (ADR-0124 decision 4: the admission refuses a move to any other paid route, so
+        # putting one first would keep the task waiting while a $0-marginal route is free)
+        stopped = paid.quota_stop_route(session, task)
+        first = charged if stopped is None else charged & {stopped}
+        ranked = [*[x for x in ranked if x.route_key in first], *[x for x in ranked if x.route_key not in first]]
     held: list[str] = []  # skipped for load (busy, allowance fit, PUBLIC share)
     passed: list[str] = []  # skipped for a limit (free tier, cool-down)
     for item in ranked:

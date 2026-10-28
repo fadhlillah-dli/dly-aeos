@@ -48,7 +48,17 @@ BUDGET decision.
      `FAIL`/`FAILED`, or acceptance status `REJECTED`, and whose outcome is none of `QUOTA_EXHAUSTED`,
      `CONTROLLER_SHUTDOWN`, `LEASE_LOST`, `ORPHANED_ALIVE`, `TIMEOUT`, `RESOURCE_LIMIT`, `CANCELLED`, `REASSIGNED`,
      `POLICY_CHANGED`, `WORKER_BLOCKER`, `SCOPE_VIOLATION`, `EXIT_NONZERO`. While escalation applies the paid routes
-     are tried first; a busy paid route still leaves the $0-marginal routes after it. Or
+     are tried first; a busy paid route still leaves the $0-marginal routes after it. When the task's latest attempt
+     stopped at a quota on another route, only that stopped route may go first: ADR-0124 decision 4 lets such a task
+     move only to a $0-marginal route, so putting another paid route first would keep it waiting while a $0-marginal
+     route is free (review finding of 2026-10-28; `routing.paid.quota_stop_route` reads the same row as the
+     scheduler's `_last_quota_stop`, and a test keeps the two equal).
+     **ESCALATION is not automatic under the §21 pilot cap.** A compiled TaskSpec has at most 2 implementation
+     attempts (`planning.dag.MAX_ATTEMPTS_CAP`). The second quality failure therefore ends the task BLOCKED
+     `NEEDS_DECISION` ("attempt cap reached (2/2)") through `request_repair`, and no third attempt starts by itself.
+     ESCALATION applies to the attempt the owner grants with a retry (an EXCEPTION decision with `extra_attempts`).
+     Raising the cap or granting an attempt automatically would change §21 and widen the owner's answer, so it is a
+     new owner question (LESSONS L11), not part of this ADR. Or
    * **OVERFLOW**: every $0-marginal route eligible for the task (domain, data class, tools, the TaskSpec allow-list) is
      blocked right now by a load skip (`ROUTE_BUSY`, `ALLOWANCE_FIT`) or a limit (cool-down, free-tier limit), and at
      least one such route exists. A paid route that is the task's only eligible route is not overflow.
@@ -73,6 +83,9 @@ BUDGET decision.
 
 * Go allowance is used first; credits are spent only where the owner said: on a task Go failed twice, or when every Go
   route is busy, out of window or cooling down.
+* A task Go failed twice stops at the §21 attempt cap first: the owner's retry with an extra attempt is what lets it
+  escalate (decision 2). Only a task with owner-granted extra attempts can reach two quality failures with attempts
+  left.
 * A paid route can no longer be a task's ordinary route: a deployment whose only eligible route is paid now waits with
   `PAID_NOT_ADMITTED` instead of running on it (no such deployment exists today: ADR-0124 answer 3 had no paid route).
 * Two tests encoding the amended rules changed: ADR-0124's "never a paid route after a skip" now runs with
@@ -88,4 +101,5 @@ BUDGET decision.
 * NOT-PROVEN: Windows and macOS Intel until CI runs the tests; that a BUDGET scope matches only exact route keys (until
   `fix/budget-scope-exact-routes` is merged, a `routes=` scope is matched as written); the paid route itself, its
   per-request cost bound and its ZDR provider policy (other branches); concurrency of two controller processes (the
-  selection reads in-flight runs in one session); that two quality failures predict a better result on the paid model.
+  selection reads in-flight runs in one session); that two quality failures predict a better result on the paid model;
+  whether the owner wants ESCALATION without a retry decision (it would need a §21 change, an open owner question).

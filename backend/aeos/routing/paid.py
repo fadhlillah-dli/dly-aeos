@@ -15,7 +15,10 @@ may take an INTERNAL task at all:
   (``REVIEW_FINDINGS``, the outcome ``request_repair`` gives a reviewed attempt after a verifier FAIL or reviewer
   findings) or the acceptance was REJECTED. A quota, time-out, resource, lease, shutdown, cancel, reassign, policy,
   blocker, scope or non-zero-exit stop is not a quality failure. While escalation is active the paid routes are tried
-  first (``select_route``); a busy paid route still falls back to the $0-marginal ones.
+  first (``select_route``); a busy paid route still falls back to the $0-marginal ones, and after a quota stop on
+  another route only that route may go first (``quota_stop_route``, ADR-0124 decision 4). Under the §21 pilot cap
+  (2 attempts per TaskSpec) the second quality failure blocks the task NEEDS_DECISION, so escalation applies to the
+  attempt the owner's retry (EXCEPTION with ``extra_attempts``) grants; it never starts an attempt by itself.
 * ``OVERFLOW``: every $0-marginal route eligible for the task (its role's allow-list, data class, domain, tools) is
   blocked right now by a load skip (``ROUTE_BUSY``, ``ALLOWANCE_FIT``) or a limit (cool-down, free-tier limit), and at
   least one such route exists.
@@ -99,6 +102,24 @@ def quality_failures(session: Session, task: TaskSpec) -> list[str]:
         if route is not None and capacity.zero_marginal(route) and is_quality_failure(run):
             out.append(run.id)
     return out
+
+
+QUOTA_STOP_OUTCOME = "QUOTA_EXHAUSTED"
+
+
+def quota_stop_route(session: Session, task: TaskSpec) -> str | None:
+    """The route the task's latest attempt stopped at a provider quota on (else None) - the same row the scheduler's
+    ``_last_quota_stop`` reads (``tests/unit/test_routing_paid_escalation.py`` keeps the two equal). ADR-0124
+    decision 4: a re-selection after such a stop moves only to a $0-marginal route or back to that route, so
+    ESCALATION never puts any other paid route first then (the admission would refuse it and the task would wait for
+    as long as that paid route stays idle)."""
+    if not task.id:
+        return None
+    last = session.scalar(select(WorkerRun).where(WorkerRun.task_id == task.id, WorkerRun.run_type != "REVIEW")
+                          .order_by(WorkerRun.created_at.desc(), WorkerRun.attempt.desc()).limit(1))
+    if last is None or last.outcome_code != QUOTA_STOP_OUTCOME or not last.model_route_key:
+        return None
+    return str(last.model_route_key)
 
 
 def escalation_active(session: Session, task: TaskSpec) -> bool:

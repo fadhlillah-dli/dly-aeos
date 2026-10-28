@@ -504,6 +504,11 @@ Copy the route key and its config hash from the `routes list` output.
     route key, its activation, and a cost limit per task (`limits.max_cost_usd`); the global budget still applies.
     Every paid run is recorded as an event (`route.paid_admitted`) and in the audit log. To turn a path off,
     set `paid_escalation: false` or `paid_overflow: false` in `aeos.yaml` and restart `./aeos serve`.
+    ESCALATION does not start by itself: a task may have at most 2 attempts (§21 pilot cap), so after the second
+    failure it is BLOCKED with `NEEDS_DECISION` ("attempt cap reached (2/2)"). Retry it with a rationale and one extra
+    attempt (*Pekerjaan Live* -> retry); that attempt is the one that goes to the paid route first. If the task's last
+    attempt stopped at a quota on a Go route, it goes back to a Go or free route instead (ADR-0124), never first to the
+    paid route.
 
   * **No cost limit per task.** A TaskSpec needs no `max_cost_usd`. The marginal cost of each run is $0, and the
     run's cost cap is $0.

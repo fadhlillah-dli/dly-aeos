@@ -193,6 +193,92 @@ def test_escalation_comes_after_exactly_two_quality_failures_and_never_after_quo
     assert not paid.escalation_active(routes, _task("PUBLIC"))
 
 
+def test_escalation_under_the_pilot_attempt_cap_runs_only_on_the_owners_retry(db, monkeypatch):
+    """Review finding (HEAD 5a463f7): the §21 pilot cap is 2 attempts per TaskSpec, so the second quality failure ends
+    the task BLOCKED NEEDS_DECISION through request_repair and no third admission happens by itself. Red: after two
+    reviewed attempts with findings (each a quality failure in ADR-0128's sense) the task is blocked at the cap and
+    admission refuses it. Near miss: the owner's retry (an EXCEPTION decision with extra_attempts) makes it READY; that
+    attempt is the one ESCALATION applies to (the routing side of two such failures is
+    test_escalation_comes_after_exactly_two_quality_failures_and_never_after_quota_stops)."""
+    from tests.unit.test_workforce_scheduler import _ready_env
+    from tests.unit.test_workforce_support import make_owner
+
+    fakes = FakeModules().install(monkeypatch)
+    _plan, _pv, specs = _ready_env(db, fakes, [{"task_key": "a", "limits": {"max_cost_usd": 0.5}}])
+    spec, tid = specs[0], specs[0].id
+    assert scheduler.max_attempts(spec) == 2
+    runs = []
+    for attempt in (1, 2):
+        run = scheduler.acquire_lease(db, tid, actor="t")
+        assert run.attempt == attempt and run.mode == "LIVE" and run.run_type == "IMPLEMENTATION"
+        scheduler.transition_task(db, tid, "RUNNING", reason="bound", actor="t")
+        scheduler.set_run_status(db, run, "RUNNING", reason="bound", actor="t")
+        scheduler.transition_task(db, tid, "REVIEW", reason="exit 0", actor="t")
+        scheduler.set_run_status(db, run, "REVIEW", reason="exit 0", actor="t")
+        te = scheduler.request_repair(db, tid, findings=["verifier FAIL"], review_record_id=None, actor="reviewer:x")
+        assert te.state == ("READY" if attempt == 1 else "BLOCKED")
+        runs.append(run)
+    assert [(r.execution_status, r.outcome_code) for r in runs] == [("FAILED", "REVIEW_FINDINGS")] * 2
+    assert all(paid.is_quality_failure(r) for r in runs)
+    assert te.reason_code == "NEEDS_DECISION" and "attempt cap reached (2/2)" in te.reason
+    adm = scheduler.admission_check(db, tid)
+    assert not adm.admitted  # two quality failures alone never start a third attempt
+    owner = make_owner(db)
+    te = scheduler.retry_task(db, tid, actor="user:o", extra_attempts=1, rationale="escalate", actor_user_id=owner)
+    assert te.state == "READY" and scheduler.max_attempts(spec, te) == 3
+
+
+def _stamp(run: WorkerRun, minutes_ago: int) -> WorkerRun:
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+
+    run.created_at = utcnow() - timedelta(minutes=minutes_ago)
+    return run
+
+
+def test_escalation_never_puts_a_paid_route_first_after_a_quota_stop_on_another_route(routes, monkeypatch):
+    """Review finding (HEAD 5a463f7): ADR-0124 decision 4 lets a task whose last attempt stopped at a quota move only
+    to a $0-marginal route (or back to the stopped route). Red before the fix: two quality failures on Go GLM, then a
+    quota stop on GLM; with GLM and the paid route both free, select_route put the paid route first and the admission
+    refused it on every tick (the task waited while GLM was free). Now GLM is selected and admission accepts it.
+    Near misses: a quota stop on the paid route itself still lets it go first; without a quota stop it goes first."""
+    install_fakes(monkeypatch)
+    _go(routes, GO_GLM)
+    _paid(routes)
+    _stamp(_attempt(routes, GO_GLM, outcome="REVIEW_FINDINGS", verifier="FAIL"), 30)
+    _stamp(_attempt(routes, GO_GLM, outcome="REVIEW_FINDINGS", verifier="FAIL"), 20)
+    assert select_route(routes, task=_task()).route.route_key == PAID  # near miss: no quota stop, ESCALATION first
+    stop = _stamp(_attempt(routes, GO_GLM, outcome="QUOTA_EXHAUSTED"), 10)
+    routes.flush()
+    assert paid.quota_stop_route(routes, _task()) == GO_GLM
+    assert scheduler._last_quota_stop(routes, TASK_ID).model_route_key == GO_GLM  # the same row the scheduler reads
+    sel = select_route(routes, task=_task())
+    assert sel.route.route_key == GO_GLM and sel.paid_admission is None
+    assert scheduler._reselection_problem(routes, _task(), sel.route) is None  # admission accepts it
+    refused = scheduler._reselection_problem(routes, _task(), service.get_route(routes, PAID))
+    assert refused is not None and "may only move to a $0-marginal route" in refused
+    # GLM busy: the paid route is reached after the skip and admitted by ESCALATION, and ADR-0124 still makes the task
+    # wait for a $0-marginal route (unchanged; GLM is offered again as soon as it is free)
+    _set(monkeypatch, route_max_active='{"opencode-go/glm-5.3-flash": 1}')
+    _run(routes, GO_GLM)
+    assert select_route(routes, task=_task()).route.route_key == PAID
+    routes.query(WorkerRun).filter(WorkerRun.execution_status == "RUNNING").delete()
+    routes.flush()
+    # near miss: the quota stop was on the paid route itself -> it may go first again
+    stop.model_route_key = PAID
+    routes.flush()
+    assert paid.quota_stop_route(routes, _task()) == PAID
+    assert scheduler._last_quota_stop(routes, TASK_ID).model_route_key == PAID
+    sel = select_route(routes, task=_task())
+    assert sel.route.route_key == PAID and sel.paid_admission["reason"] == "ESCALATION"
+    assert scheduler._reselection_problem(routes, _task(), sel.route) is None
+    # a later finished attempt that is not a quota stop ends the restriction (both readers agree)
+    _stamp(_attempt(routes, GO_GLM, outcome="TIMEOUT"), 5)
+    routes.flush()
+    assert paid.quota_stop_route(routes, _task()) is None and scheduler._last_quota_stop(routes, TASK_ID) is None
+
+
 # ------------------------------------------------------------------ 4. OVERFLOW only when every $0 route is blocked
 
 
