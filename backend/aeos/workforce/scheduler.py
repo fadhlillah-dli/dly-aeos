@@ -61,14 +61,17 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "DOCS_NOT_READY",
                         "DOCS_READINESS_UNVERIFIED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
                         "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "SUBSCRIPTION_BEYOND_PLAN", "FREE_TIER_LIMIT_REACHED",
-                        "ROUTE_CAPACITY"})
+                        "ROUTE_CAPACITY", "PAID_NOT_ADMITTED"})
 # ADR-0080 amendment 2026-10-26, flat-fee routes: SUBSCRIPTION_ALLOWANCE_EXHAUSTED (the 5h window used up) and
 # SUBSCRIPTION_ALLOWANCE_UNKNOWN (an uncountable call in it, at most 5 hours) clear with time, like a quota;
 # SUBSCRIPTION_BEYOND_PLAN (a call billed beyond the plan) clears only when the owner re-activates the route.
 # ADR-0041 amendment 2026-10-26, decision C: FREE_TIER_LIMIT_REACHED (the free OpenRouter WORKER route is at the
 # account's requests/minute or requests/UTC-day limit) clears with time; the task never moves to a route that is not free.
 # ADR-0124 (owner decision 2026-10-28): ROUTE_CAPACITY (every $0-marginal route is busy, cooling down or out of 5h
-# allowance) clears with time; the task never moves to a paid route.
+# allowance) clears with time; the task never moves to a paid route unless ADR-0128 admits one.
+# ADR-0128 (owner decision R34, 2026-10-28): PAID_NOT_ADMITTED - the selected route is per-token paid and neither
+# ESCALATION (2 quality failures of an INTERNAL task on $0-marginal routes) nor OVERFLOW (every $0-marginal route
+# blocked) admits it; PUBLIC tasks are never paid. Re-evaluated every tick.
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
                          "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "FREE_TIER_LIMIT_REACHED", "ROUTE_CAPACITY"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
@@ -1646,6 +1649,13 @@ def admission_check(session: Session, task_id: str) -> Admission:
             # enforced for every selection (an evaluation-bound task included): never two runs over a route's cap or a
             # start that does not fit its 5h window; the reason carries no allowance figures
             adm.waits.append((str(cap_wait["code"]), str(cap_wait.get("reason") or "")))
+        # ADR-0128: a per-token paid route takes an INTERNAL task only by ESCALATION or OVERFLOW - re-checked here for
+        # every selection path; the lease records an admitted one (event route.paid_admitted + audit record)
+        paid = ext.paid_admission(session, task, route)
+        if paid is not None:
+            adm.answers["paid_admission"] = paid
+            if not paid.get("admitted"):
+                adm.waits.append((str(paid.get("code") or "PAID_NOT_ADMITTED"), str(paid.get("why") or "")))
         est_usd, est_tokens, cost_unknown = _cost_estimate(task, route)
         if est_usd is None:
             adm.waits.append(("COST_UNKNOWN", cost_unknown))
@@ -1776,7 +1786,28 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
     session.flush()
     _emit_task(session, te, S.READY.value, S.LEASED.value, "lease acquired", actor)
     _emit_run(session, run, S.QUEUED.value, S.LEASED.value, "lease acquired", actor)
+    _record_paid_admission(session, run, adm, actor)
     return run
+
+
+def _record_paid_admission(session: Session, run: WorkerRun, adm: Admission, actor: str) -> None:
+    """ADR-0128, never silent: a run admitted on a per-token paid route records why (ESCALATION or OVERFLOW) on the
+    run, as an event and as an audit record."""
+    paid = adm.answers.get("paid_admission")
+    if not isinstance(paid, dict) or not paid.get("admitted"):
+        return
+    detail = {"route_key": paid.get("route_key"), "reason": paid.get("reason"), "task_id": run.task_id,
+              "quality_failures": list(paid.get("quality_failures") or []),
+              "blocked_zero_marginal": list(paid.get("blocked_zero_marginal") or []),
+              "max_cost_usd": adm.est_usd}
+    run.caps = {**(run.caps or {}), "paid_admission": detail}
+    events.emit(session, source="scheduler", kind="route.paid_admitted", entity_type="run", entity_id=run.id,
+                run_id=run.id, attempt=run.attempt, project_id=run.project_id, domain=run.domain, mode=run.mode,
+                payload=detail)
+    _audit(session, actor, "routing.route.paid_admitted", target_type="model_route",
+           target_id=str(paid.get("route_key") or run.model_route_key), project_id=run.project_id, domain=run.domain,
+           reason=str(paid.get("why") or "")[:500], details={**detail, "run_id": run.id})
+    session.flush()
 
 
 FAIRNESS_MAX_WAIT = timedelta(minutes=30)
