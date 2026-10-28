@@ -198,7 +198,7 @@ line of output is always `RUN_TESTS: PASS rc=<n>` or `RUN_TESTS: FAIL rc=<n>`, s
 tail of the log. macOS arm64 is proven; Windows and Intel macOS are NOT-PROVEN. On Windows run the same script
 with Git Bash; from cmd name its bash, `"%ProgramFiles%\Git\bin\bash.exe" scripts/run_tests.sh` (a `bash` found
 first on `PATH` can be the WSL one); it picks `.venv\Scripts\python.exe`. A suite run with `python -m pytest`
-directly writes no full-suite record, so the pre-push hook refuses its push. CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push`.
+directly writes no full-suite record, so the pre-push hook refuses its push. CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge`.
 
 After a PASS the runner records the run for the pre-push hook (`scripts/full_suite_record.py`, the one owner of the
 record format) when the run was FULL and the tree CLEAN; otherwise it prints one line
@@ -236,7 +236,8 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   and uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Static checks.** `static checks [G1] (ubuntu-latest)` runs ruff, mypy for `--platform darwin` and
   `--platform win32`, the secret scan, `shellcheck` over the shell scripts (`scripts/*.sh`,
-  `scripts/git-hooks/pre-push`) and `actionlint` over the workflows once for all host OSes, on pull requests and on
+  `scripts/git-hooks/pre-push`, `scripts/git-hooks/post-merge`) and `actionlint` over the workflows once for all host
+  OSes, on pull requests and on
   `main`. The actionlint release is pinned by version and SHA-256, and a bite control lints a known-bad and a
   near-miss fixture on every run. The three required `backend [G1,G2] (<os>)` aggregators need the job, so a failing
   static check fails them all.
@@ -380,9 +381,45 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   lack. A trailing `\` continues a line only in zsh and bash: on Windows it becomes `^` in cmd.exe and a backtick
   in PowerShell (`docs/OWNER_ACTIONS.md` section 5).
 
+- **`scripts/owner_dryrun.py`** dry-runs an owner script before the owner runs it (LESSONS L13). An owner script
+  lives outside the repository (for example in `~/Documents/dly-aeos-owner-scripts`) and exposes
+  `run(client, username, password, ask)`; a script without it is refused. Run it with the project interpreter from
+  the checkout the server runs (it imports the repository's own packages, not only the stdlib):
+
+  ```bash
+  .venv/bin/python scripts/owner_dryrun.py \
+    ~/Documents/dly-aeos-owner-scripts/example.py \
+    --answer SEMUA --answer TIDAK
+  ```
+
+  It copies the live database with sqlite3's online backup from a read-only connection into a new temporary data
+  dir (with a copy of `aeos.yaml`), reads which secret references exist from the real `aeos secrets status` (the
+  PERSONAL view without `--include-office`: names and expiry, never a value) and gives the dry run an in-memory store
+  that reports exactly those as present, with dummy values; `office/*` is not mirrored (NO_ACCESS, as for the
+  controller). A real store that cannot be read (OpenBao sealed or stopped, or a PERSONAL reference UNKNOWN) is
+  `OWNER_DRYRUN: FAIL` before anything is copied: start or unseal it and run again. The dry-run process has the null
+  keyring, OpenBao at a closed loopback port, and refuses every TCP connect to a non-loopback address and to the
+  loopback ports of the real OpenBao and Control Center. It creates a temporary SUPER_ADMIN in the copy (`--user
+  NAME`, default `dryrun-admin`), runs the script against the real app through a TestClient with the `--answer` values
+  in order (`ask`, `input()` and `getpass.getpass()` all take them, a getpass answer is not echoed; a prompt with no
+  answer left fails the run with `no --answer left for prompt: ...`), and runs the Doctor without `--functional`
+  before and after. While the Doctor runs, never while the script runs, the loopback port of the real Control Center
+  is open to it, so `host.port` sees a running server as `aeos doctor` does (CONNECTED), not as a port it cannot bind.
+  It prints the capability table (before -> after) and every check whose status changed. A capability that got worse
+  (READY < DEGRADED < UNKNOWN < BLOCKED), or any newly failing gating check (critical, required or project tier, or a
+  FAILED guard) whatever the status did (`BLOCKED -> BLOCKED`, or `BLOCKED -> DEGRADED` because another check
+  recovered), ends with `OWNER_DRYRUN: DEGRADED` (exit 1); `--accept-degrade 'reason'` accepts it with a stated
+  reason (exit 0, the last line says `OWNER_DRYRUN: DEGRADED-ACCEPTED`, never OK). Otherwise `OWNER_DRYRUN: OK` (exit
+  0); a harness or script failure, or a copy that is not at this checkout's migration head, is `OWNER_DRYRUN: FAIL`
+  (exit 2). The temporary dir is removed in every case. Show the capability diff together with the commands before
+  they reach the owner (`docs/agent/DELEGATION-BRIEF.md`, rule 10). Another owner command that writes state is
+  dry-run in-process against a temporary database, or wrapped in a tiny owner script and run through this harness.
+  NOT-PROVEN: child processes of the Doctor probes (the same ones `aeos doctor` runs) are not network-isolated, and
+  only the database and `aeos.yaml` of the data dir are copied.
+
 The tools have bite tests (`tests/unit/test_worktree_tool.py`, `tests/unit/test_ci_status_tool.py`,
 `tests/unit/test_github_settings.py`, `tests/unit/test_action_pins_tool.py`,
-`tests/unit/test_owner_commands_paste_safe.py`): a violating fixture is red and a
+`tests/unit/test_owner_commands_paste_safe.py`, `tests/unit/test_owner_dryrun.py`): a violating fixture is red and a
 near-miss legitimate one is green. The junction
 test runs only on Windows.
 

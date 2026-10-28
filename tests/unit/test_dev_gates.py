@@ -458,7 +458,7 @@ def test_gates_py_runs_exactly_the_g1_commands_of_ci_yml():
     in_ci, in_gates = _drift(CI_TEXT)
     assert in_ci == ["python -m ruff check backend tests scripts", "python -m mypy --platform darwin",
                      "python -m mypy --platform win32", "python scripts/secret_scan.py",
-                     "shellcheck scripts/*.sh scripts/git-hooks/pre-push", "actionlint", "npx tsc -b --noEmit", "npm test"]
+                     "shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge", "actionlint", "npx tsc -b --noEmit", "npm test"]
     assert in_ci == in_gates, "scripts/gates.py and the G1 steps of ci.yml diverged: change both together"
 
 
@@ -478,7 +478,7 @@ def test_the_guard_reads_the_one_static_job_and_no_shard_job_repeats_a_g1_comman
     ("python scripts/secret_scan.py", "python scripts/secret_scan.py --strict"),
     ("python -m ruff check backend tests scripts", "python -m ruff check backend tests"),
     ("python -m mypy --platform win32", "python -m mypy --platform linux"),
-    ("shellcheck scripts/*.sh scripts/git-hooks/pre-push", "shellcheck scripts/*.sh"),
+    ("shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge", "shellcheck scripts/*.sh"),
     ("run: actionlint\n", "run: actionlint -ignore 'property'\n"),
 ])
 def test_the_drift_guard_catches_a_changed_ci_command(old: str, new: str):

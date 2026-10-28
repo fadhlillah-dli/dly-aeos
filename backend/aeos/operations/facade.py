@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -16,6 +17,27 @@ def controller_report(settings: Settings, session: Session | None = None) -> dic
     from aeos.operations.release import controller_report as impl
 
     return impl(settings, session)
+
+
+def ui_bundle_state(settings: Settings, repo: Path, dist: Path | None = None) -> dict[str, Any]:
+    """Whether the Control Center bundle belongs to the code in *repo* (FRESH | STALE | UNVERIFIED | MISSING)."""
+    from aeos.operations.freshness import bundle_state
+
+    return bundle_state(settings, repo, dist)
+
+
+def frontend_head_tree(repo: Path) -> str | None:
+    """``git rev-parse HEAD:frontend``; None outside a git checkout."""
+    from aeos.operations.freshness import frontend_head_tree as impl
+
+    return impl(repo)
+
+
+def serve_code_drift(settings: Settings) -> dict[str, Any]:
+    """Does the running ``aeos serve`` run the backend code its checkout's HEAD has (see freshness.code_drift)."""
+    from aeos.operations.freshness import code_drift
+
+    return code_drift(settings)
 
 
 class RetentionMarkers:

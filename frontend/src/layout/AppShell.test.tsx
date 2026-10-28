@@ -23,9 +23,9 @@ const overview = (mode: string) => ({
   sections: {},
 });
 
-function api(opts: { mode?: string; queue?: unknown[] } = {}) {
+function api(opts: { mode?: string; queue?: unknown[]; health?: Record<string, unknown> } = {}) {
   return mockApi({
-    "/api/health": { status: "ok", version: "0.1.0", environment: "local" },
+    "/api/health": { status: "ok", version: "0.1.0", environment: "local", ...opts.health },
     "/api/control-center/overview": overview(opts.mode ?? "LIVE"),
     "/api/decisions/queue": { items: opts.queue ?? [], counts: {}, checked_at: new Date().toISOString(), mode: "LIVE" },
     "/api/projects": { items: [{ id: "p1", name: "DLY AEOS", project_key: "dly-aeos", domain: "PERSONAL" }] },
@@ -191,5 +191,83 @@ describe("AppShell installs the shared event -> query invalidation (R28)", () =>
       es.send({ type: "event", seq: 2, source: "policy", kind: "decision.recorded" });
     });
     await waitFor(() => expect(probeCalls()).toBe(2), { timeout: 3000 });
+  });
+});
+
+describe("freshness banner (R28: the page or the server is out of date)", () => {
+  const TREE_A = "a".repeat(40);
+  const TREE_B = "b".repeat(40);
+  const health = (o: { served?: string | null; drift?: string; ui?: string; judged?: string | null } = {}) => {
+    const served = o.served === undefined ? TREE_A : o.served;
+    return {
+      ui_build: { status: o.ui ?? "FRESH", reason: null, bundle_frontend_tree: o.judged === undefined ? served : o.judged },
+      freshness: {
+        served_bundle: { frontend_tree: served },
+        code_drift: { status: o.drift ?? "CURRENT", loaded_commit: "0123456789abcdef", head_commit: "fedcba9876543210" },
+        checked_at: new Date().toISOString(),
+      },
+    };
+  };
+
+  async function healthLoaded(calls: { url: string }[]) {
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/health")).toBe(true));
+    await screen.findByTestId("environment");
+    await waitFor(() => expect(screen.getByTestId("environment")).toHaveTextContent("local"));
+  }
+
+  it("stays hidden when the bundle, the served bundle and the server code are current", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    const calls = api({ health: health() });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
+  });
+
+  it("asks for a reload when the bundle in the browser differs from the one the server serves", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    api({ health: health({ served: TREE_B }) });
+    renderShell();
+    const banner = await screen.findByTestId("freshness-banner");
+    expect(banner).toHaveTextContent("Tampilan lebih lama dari server: muat ulang halaman");
+    expect(within(banner).getByRole("button", { name: "Muat ulang" })).toBeInTheDocument();
+    expect(banner).not.toHaveTextContent("restart");
+  });
+
+  it("asks for a restart when the server runs older backend code", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    api({ health: health({ drift: "DRIFT" }) });
+    renderShell();
+    const banner = await screen.findByTestId("freshness-banner");
+    expect(banner).toHaveTextContent("Server menjalankan kode lama (0123456789ab): restart ./aeos serve");
+    expect(within(banner).queryByRole("button", { name: "Muat ulang" })).not.toBeInTheDocument();
+  });
+
+  it("says when the server serves a STALE bundle (the page is the bundle ui_build judged)", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    api({ health: health({ ui: "STALE" }) });
+    renderShell();
+    expect(await screen.findByTestId("freshness-banner")).toHaveTextContent("menyajikan bundle tampilan usang (STALE)");
+  });
+
+  it("shows no STALE notice in the Vite dev server (no tree baked in)", async () => {
+    const calls = api({ health: health({ ui: "STALE" }) });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
+  });
+
+  it("shows no STALE notice after a manual rebuild while serving (served tree differs from the judged one)", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    const calls = api({ health: health({ ui: "STALE", served: TREE_A, judged: TREE_B }) });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
+  });
+
+  it("compares nothing in dev mode (no tree baked in) and with an older server without the block", async () => {
+    const calls = api({ health: { ...health({ served: TREE_B }), freshness: undefined } });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
   });
 });

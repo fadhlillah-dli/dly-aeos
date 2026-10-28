@@ -6,8 +6,11 @@ import importlib.metadata
 import platform
 import sqlite3
 import sys
+from pathlib import Path
 from typing import Any
 
+from aeos.core.hashing import file_sha256
+from aeos.core.paths import repo_root
 from aeos.doctor.checks import check
 from aeos.doctor.checks._common import binary_fingerprint, binary_outcome, file_fingerprint, logical
 from aeos.doctor.model import (
@@ -15,9 +18,8 @@ from aeos.doctor.model import (
     Outcome,
     Remedy,
     aeos_cmd,
-    npm_cmd,
+    frontend_build_command,
     os_install_command,
-    shell_chain,
     venv_python,
 )
 from aeos.inventory import scope as scope_reader
@@ -60,8 +62,18 @@ def _spec_ok(spec: str, version: str) -> bool | None:
         return None
 
 
+def _deps_fp(ctx: CheckContext) -> dict[str, Any]:
+    """pyproject.toml (stat) and the content hash of requirements.lock: a pulled lock change re-runs the check."""
+    lock = ctx.repo / "requirements.lock"
+    try:
+        lock_sha: str | None = file_sha256(lock)
+    except OSError:
+        lock_sha = None
+    return {**file_fingerprint("pyproject.toml")(ctx), "requirements_lock_sha256": lock_sha}
+
+
 @check("runtime.backend_deps", "RUNTIME", "Dependensi backend terpasang", component_id="dly-aeos-control-plane",
-       ttl_seconds=3600, severity_fail="CRITICAL", fingerprint=file_fingerprint("pyproject.toml"))
+       ttl_seconds=3600, severity_fail="CRITICAL", fingerprint=_deps_fp)
 def runtime_backend_deps(ctx: CheckContext) -> Outcome:
     read, deps = scope_reader.read_pyproject(ctx.repo)
     if read.status != "READ":
@@ -107,30 +119,126 @@ def runtime_node(ctx: CheckContext) -> Outcome:
     return out
 
 
+def _ops() -> Any:
+    from aeos.operations import facade
+
+    return facade
+
+
+def _served_dist(ctx: CheckContext) -> Path | None:
+    """The bundle the server serves (same order as ``aeos.api.app._frontend_dist``)."""
+    for c in (ctx.repo / "frontend" / "dist", repo_root() / "backend" / "aeos" / "static"):
+        if (c / "index.html").is_file():
+            return c
+    return None
+
+
 def _dist_fp(ctx: CheckContext) -> dict[str, Any]:
-    st = ctx.runner.stat(str(ctx.repo / "frontend" / "dist" / "index.html"))
-    return {"dist": st or {"present": False}}
+    return {"dist": ctx.runner.stat(str(ctx.repo / "frontend" / "dist" / "index.html")) or {"present": False}}
 
 
+def _fresh_fp(ctx: CheckContext) -> dict[str, Any]:
+    """Bundle files plus the committed frontend tree of HEAD: a git pull that changes ``frontend/`` re-runs the check,
+    a backend-only commit does not."""
+    dist = ctx.repo / "frontend" / "dist"
+    return {**_dist_fp(ctx), "build_record": ctx.runner.stat(str(dist / "aeos-build.json")) or {"present": False},
+            "head_frontend_tree": _ops().frontend_head_tree(ctx.repo)}
+
+
+def _rebuild_remedy(evidence: str) -> Remedy:
+    return Remedy(operation="Restart aeos serve (membangun ulang bundle usang sekali bila node_modules sesuai lockfile "
+                            "dan frontend/ bersih), atau build ulang Control Center dari lockfile (dari root repo)",
+                  command=frontend_build_command(), source="frontend/package-lock.json",
+                  target="<repo>/frontend/dist", privilege="pengguna lokal",
+                  rollback="build ulang dari commit sebelumnya", evidence_to_collect=evidence)
+
+
+# R28: existence and freshness are two checks. Only a missing bundle stops the dashboard from opening (critical for
+# CAN_OPEN_DASHBOARD, doctor exit 1); a stale or unverified one still opens it with an older UI, so
+# runtime.frontend_fresh sits in the required tier: CAN_OPEN_DASHBOARD DEGRADED, never BLOCKED, exit 0.
 @check("runtime.frontend_dist", "RUNTIME", "Control Center sudah di-build", component_id="control-center-frontend",
        ttl_seconds=3600, severity_fail="CRITICAL", fingerprint=_dist_fp, observation="installation",
        invalidators=("repo:lockfile",))
 def runtime_frontend_dist(ctx: CheckContext) -> Outcome:
-    from aeos.core.paths import repo_root as _root
+    dist = _served_dist(ctx)
+    if dist is None:
+        return Outcome("MISSING", "Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).",
+                       evidence={"looked_in": ["<repo>/frontend/dist"]}, error_code="FRONTEND_NOT_BUILT",
+                       remedy=Remedy(operation="Build Control Center dari lockfile (dari root repo); aeos serve dari "
+                                               "checkout git membangunnya sekali bila node_modules sesuai lockfile",
+                                     command=frontend_build_command(),
+                                     source="frontend/package-lock.json", target="<repo>/frontend/dist",
+                                     privilege="pengguna lokal", rollback="hapus frontend/dist",
+                                     evidence_to_collect="frontend/dist/index.html ada"))
+    return Outcome("VERIFIED", "Build Control Center tersedia (kesesuaian dengan kode: runtime.frontend_fresh).",
+                   evidence={"dist": logical(ctx, dist)}, target_identity=logical(ctx, dist))
 
-    candidates = [ctx.repo / "frontend" / "dist", _root() / "backend" / "aeos" / "static"]
-    for c in candidates:
-        if (c / "index.html").is_file():
-            return Outcome("VERIFIED", "Build Control Center tersedia.", evidence={"dist": logical(ctx, c)},
-                           target_identity=logical(ctx, c))
-    return Outcome("MISSING", "Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).",
-                   evidence={"looked_in": ["<repo>/frontend/dist"]}, error_code="FRONTEND_NOT_BUILT",
-                   remedy=Remedy(operation="Build Control Center dari lockfile (dari root repo)",
-                                 command=shell_chain("cd frontend", npm_cmd("ci --no-audit --no-fund"),
-                                                     npm_cmd("run build")),
-                                 source="frontend/package-lock.json", target="<repo>/frontend/dist",
-                                 privilege="pengguna lokal", rollback="hapus frontend/dist",
-                                 evidence_to_collect="frontend/dist/index.html ada"))
+
+@check("runtime.frontend_fresh", "RUNTIME", "Bundle Control Center sesuai kode", component_id="control-center-frontend",
+       ttl_seconds=3600, fingerprint=_fresh_fp, observation="installation", invalidators=("repo:lockfile",),
+       ok={"VERIFIED", "NOT_APPLICABLE"},
+       description="frontend/dist/aeos-build.json harus mencatat build bersih dari git rev-parse HEAD:frontend (rilis: "
+                   "kesesuaian dari provenance). Usang atau UNVERIFIED: dashboard tetap terbuka dengan UI lama "
+                   "(DEGRADED, bukan BLOCKED).")
+def runtime_frontend_fresh(ctx: CheckContext) -> Outcome:
+    dist = _served_dist(ctx)
+    if dist is None:
+        return Outcome("NOT_APPLICABLE", "Belum ada bundle untuk dibandingkan; runtime.frontend_dist melaporkan build "
+                                         "yang hilang.", evidence={"looked_in": ["<repo>/frontend/dist"]})
+    state = _ops().ui_bundle_state(ctx.settings, ctx.repo, dist)
+    evidence: dict[str, Any] = {"dist": logical(ctx, dist), **{k: state.get(k) for k in (
+        "basis", "bundle_frontend_tree", "head_frontend_tree", "release_id", "built_at", "clean", "reason")
+        if state.get(k) is not None}}
+    if state["status"] == "FRESH":
+        tree = str(state.get("bundle_frontend_tree") or "")[:12]
+        return Outcome("VERIFIED", f"Bundle Control Center sesuai frontend {state['basis']} ({tree}).",
+                       evidence=evidence, target_identity=logical(ctx, dist))
+    if state["status"] == "STALE":
+        return Outcome("CONFIGURED", f"Bundle Control Center usang: {state['reason']}. Dashboard menyajikan UI lama.",
+                       evidence=evidence, error_code="FRONTEND_STALE", target_identity=logical(ctx, dist),
+                       remedy=_rebuild_remedy("runtime.frontend_fresh VERIFIED (frontend_tree build = HEAD:frontend)"))
+    return Outcome("UNKNOWN", f"Bundle Control Center UNVERIFIED: {state.get('reason')}.", evidence=evidence,
+                   error_code="FRONTEND_BUILD_UNVERIFIED", target_identity=logical(ctx, dist),
+                   remedy=_rebuild_remedy("frontend/dist/aeos-build.json bersih dan sama dengan HEAD:frontend"))
+
+
+def _drift_fp(ctx: CheckContext) -> dict[str, Any]:
+    drift = _ops().serve_code_drift(ctx.settings)
+    return {k: drift.get(k) for k in ("status", "pid", "loaded_commit", "head_commit")}
+
+
+@check("runtime.code_drift", "RUNTIME", "Server menjalankan kode HEAD", component_id="dly-aeos-control-plane",
+       ttl_seconds=300, fingerprint=_drift_fp, observation="configuration", ok={"VERIFIED", "NOT_APPLICABLE"},
+       description="aeos serve mencatat commit yang dimuat saat start (<data>/run/serve.json); git pull yang mengubah "
+                   "backend/, requirements.lock atau pyproject.toml butuh restart.")
+def runtime_code_drift(ctx: CheckContext) -> Outcome:
+    drift = _ops().serve_code_drift(ctx.settings)
+    status = drift["status"]
+    evidence = {k: drift.get(k) for k in ("loaded_commit", "head_commit", "started_at", "changed", "changed_count",
+                                          "reason") if drift.get(k) is not None}
+    if status == "NOT_RUNNING":
+        return Outcome("NOT_APPLICABLE", f"Tidak ada aeos serve (checkout) yang berjalan: {drift['reason']}.",
+                       evidence=evidence)
+    if status == "RELOAD":
+        return Outcome("NOT_APPLICABLE", "aeos serve --reload memuat ulang kode backend sendiri.", evidence=evidence)
+    if status == "UNKNOWN":
+        return Outcome("UNKNOWN", f"Commit server tidak dapat dibandingkan: {drift['reason']}.", evidence=evidence,
+                       error_code="CODE_DRIFT_UNKNOWN")
+    loaded = str(drift.get("loaded_commit") or "")[:12]
+    head = str(drift.get("head_commit") or "")[:12]
+    if status == "CURRENT":
+        return Outcome("VERIFIED", f"Server menjalankan commit HEAD {head}.", evidence=evidence,
+                       component_version=head)
+    if status == "OUTSIDE_BACKEND":
+        return Outcome("VERIFIED", f"Server memuat {loaded}; HEAD {head} hanya mengubah path di luar backend "
+                       "(docs/frontend), tidak perlu restart.", evidence=evidence, component_version=loaded)
+    return Outcome("CONFIGURED", f"Server masih menjalankan {loaded}; HEAD mengubah {drift.get('changed_count')} file "
+                   f"backend: restart aeos serve to load {head}.", evidence=evidence, error_code="CODE_DRIFT",
+                   component_version=loaded,
+                   remedy=Remedy(operation="Hentikan aeos serve yang berjalan (Ctrl+C) lalu jalankan lagi",
+                                 command=aeos_cmd("serve"), target="aeos serve (checkout)",
+                                 rollback="git checkout commit sebelumnya lalu restart",
+                                 evidence_to_collect="runtime.code_drift VERIFIED"))
 
 
 def _schema(db_path: Any) -> dict[str, set[str]]:
