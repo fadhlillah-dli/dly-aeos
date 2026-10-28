@@ -334,6 +334,24 @@ def test_bite_two_domain_route_registry_summary_withholds_the_office_name(settin
     assert OFFICE_NAME not in str(outcome), f"route.registry quoted an office/ reference name: {outcome}"
 
 
+def test_bite_project_ref_name_reaches_no_doctor_route_worker_key_payload(settings, db, monkeypatch):
+    """route.worker_key quotes the references of keyless routes (excluded_keyless, its note and remedy); a
+    projects/<id>/ name passes the PERSONAL namespace check, so it is withheld by the same rule as route.registry."""
+    from aeos.doctor.checks.model_route import route_worker_key
+    from aeos.doctor.model import CheckContext
+    from tests.unit.test_inventory_fakes import base_runner
+
+    ref = "projects/acme/openai"
+    install_fakes(monkeypatch, doctor=False, inventory=False)
+    _seed(db)
+    _office_only(db, domains=["PERSONAL"], ref=ref)
+    _install_store(monkeypatch, CountingStore(set()))
+    outcome = route_worker_key(CheckContext(settings=settings, session=db, runner=base_runner(),
+                                            repo=settings.data_dir, now=utcnow()))
+    assert "projects/acme" not in str(outcome), f"route.worker_key quoted a projects/ reference name: {outcome}"
+    assert "<projects/ reference, name withheld>" in str(outcome), outcome
+
+
 def test_workers_ref_is_still_quoted_in_doctor_route_registry(personal_client: AuthedClient, settings, db,
                                                                monkeypatch):
     """Near miss: a platform-level workers/ reference is not private; the Doctor row keeps quoting it (here: the

@@ -326,6 +326,12 @@ def _keyless_remedy(keyless: dict[str, str]) -> Remedy:
                                        "model:route", "secret:store"),
        ok={"CONFIGURED", "VERIFIED", "NOT_APPLICABLE"}, severity_fail="HIGH", observation="configuration")
 def route_worker_key(ctx: CheckContext) -> Outcome:
+    # the reference names it quotes (missing keys, keyless routes) follow the same rule as route.registry (L12)
+    outcome = _route_worker_key(ctx)
+    return withhold_private_refs(ctx.session, outcome) if ctx.session is not None else outcome
+
+
+def _route_worker_key(ctx: CheckContext) -> Outcome:
     eligible, required, keyless = _required_key_refs(ctx)
     keyless_ev: dict[str, Any] = ({"excluded_keyless": keyless, "keyless_remedies": keyless_remedies(keyless)}
                                   if keyless else {})
