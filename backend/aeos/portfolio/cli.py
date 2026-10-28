@@ -164,8 +164,9 @@ def reclassify(
     """Change a project's data classification (ADR-0133).
 
     Raising (more restrictive) records an audit record and an event. Lowering records a POLICY decision, an audit
-    record and an event naming old class, new class, reason, actor and --approval-ref; it needs an active SUPER_ADMIN
-    and is never allowed for an OFFICE project (company authorisation, master s23). No password is asked: the owner
+    record and an event naming old class, new class, reason, actor and --approval-ref; it needs an active SUPER_ADMIN,
+    is never allowed for an OFFICE project (company authorisation, master s23) and is refused while the project has
+    content (plans, tasks, documents, memory, attachments, evidence, ...: LOWERING_BLOCKED_BY_CONTENT). No password is asked: the owner
     approves in chat and the maintainer runs it as the owner's actor (owner rule R43). Existing TaskSpecs are never
     rewritten; routing applies the higher of a task's class and the project's class, so a raise reaches open tasks
     at once, while a lowering applies only to plans and task DAGs compiled afterwards."""

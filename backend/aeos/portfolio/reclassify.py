@@ -15,6 +15,8 @@ the one audited path that changes it afterwards.
   (the decision registry re-checks it and its scope). The decision is written by ``aeos.policy.reclassification``
   through ``aeos.policy.facade``. A newer lowering supersedes the previous decision; revoking
   the newest one (``aeos policy revoke``) restores the class it lowered from (``on_decision_inactive``).
+* **Only a project without content is lowered** (decision 17): any row in ``CONTENT_TABLES`` refuses the lowering
+  (``LOWERING_BLOCKED_BY_CONTENT``), because copies of older content would carry it to lower-class tasks and routes.
 * **OFFICE is never lowered here**: which OFFICE data classes may leave the host is the company's authorisation
   (§23, ``approved_data_classes``), not an owner choice. Raising an OFFICE project stays allowed.
 * **In-flight work is never downgraded.** TaskSpecs are immutable (DB trigger) and keep the class they were compiled
@@ -138,18 +140,49 @@ def class_resolver(session: Session, project: Project) -> Callable[[Any], str]:
     return class_at
 
 
-def held_above(session: Session, project_id: str, klass: str) -> dict[str, int]:
-    """Memory records, attachments and evidence of the project whose own class is above *klass*: after a lowering they
-    keep their class, so they never reach a task or route of a lower class (ADR-0133)."""
-    from aeos.models.evidence import EvidenceArtifact
-    from aeos.models.portfolio import Attachment
-    from aeos.models.research import MemoryRecord
+# ADR-0133 decision 17: the project content a lowering is refused for - every table that holds text derived from the
+# project's data (label -> table). Copies of it (compiled artifacts, re-rendered documents, rebuilt context packs) would
+# otherwise carry it to a task or route of the lower class. Records about the system or references only (audit trail,
+# events, decisions, grants, broker and usage records, repositories, integrations, pull requests, executions,
+# acceptance hashes, publications, ops records) are not content.
+CONTENT_TABLES: tuple[tuple[str, str], ...] = (
+    ("plans", "plans"), ("plan versions", "plan_versions"), ("planning contexts", "planning_contexts"),
+    ("planning runs", "planning_runs"), ("task specs", "task_specs"), ("worker runs", "worker_runs"),
+    ("reviews", "review_records"), ("documents", "document_records"),
+    ("document revisions and checkpoints", "document_revisions"), ("memory records", "memory_records"),
+    ("attachments", "attachments"), ("evidence", "evidence_artifacts"), ("context packs", "context_packs"),
+    ("decision requests", "decision_requests"), ("eval case candidates", "eval_case_candidates"),
+    ("export snapshots", "ops_export_snapshots"), ("change proposals", "change_proposals"),
+)
+# append-only (DB triggers, core.db.APPEND_ONLY_TABLES): rows there can never be deleted
+APPEND_ONLY_CONTENT = frozenset({"plan_versions", "task_specs", "evidence_artifacts"})
+LOWERING_BLOCKED = "LOWERING_BLOCKED_BY_CONTENT"
 
+
+def existing_content(session: Session, project_id: str) -> dict[str, int]:
+    """Rows of each content table that belong to the project (only the kinds that have any)."""
+    from sqlalchemy import func
+
+    from aeos.core.db import Base, import_all_models
+
+    import_all_models()  # every content table is registered, whatever this process imported so far
     out: dict[str, int] = {}
-    for name, model in (("memory", MemoryRecord), ("attachments", Attachment), ("evidence", EvidenceArtifact)):
-        labels = session.scalars(select(model.classification).where(model.project_id == project_id))
-        out[name] = sum(1 for label in labels if cls.rank(normalized(label)) > cls.rank(klass))
+    for label, name in CONTENT_TABLES:
+        table = Base.metadata.tables[name]  # a renamed table fails loudly here (tests pin the list), never skipped
+        n = int(session.scalar(select(func.count()).select_from(table).where(table.c.project_id == project_id)) or 0)
+        if n:
+            out[label] = n
     return out
+
+
+def lowering_blocked_message(key: str, old: str, new: str, content: dict[str, int]) -> str:
+    counts = ", ".join(f"{label} {n}" for label, n in content.items())
+    fixed = sorted(label for label, name in CONTENT_TABLES if name in APPEND_ONLY_CONTENT and label in content)
+    tail = (f" Append-only, never deleted: {', '.join(fixed)}; a project that has them keeps its class (create a new "
+            f"project at {new} for the work that may be {new})." if fixed else "")
+    return (f"project {key} cannot be lowered from {old} to {new} while it has content recorded at {old}: {counts}. "
+            f"Copies of it (compiled task inputs, re-rendered documents, context packs) would carry it to {new} tasks "
+            f"and routes. Archive or delete that content first; nothing was changed.{tail}")
 
 
 def in_flight(session: Session, project_id: str) -> dict[str, Any]:
@@ -237,8 +270,12 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
     user = _check_actor(session, actor=actor, actor_user_id=actor_user_id, project=project, direction=direction)
     if direction == LOWER:
         require_writable(project)  # an ARCHIVED/RETIRED project is read-only; raising stays possible
+        content = existing_content(session, project.id)
+        if content:  # ADR-0133 decision 17: only a project without content may be lowered
+            _deny(session, actor_id=user.id, project=project, code=LOWERING_BLOCKED,
+                  reason=lowering_blocked_message(project.project_key, old, new, content),
+                  details={"from": old, "to": new, "content": content})
     flight = in_flight(session, project.id)
-    above = held_above(session, project.id, new) if direction == LOWER else {}
     decision_id: str | None = None
     restore_to: str | None = None
     ended: list[str] = []
@@ -251,7 +288,7 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
                      # stated, never implied: the CLI names the actor and asks no password; the owner's approval
                      # (chat, owner rule R43) is what allows it, and approval_ref says where it was given
                      "actor_check": ACTOR_CHECK, "approval_ref": approval, "from_label": from_label,
-                     "held_above_new_class": above, "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
+                     "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
         decision_id = decision.id
         restore_to = str((decision.details or {}).get("restore_to") or old)
     project.data_classification = new
@@ -266,7 +303,7 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
         project_id=project.id, domain=project.domain, reason=reason_v,
         details={"from": old, "to": new, "direction": direction, "actor_username": user.username,
                  "approval_ref": approval, "actor_check": ACTOR_CHECK, "decision_id": decision_id,
-                 "ended_decisions": ended, "from_label": from_label, "held_above_new_class": above,
+                 "ended_decisions": ended, "from_label": from_label,
                  "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
     events.emit(session, source="portfolio", kind=EVENT, entity_type="project", entity_id=project.id,
                 project_id=project.id, domain=project.domain,
@@ -274,8 +311,7 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
                          "actor": user.username, "reason": reason_v, "approval_ref": approval,
                          "decision_id": decision_id, "ended_decisions": ended})
     return {**base, "direction": direction, "actor": user.username, "decision_id": decision_id,
-            "restore_to": restore_to, "ended_decisions": ended, "audit_id": rec.event_id, "in_flight": flight,
-            "held_above_new_class": above}
+            "restore_to": restore_to, "ended_decisions": ended, "audit_id": rec.event_id, "in_flight": flight}
 
 
 def on_decision_inactive(session: Session, decision: Decision) -> dict[str, Any] | None:
@@ -342,11 +378,6 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
     lines.append(f"Only plans and task DAGs compiled after this change use {new} as their floor: a task with no "
                  f"stated class gets {new}, a stated class can only raise it.")
     if result["direction"] == LOWER:
-        above = result.get("held_above_new_class") or {}
-        lines.append(f"Classified above {new} and kept so: {above.get('memory', 0)} memory record(s), "
-                     f"{above.get('attachments', 0)} attachment(s), {above.get('evidence', 0)} evidence item(s); "
-                     f"they are never put into the context of a task below their class or sent to a route that does "
-                     f"not allow their class. Project records created before this change keep the class they had.")
         restore = result.get("restore_to") or old
         lines.append(f"Undo: run this command again with --to {restore}, or revoke the decision "
                      f"(aeos policy revoke {result['decision_id']}), which restores {restore}.")

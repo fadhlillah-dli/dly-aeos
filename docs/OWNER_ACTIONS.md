@@ -1197,20 +1197,36 @@ audit record say so and name your approval (`--approval-ref`). `<admin>` is your
   --reason "owner decision 2026-10-28: the repository is public"
 ```
 
-What it records: a POLICY decision on `project_classification:<project id>` naming the old class INTERNAL, the new
-class PUBLIC, your reason, your username and the approval reference, plus the audit record
-`portfolio.project.reclassify` and the event `portfolio.project.reclassified` with the same facts. It also prints how
-many memory records, attachments and evidence items stay above PUBLIC.
+**It is refused while the project has content.** A lowering is only possible for a project with no plans, plan
+versions, planning contexts or runs, task specs, worker runs, reviews, documents or document revisions (checkpoints
+included), memory records, attachments, evidence, context packs, decision requests, eval case candidates, export
+snapshots or change proposals: copies of older content (compiled task inputs, re-rendered documents, context packs)
+would otherwise reach PUBLIC tasks and routes (ADR-0133 decision 17). Repositories and integrations are not content.
+When content exists the command changes nothing, exits with 1 and prints, for example:
 
-What it does not change:
+<!-- paste-safe: file-content -->
+```text
+LOWERING_BLOCKED_BY_CONTENT: project dly-aeos cannot be lowered from INTERNAL to
+PUBLIC while it has content recorded at INTERNAL: evidence 1. Copies of it
+(compiled task inputs, re-rendered documents, context packs) would carry it to
+PUBLIC tasks and routes. Archive or delete that content first; nothing was
+changed. Append-only, never deleted: evidence; a project that has them keeps its
+class (create a new project at PUBLIC for the work that may be PUBLIC).
+Nothing was changed.
+```
 
-* TaskSpecs that already exist keep their class (INTERNAL). Plans and task DAGs compiled afterwards use PUBLIC: a task
-  whose plan states no class is PUBLIC, and a task the plan marks higher keeps the higher class.
-* Everything recorded while the project was INTERNAL keeps INTERNAL: memory, attachments, evidence, approved plans
-  and documents. A PUBLIC task's context leaves them out (each one is listed as omitted with the reason
-  "classification"), and the owner-local MCI source never goes to a PUBLIC task. The repository itself (its files at
-  the task's commit) is PUBLIC, because that is what you decided.
-* A run whose context the route may not carry does not start (`CONTEXT_CLASS_NOT_ALLOWED`).
+What to do: archive or delete the listed content first (there is no archive command for this yet). Plan versions,
+task specs and evidence are append-only and can never be deleted, so a project that has any of them keeps its class;
+the work that may be PUBLIC then needs a new project created at PUBLIC. On this Mac (checked read-only on
+2026-10-29) the DLY AEOS project has exactly one evidence record and nothing else, so this command is refused here
+until you decide how to proceed.
+
+When it succeeds it records a POLICY decision on `project_classification:<project id>` naming the old class
+INTERNAL, the new class PUBLIC, your reason, your username and the approval reference, plus the audit record
+`portfolio.project.reclassify` and the event `portfolio.project.reclassified` with the same facts. Plans and task
+DAGs compiled afterwards use PUBLIC: a task whose plan states no class is PUBLIC, and a task the plan marks higher
+keeps the higher class. The repository itself (its files at a task's commit) is PUBLIC, because that is what you
+decided; the owner-local MCI source never goes to a PUBLIC task.
 
 Check it with `./aeos project list --domain PERSONAL` (the class column) and
 `./aeos policy decisions --kind POLICY --target-type project_classification`.

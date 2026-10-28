@@ -545,15 +545,27 @@ def role_revision(session: Session | None, role_key: str) -> str | None:
 
 def artifact_index(session: Session | None, version: PlanVersion) -> dict[str, dict[str, Any]]:
     """Resolvable input artifacts of a version (§21 "input artifacts"): the plan's PRD sections and the planning
-    context attachments that were READ. Keys are lower-cased labels the planner may use."""
+    context attachments that were READ. Keys are lower-cased labels the planner may use.
+
+    ADR-0133: with a session, every entry records its own ``classification`` - a PRD section the project's class when
+    this plan version was created, an attachment its own label (else the project's highest class), a documentation
+    checkpoint the class docs_engine records - so a compiled copy never takes the task's (possibly lower) class."""
     idx: dict[str, dict[str, Any]] = {}
     content = version.content or {}
+    class_at = None
+    if session is not None:
+        from aeos.portfolio import facade as portfolio
+
+        project = session.get(Project, version.project_id)
+        class_at = portfolio.classification_at(session, project) if project is not None else None
     for prd in _dicts(content.get("requirements")):
         fk = str(prd.get("feature_key") or "")
         if not fk:
             continue
         entry: dict[str, Any] = {"ref": f"plan:requirements/{fk}", "kind": "plan_section", "sha256": content_hash(prd),
                  "name": f"PRD {fk}", "content": prd}
+        if class_at is not None:
+            entry["classification"] = class_at(version.created_at)
         for label in (f"prd {fk}", fk, str(prd.get("title") or "")):
             if label.strip():
                 idx.setdefault(label.strip().casefold(), entry)
@@ -567,7 +579,8 @@ def artifact_index(session: Session | None, version: PlanVersion) -> dict[str, d
                 continue
             # the text itself stays in the PlanningContext; the runtime loads it by ref and checks the hash
             entry = {"ref": f"attachment:{a.get('id')}", "kind": "attachment", "sha256": a.get("sha256"),
-                     "name": a.get("filename"), "trusted": False}
+                     "name": a.get("filename"), "trusted": False,
+                     "classification": a.get("classification") or (class_at(None) if class_at else STRICTEST_CLASS)}
             for label in (a.get("filename"), a.get("id")):
                 if label:
                     idx.setdefault(str(label).casefold(), entry)

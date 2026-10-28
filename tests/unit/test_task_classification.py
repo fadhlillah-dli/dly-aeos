@@ -210,14 +210,16 @@ def _direct_readers(files: list[Any]) -> list[str]:
 
 
 def test_every_reader_of_a_task_class_goes_through_the_one_helper():
-    """A new reader of ``task.data_classification`` in routing, the context packs or the worker runtime would ignore a
-    project raise or let a lowered project's data through (ADR-0133 decisions 6 and 12, review H1/M1)."""
+    """A new reader of ``task.data_classification`` in routing, the context packs, the worker runtime, the task compiler
+    or the documentation engine would ignore a project raise or label a copy of older data with a lower task class
+    (ADR-0133 decisions 6, 12 and 18; reviews H1, M1 and F1)."""
     from aeos.core.paths import repo_root
 
     root = repo_root() / "backend" / "aeos"
     files = [*sorted((root / "routing").glob("*.py")), root / "evaluation" / "executor.py",
-             *sorted((root / "knowledge").glob("*.py")), *sorted((root / "worker_runtime").glob("*.py"))]
-    assert len(files) > 15
+             *sorted((root / "knowledge").glob("*.py")), *sorted((root / "worker_runtime").glob("*.py")),
+             root / "planning" / "dag.py", *sorted((root / "docs_engine").glob("*.py"))]
+    assert len(files) > 25 and all(f.is_file() for f in files)
     offenders = _direct_readers(files)
     assert offenders == [], ("read a task's class through routing.facade.effective_task_class, or mark a line that "
                              f"only labels an item with the task's own class '{OWN_LABEL}' (ADR-0133): {offenders}")

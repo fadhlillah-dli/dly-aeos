@@ -225,17 +225,20 @@ def _close_db_window(prep: Prepared) -> dict[str, Any]:
 def resolve_artifacts(session: Any, task: TaskSpec) -> list[Any]:
     """§21 input artifacts bound by hash: an ``attachment:<id>`` reference is loaded from the planning context
     (scanned, redacted text) only when the attachment hash still matches the TaskSpec; otherwise the worker is told
-    it was not delivered. Plan sections carry their content in the immutable TaskSpec. ADR-0133: an attachment keeps
-    its own class (``classification`` on the artifact: the attachment's label, else the planning context's, else -
-    origin unknown - the highest class its project ever had); one above the task's effective class is never delivered
-    (its content is withheld, the artifact says why), whether it travels in the context pack or in the prompt."""
+    it was not delivered. Plan sections and documentation checkpoints carry their content in the immutable TaskSpec.
+
+    ADR-0133: every artifact except a plain label carries its own class (``classification``): an attachment's label
+    (else the planning context's), a compiled artifact's class recorded at compile time; when none is known, the
+    highest class the project ever had. One above the task's effective class is never delivered - its content is
+    withheld and the artifact says why - whether it travels in the context pack or in the prompt. A label (an
+    unresolved name, or a legacy string artifact) is the TaskSpec's own text and is never withheld."""
     from aeos.models.planning import Plan, PlanningContext, PlanVersion
     from aeos.models.portfolio import Attachment, Project
     from aeos.portfolio import facade as portfolio
     from aeos.routing import facade as routing
 
     arts = list(task.input_artifacts or [])
-    if not any(isinstance(a, dict) and a.get("kind") == "attachment" for a in arts):
+    if not any(isinstance(a, dict) and a.get("kind") != "label" for a in arts):
         return arts
     ceiling = routing.effective_task_class(session, task)
     project = session.get(Project, task.project_id)
@@ -246,23 +249,27 @@ def resolve_artifacts(session: Any, task: TaskSpec) -> list[Any]:
     inputs = {str(i.get("id")): i for i in ((ctx.inputs if ctx is not None else []) or [])}
     out: list[Any] = []
     for a in arts:
-        if isinstance(a, dict) and a.get("kind") == "attachment":
+        if not isinstance(a, dict) or a.get("kind") == "label":
+            out.append(a)
+            continue
+        delivered: dict[str, Any] = {}
+        if a.get("kind") == "attachment":
             att_id = str(a.get("ref") or "").split(":", 1)[-1]
             src = inputs.get(att_id)
             row = session.get(Attachment, att_id) if att_id else None
             klass = _known_class((row.classification if row is not None else None)
                                  or (src.get("classification") if src is not None else None) or unknown_origin)
-            if _class_rank(klass) > _class_rank(ceiling):
-                out.append({**a, "classification": klass, "withheld": "classification",
-                            "content": f"<<artifact withheld: classification {klass} above this task's class "
-                                       f"{ceiling}>>"})
-            elif src is not None and src.get("sha256") == a.get("sha256") and src.get("status") == "READ":
-                out.append({**a, "classification": klass, "content": src.get("text") or ""})
-            else:
-                out.append({**a, "classification": klass,
-                            "content": "<<artifact not delivered: missing or hash mismatch>>"})
+            ok = src is not None and src.get("sha256") == a.get("sha256") and src.get("status") == "READ"
+            delivered["content"] = (((src or {}).get("text") or "") if ok
+                                    else "<<artifact not delivered: missing or hash mismatch>>")
         else:
-            out.append(a)
+            # a compiled artifact (PRD section, documentation checkpoint): the class recorded when it was compiled
+            klass = _known_class(a.get("classification") or unknown_origin)
+        if _class_rank(klass) > _class_rank(ceiling):
+            out.append({**a, "classification": klass, "withheld": "classification",
+                        "content": f"<<artifact withheld: classification {klass} above this task's class {ceiling}>>"})
+        else:
+            out.append({**a, "classification": klass, **delivered})
     return out
 
 
@@ -478,7 +485,7 @@ def _ensure_task_pack(s: Any, task: TaskSpec, base_commit: str, artifacts: list[
     transaction (a denial there audits and rolls back only that unit of work, never this run's preparation)."""
     if _pack_reusable(s, _newest_task_pack(s, task), base_commit, task):
         return {"built": False, "reason": "a CURRENT task-scoped context pack for this base commit exists (kept)"}
-    delivered = [a for a in artifacts if isinstance(a, dict)] + [{"name": f"artifact-{i}", "content": a}
+    delivered = [a for a in artifacts if isinstance(a, dict)] + [{"name": f"artifact-{i}", "content": a, "kind": "label"}
                                                                   for i, a in enumerate(artifacts) if not isinstance(a, dict)]
     try:
         from aeos.knowledge import facade as knowledge
@@ -510,6 +517,15 @@ def _context_pack(s: Any, task: TaskSpec, base_commit: str, *,
     pack = _newest_task_pack(s, task)
     if pack is None:
         return None, {"used": False, "reason": "no task-scoped context pack (TaskSpec context only)", "build": build}
+    from aeos.routing import facade as routing
+
+    ceiling = routing.effective_task_class(s, task)
+    if _class_rank(pack.classification) > _class_rank(ceiling):
+        # ADR-0133 (review F3): the same check as _pack_reusable, also when the rebuild failed - a pack above the
+        # task's class is never given to the worker
+        return None, {"pack_id": pack.id, "pack_hash": pack.pack_hash, "used": False, "build": build,
+                      "reason": f"context pack {pack.id} is {_known_class(pack.classification)}, above this task's "
+                                f"class {ceiling}: never given to the worker (TaskSpec context only)"}
     info: dict[str, Any] = {"pack_id": pack.id, "pack_hash": pack.pack_hash, "base_commit": pack.base_commit,
                             "build": build}
     try:

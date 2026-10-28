@@ -115,22 +115,47 @@
     refused.
 14. **The executor never starts a run whose context the route may not carry** (`CONTEXT_CLASS_NOT_ALLOWED`, run
     BLOCKED, nothing spawned, workspace removed): the pack's class must be allowed by the route and its terms.
-15. **On a lowering the command says what stays above the new class**: the number of memory records, attachments and
-    evidence items of the project classified above it (also in the decision and the audit record), and that they never
-    reach a task or route below their class.
+15. **What stays above the new class is reported by the refusal** (superseded in round 3): the earlier report of memory
+    records, attachments and evidence above the new class is replaced by decision 17 - a lowering with any content is
+    refused and the refusal counts every kind.
 16. **An unknown stored label** (for example `Secret`) is read as RESTRICTED, as routing reads it: a lowering from it
     records `from_classification` RESTRICTED with the raw label in `from_label`, a revocation restores RESTRICTED, and
     `--to RESTRICTED` normalises the label. No CHECK constraint is added: SQLite adds one only by rebuilding the
     `projects` table (Alembic batch mode), which would have to drop and re-create its immutable-domain trigger, would
     fail on exactly the unknown labels this handles, and the repository has no CHECK constraint to follow; every write
     path validates instead (create normalises, reclassify normalises, PATCH refuses), and tests pin each one.
+17. **A lowering needs a project without content** (review round 3: per-source labels kept leaking through new copy
+    paths - a compile after the lowering copies an INTERNAL-era PRD section or documentation checkpoint into a PUBLIC
+    task's inputs, a re-render dates INTERNAL-era plan content now, an unrebuilt pack is reused). The lowering is refused
+    (`LOWERING_BLOCKED_BY_CONTENT`, nothing changed, DENIED audit record) while the project has any row in the content
+    tables (`portfolio.reclassify.CONTENT_TABLES`: plans, plan versions, planning contexts, planning runs, task specs,
+    worker runs, reviews, documents, document revisions and checkpoints, memory records, attachments, evidence, context
+    packs, decision requests, eval case candidates, export snapshots, change proposals); the message gives the count
+    per kind and says to archive or delete them first. No archive tool is built. Plan versions, task specs and
+    evidence are append-only, so a project that has any of them can never be lowered: the message says so, and work
+    that may be PUBLIC needs a new project created at PUBLIC. Records about the system or references only (audit trail,
+    events, decisions, grants, broker and usage records, repositories, integrations, pull requests, executions,
+    acceptance hashes, publications, ops records) are not content; a test fails when a new project table is neither
+    in the list nor named as not content. Raises stay always allowed. Decisions 12-15 stay as defence in depth for a
+    project lowered before this rule or by a direct database edit.
+18. **Copies carry the class of their source** (review round 3, F1 and F3, defence in depth). The task compiler
+    records a `classification` on every compiled input artifact (a PRD section: the project's class when its plan
+    version was created; an attachment: its label, else the project's highest class; a documentation checkpoint: the
+    class when docs_engine recorded it). The pack builder and `resolve_artifacts` use that recorded class for every
+    artifact but a plain label (none recorded: the project's highest class) and withhold any artifact above the task's
+    effective class, in the pack and in the prompt. `_context_pack` checks the newest task pack against the task's
+    effective class when it is used - a pack above it is never given to the worker, also when it was not rebuilt. The
+    ratchet of decision 6 also scans `planning/dag.py` and `docs_engine/`.
 
 ## Consequences
 
-* After the owner's command, the DLY AEOS project is PUBLIC; plans compiled afterwards produce PUBLIC tasks unless
-  the plan states a higher class for a task, and DeepSeek on OpenCode Go and the free OpenRouter WORKER routes may
-  take them (ADR-0041 decision C, ADR-0124 ordering). Tasks already compiled stay INTERNAL. The outgoing request
-  guard (ADR-0127) still refuses any request carrying a credential, whatever the class.
+* On this Mac the DLY AEOS project holds one evidence record and nothing else (read-only count, 2026-10-29), so the
+  owner's command is refused (decision 17) and, evidence being append-only, cannot be made to pass by deleting: the
+  owner decides how to proceed (for example a new PUBLIC project for the work that may be PUBLIC). A project without
+  content that is lowered becomes PUBLIC; plans compiled afterwards produce PUBLIC tasks unless the plan states a
+  higher class for a task, and DeepSeek on OpenCode Go and the free OpenRouter WORKER routes may take them (ADR-0041
+  decision C, ADR-0124 ordering). The outgoing request guard (ADR-0127) still refuses any request carrying a
+  credential, whatever the class.
 * Residual risk of decision 9: any local process that can run the CLI and names the owner's username can lower a
   PERSONAL project's class; `aeos policy decide` and `aeos routes activate` ask for the password. The decision, the
   audit record and the event make such a change visible with the approval it claims, it is limited to PERSONAL, and
@@ -155,5 +180,9 @@
   (after INTERNAL -> PUBLIC, INTERNAL memory, an INTERNAL attachment, an INTERNAL plan and the MCI source are absent
   from a PUBLIC task's prompt - red before: the INTERNAL memory reached it - while PUBLIC ones are present; a raise
   refuses the running run's next request - red before: HTTP 200); the executor refusal in
-  `tests/unit/test_worker_runtime_executor.py` (red before: the run reached REVIEW). Windows and Intel macOS: NOT-PROVEN until CI runs there. The owner's real database
-  is not touched by the tests.
+  `tests/unit/test_worker_runtime_executor.py` (red before: the run reached REVIEW). Round 3, each disabled in turn and
+  red: the content refusal (one parametrized test over all 17 content kinds plus the P1/P2 test - with the check off
+  the lowering went through), the pack check at use (F3 - the INTERNAL pack was handed over), the artifact ceiling
+  (F1 - nothing was withheld) and the compile-time class (F1 - no class recorded). Windows and Intel macOS:
+  NOT-PROVEN until CI runs there. The tests never open the owner's real database; the live count above was a separate
+  read-only query (`mode=ro&immutable=1`).

@@ -1,4 +1,8 @@
-"""What a task's worker may receive after a reclassification (ADR-0133, review H1 and M1).
+"""What a task's worker may receive after a reclassification (ADR-0133, reviews H1, M1, F1, F3).
+
+A lowering is refused while the project has content (decision 17), so the H1/F1/F3 cases below can only arise for a
+project lowered before that rule or by a direct database edit: they are defence in depth, built with
+``_legacy_lowering`` (the audit record of a lowering plus the class written directly).
 
 H1: after INTERNAL -> PUBLIC, a PUBLIC task's context pack and prompt carry nothing above PUBLIC: memory, attachments
 and project records keep the class they had when they were created, items above the task's effective class are left
@@ -90,6 +94,18 @@ def _approved_plan(db, project, overview: str, created_at: Any = None) -> None:
     db.flush()
 
 
+def _legacy_lowering(db, project, *, to: str = "PUBLIC") -> None:
+    """A lowering recorded before decision 17 (or a direct database edit): the reclassification audit record that the
+    class history reads, and the new class written directly - the content stays."""
+    from aeos.audit import service as audit
+
+    audit.record(db, actor_type="user", actor_id="legacy", action="portfolio.project.reclassify", target_type="project",
+                 target_id=project.id, project_id=project.id, domain=project.domain, reason="legacy lowering (test)",
+                 details={"from": project.data_classification, "to": to, "direction": "LOWER"})
+    project.data_classification = to
+    db.flush()
+
+
 def _prompt_for(task_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
     """The prompt a worker run of this task would receive: delivered artifacts, a fresh task pack, the prompt."""
     from aeos.knowledge import facade as knowledge
@@ -109,9 +125,6 @@ def _prompt_for(task_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
 
 
 def test_after_a_lowering_a_public_task_receives_nothing_above_public(db, verified_mci):
-    from aeos.portfolio.reclassify import reclassify_project
-
-    admin = create_admin(db)
     project = make_project(db, key="ctx-lowered")
     earlier = utcnow() - timedelta(hours=1)
     # recorded while the project was INTERNAL
@@ -119,7 +132,7 @@ def test_after_a_lowering_a_public_task_receives_nothing_above_public(db, verifi
     internal_att, internal_src = _attachment(db, project, name="budget.md", text=INTERNAL_ATTACHMENT, klass="INTERNAL")
     _approved_plan(db, project, INTERNAL_PLAN, created_at=earlier)
     db.commit()
-    reclassify_project(db, project=project, domain="PERSONAL", to="PUBLIC", reason=REASON, actor_user_id=admin.id)
+    _legacy_lowering(db, project)
     db.commit()
     # recorded after the project became PUBLIC (near misses: they are PUBLIC and must reach the worker)
     _memory(db, project, PUBLIC_MEMORY, "PUBLIC")
@@ -265,3 +278,105 @@ def test_a_raise_refuses_the_running_runs_next_request_on_any_route(running, db)
     assert model_proxy.task_class_refusal(db, running["grant"], "opencode-go/glm-test") is None
     denied = db.scalars(select(AuditEvent).where(AuditEvent.action == "broker.model_proxy.deny")).all()
     assert any("TASK_CLASS_NOT_ALLOWED" in (a.reason or "") for a in denied)
+
+
+# ---------------------------------------------------------------- F3 and F1 (review round 3, defence in depth)
+
+
+def test_a_pack_above_the_tasks_class_is_never_given_to_the_worker(db):
+    """F3: the newest task pack is checked against the task's effective class when it is used, not only when the
+    runtime decides whether to rebuild it - a pack built while the project was INTERNAL is never given to a PUBLIC task,
+    also when no rebuild happened (here: none was attempted)."""
+    from aeos.knowledge import facade as knowledge
+    from aeos.models.planning import TaskSpec
+    from aeos.worker_runtime import executor
+
+    project = make_project(db, key="ctx-old-pack")
+    _memory(db, project, INTERNAL_MEMORY, "INTERNAL")
+    _plan, _pv, [task] = make_plan(db, project, [{"task_key": "pub", "data_classification": "PUBLIC",
+                                                  "role_key": "planner"}])
+    db.commit()
+    with session_factory()() as s:
+        info = knowledge.build_task_pack(s, task.id, base_commit=None, artifacts=[])
+        s.commit()
+    _legacy_lowering(db, db.get(type(project), project.id))
+    db.commit()
+    with session_factory()() as s:
+        pack, used = executor._context_pack(s, s.get(TaskSpec, task.id), "base")
+        s.commit()
+    assert pack is None and used["used"] is False
+    assert f"context pack {info['context_pack_id']} is INTERNAL, above this task's class PUBLIC" in used["reason"]
+
+
+def test_compiled_artifacts_keep_their_recorded_class_and_unknown_ones_the_highest(db):
+    """F1: a compiled copy (a PRD section from an INTERNAL-era plan version, a documentation checkpoint) carries the
+    class recorded when it was compiled; one without a recorded class takes the project's highest class; either is
+    withheld above the task's class, in the prompt and in the pack. Near misses: a PUBLIC artifact and a plain label
+    reach the worker."""
+    from aeos.models.planning import TaskSpec
+    from aeos.worker_runtime import executor
+
+    project = make_project(db, key="ctx-copies")
+    _legacy_lowering(db, project)
+    artifacts = [
+        {"kind": "plan_section", "ref": "plan:requirements/F1", "name": "PRD F1", "classification": "INTERNAL",
+         "content": {"text": "INTERNAL-PRD-SECTION"}},
+        {"kind": "documentation_checkpoint", "ref": "doc_checkpoint:r1", "name": "checkpoint",
+         "content": {"text": "UNRECORDED-CHECKPOINT"}},
+        {"kind": "plan_section", "ref": "plan:requirements/F2", "name": "PRD F2", "classification": "PUBLIC",
+         "content": {"text": "PUBLIC-PRD-SECTION"}},
+        {"ref": None, "kind": "label", "label": "papan tulis", "resolved": False}]
+    # the copies live only in the compiled TaskSpec (as after a compile); its plan version holds no artifact content
+    plan = Plan(project_id=project.id, domain=project.domain, title="copies", state="APPROVED")
+    db.add(plan)
+    db.flush()
+    content = {"tasks": [{"task_key": "copies"}]}
+    v = PlanVersion(plan_id=plan.id, project_id=project.id, domain=project.domain, version=1, content=content,
+                    manifest_hash=content_hash(content))
+    db.add(v)
+    db.flush()
+    task = TaskSpec(plan_version_id=v.id, plan_version_hash=v.manifest_hash, project_id=project.id,
+                    domain=project.domain, task_key="copies", title="copies", goal="g", role_key="planner",
+                    data_classification="PUBLIC", input_artifacts=artifacts, allowed_paths=["src/**"],
+                    spec_hash=content_hash(artifacts))
+    db.add(task)
+    db.commit()
+    arts = executor.resolve_artifacts(db, db.get(TaskSpec, task.id))
+    withheld = {a["ref"]: a for a in arts if a.get("withheld")}
+    assert set(withheld) == {"plan:requirements/F1", "doc_checkpoint:r1"}
+    assert withheld["doc_checkpoint:r1"]["classification"] == "INTERNAL"  # none recorded -> the highest class
+    prompt, info, _pack = _prompt_for(task.id)
+    for secret in ("INTERNAL-PRD-SECTION", "UNRECORDED-CHECKPOINT"):
+        assert secret not in prompt
+    assert "PUBLIC-PRD-SECTION" in prompt and "papan tulis" in prompt
+
+
+def test_the_compiler_records_the_class_of_an_internal_era_plan_section(db):
+    """F1 at the source: a plan version created while the project was INTERNAL, compiled after a (legacy) lowering,
+    gives its PRD section artifact the class INTERNAL although the task itself is PUBLIC."""
+    from aeos.models.planning import TaskSpec
+    from aeos.planning import dag
+    from tests.unit.test_planning_support import sample_content
+    from tests.unit.test_planning_support import task as plan_task
+
+    project = make_project(db, key="ctx-compile")
+    content = sample_content(tasks=[plan_task("T1", input_artifacts=["PRD F1"]),
+                                    plan_task("T2", deps=["T1"], feature="F2")])
+    for t in content["tasks"]:
+        del t["data_classification"]  # unstated: the task takes the project's (PUBLIC) class
+    plan = Plan(project_id=project.id, domain=project.domain, title="old", state="APPROVED")
+    db.add(plan)
+    db.flush()
+    v = PlanVersion(plan_id=plan.id, project_id=project.id, domain=project.domain, version=1, content=content,
+                    manifest_hash=content_hash(content), created_at=utcnow() - timedelta(hours=1))
+    db.add(v)
+    db.flush()
+    plan.current_version_id = plan.approved_version_id = v.id
+    _legacy_lowering(db, project)
+    db.commit()
+    dag.compile_version(db, v, actor="tester")
+    db.commit()
+    spec = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id, TaskSpec.task_key == "T1"))
+    assert spec.data_classification == "PUBLIC"
+    [prd] = [a for a in spec.input_artifacts if a.get("kind") == "plan_section"]
+    assert prd["classification"] == "INTERNAL"

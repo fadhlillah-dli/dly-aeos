@@ -23,6 +23,7 @@ from aeos.models.decisions import Decision
 from aeos.models.planning import Plan, PlanVersion, TaskSpec
 from aeos.models.portfolio import Project
 from aeos.planning import dag
+from aeos.portfolio.reclassify import CONTENT_TABLES
 from tests.conftest import AuthedClient, create_admin, create_viewer
 from tests.unit.test_planning_support import make_project, sample_content, task
 
@@ -228,32 +229,84 @@ def test_owner_command_dry_run_on_the_seeded_platform_project(db, secrets_memory
     assert "Owner approval: chat 2026-10-28, owner rule R43" in r.output
 
 
-def test_lowering_reports_what_stays_above_the_new_class(db):
-    """Review H1 (d): memory, attachments and evidence keep their class after a lowering; the command counts those
-    above the new class and says they never reach a task or route below it. Near miss: PUBLIC items are not counted."""
-    from aeos.models.evidence import EvidenceArtifact
-    from aeos.models.portfolio import Attachment
-    from aeos.models.research import MemoryRecord
+def _content_row(db, name: str, project) -> str:
+    """A minimal row of content table *name* for *project* (parents created as needed); returns its id."""
+    import sqlalchemy as sa
+
+    from aeos.core.db import Base, import_all_models
+
+    import_all_models()
+    table = Base.metadata.tables[name]
+    parents = {"plans.id": "plans", "plan_versions.id": "plan_versions"}
+    values: dict = {}
+    for c in table.c:
+        if c.name == "project_id":
+            values[c.name] = project.id
+        elif c.name == "domain":
+            values[c.name] = project.domain
+        elif c.primary_key or c.nullable or c.default is not None or c.server_default is not None:
+            continue
+        elif c.foreign_keys:
+            target = next(iter(c.foreign_keys)).target_fullname
+            values[c.name] = _content_row(db, parents[target], project)
+        elif isinstance(c.type, sa.JSON):
+            values[c.name] = {}
+        elif isinstance(c.type, (sa.Integer, sa.BigInteger)):
+            values[c.name] = 1
+        else:
+            values[c.name] = f"x-{name}"
+    res = db.execute(table.insert().values(**values))
+    db.flush()
+    return str(res.inserted_primary_key[0])
+
+
+CONTENT_LABELS = [label for label, _name in CONTENT_TABLES]
+
+
+@pytest.mark.parametrize("label", CONTENT_LABELS)
+def test_a_lowering_is_refused_while_the_project_has_content(db, label):
+    """ADR-0133 decision 17 (review round 3): any content recorded before the lowering could reach a lower-class task
+    or route through a copy (a compiled artifact, a re-rendered document, a rebuilt pack), so the lowering is refused
+    with its own code, nothing changes, and the refusal names each kind and its count. Near miss: a project with no
+    content (repositories and integrations are not content) is lowered."""
+    from aeos.portfolio.reclassify import APPEND_ONLY_CONTENT
 
     create_admin(db)
-    p = make_project(db, key="held-above")
-    for klass in ("INTERNAL", "PUBLIC"):
-        db.add(MemoryRecord(project_id=p.id, domain=p.domain, content=f"note {klass}", classification=klass,
-                            status="ACCEPTED"))
-        db.add(Attachment(project_id=p.id, domain=p.domain, filename=f"{klass}.md", stored_name=f"{klass}.md",
-                          size_bytes=1, sha256=f"sha256:{klass.lower()}", classification=klass))
-        db.add(EvidenceArtifact(project_id=p.id, domain=p.domain, kind="LOG", origin="verifier",
-                                collector_identity="test", content_hash=f"sha256:{klass.lower()}",
-                                classification=klass))
+    p = make_project(db, key="has-content")
+    name = dict(CONTENT_TABLES)[label]
+    _content_row(db, name, p)
     db.commit()
-    r = _reclassify("held-above", "PUBLIC")
-    assert r.exit_code == 0, r.output
-    assert ("Classified above PUBLIC and kept so: 1 memory record(s), 1 attachment(s), 1 evidence item(s); they are "
-            "never put into the context of a task below their class") in r.output
-    [d] = _decisions(db)
-    assert d.details["held_above_new_class"] == {"memory": 1, "attachments": 1, "evidence": 1}
-    [a] = _audits(db, "SUCCESS")
-    assert a.details["held_above_new_class"] == {"memory": 1, "attachments": 1, "evidence": 1}
+    r = _reclassify("has-content", "PUBLIC")
+    assert r.exit_code == 1, r.output
+    assert "LOWERING_BLOCKED_BY_CONTENT" in r.output and f"{label} 1" in r.output, r.output
+    assert "Archive or delete that content first; nothing was changed." in r.output
+    if name in APPEND_ONLY_CONTENT:
+        clause = r.output.split("Append-only, never deleted: ", 1)[1].split(";", 1)[0]
+        assert label in clause and "a project that has them keeps its class" in r.output, r.output
+    assert _project(db, p.id).data_classification == "INTERNAL" and _decisions(db) == [] and _events(db) == []
+    [denied] = _audits(db, "DENIED")
+    assert denied.details["code"] == "LOWERING_BLOCKED_BY_CONTENT" and denied.details["content"][label] == 1
+    # near miss: an empty project is lowered; a raise of the project with content stays allowed
+    make_project(db, key="no-content")
+    assert _reclassify("no-content", "PUBLIC").exit_code == 0
+    assert _reclassify("has-content", "CONFIDENTIAL").exit_code == 0
+
+
+def test_the_content_list_covers_every_project_table():
+    """A new table holding project data must be added to CONTENT_TABLES or named here as not content (with why)."""
+    from aeos.core.db import Base, import_all_models
+
+    import_all_models()
+    not_content = {  # records about the system, references or bookkeeping - no text derived from project data
+        "acceptance_records", "audit_events", "events", "broker_requests", "broker_side_effects", "budget_reservations",
+        "capability_grants", "decisions", "delivery_pull_requests", "external_references",
+        "operational_work_projections", "ops_alerts", "ops_incidents", "ops_retirements", "project_integrations",
+        "publications", "repository_references", "task_executions", "usage_ledger",
+    }
+    with_project = {t.name for t in Base.metadata.tables.values() if "project_id" in t.c}
+    content = {name for _label, name in CONTENT_TABLES}
+    assert content <= with_project
+    assert with_project - content - not_content == set(), "classify the new table: content or not content"
 
 
 def test_reason_is_required_and_lowercase_class_is_accepted(db):
@@ -364,30 +417,28 @@ def test_an_unknown_stored_label_is_read_as_restricted_and_restored_as_restricte
 # ---------------------------------------------------------------- in-flight work keeps its class
 
 
-def test_new_plan_gets_public_tasks_while_an_existing_taskspec_keeps_internal(db):
+def test_compile_or_rerender_after_a_lowering_is_impossible(db):
+    """Review round 3, P1 and P2: a plan compiled before a lowering (its TaskSpecs copy PRD sections) and a rendered
+    document revision (a re-render would date INTERNAL-era content now) both block the lowering, so neither copy path
+    can reach a PUBLIC task. Existing TaskSpecs keep their class."""
+    from aeos.models.publishing import DocumentRecord, DocumentRevision
+
     create_admin(db)
     project = make_project(db, key="dag-floor")
-    public_tasks = [task("T1", data_classification="PUBLIC"),
-                    task("T2", deps=["T1"], feature="F2", data_classification="PUBLIC")]
-    before = _version(db, project, sample_content("Before", tasks=public_tasks))
+    before = _version(db, project, sample_content("Before", tasks=[task("T1", data_classification="PUBLIC")]))
     dag.compile_version(db, before, actor="tester")
+    doc = DocumentRecord(project_id=project.id, domain=project.domain, logical_doc_id="prd", node="prd", title="PRD")
+    db.add(doc)
+    db.flush()
+    db.add(DocumentRevision(document_id=doc.id, project_id=project.id, domain=project.domain, logical_doc_id="prd",
+                            kind="RENDERED", status="CURRENT", body_markdown="INTERNAL-era PRD"))
     db.commit()
-    assert _classes(db, before) == {"T1": "INTERNAL", "T2": "INTERNAL"}  # the INTERNAL project floor lifts them
-
     r = _reclassify("dag-floor", "PUBLIC")
-    assert r.exit_code == 0, r.output
-    assert "2 existing TaskSpec(s) (2 open), by class INTERNAL=2; none is changed" in r.output
-    assert _classes(db, before) == {"T1": "INTERNAL", "T2": "INTERNAL"}  # in-flight work is not downgraded
-    assert dag.compile_version(db, before, actor="tester")["created"] is False  # never recompiled
-
-    project = _project(db, project.id)
-    after = _version(db, project, sample_content("After", tasks=[
-        task("T1", data_classification="PUBLIC"),
-        task("T2", deps=["T1"], feature="F2", data_classification="INTERNAL")]))
-    dag.compile_version(db, after, actor="tester")
-    db.commit()
-    # PUBLIC where the new plan says PUBLIC; near miss: a task its plan marks INTERNAL stays INTERNAL
-    assert _classes(db, after) == {"T1": "PUBLIC", "T2": "INTERNAL"}
+    assert r.exit_code == 1 and "LOWERING_BLOCKED_BY_CONTENT" in r.output
+    for label in ("plans 1", "plan versions 1", "task specs 1", "documents 1", "document revisions and checkpoints 1"):
+        assert label in r.output, (label, r.output)
+    assert _project(db, project.id).data_classification == "INTERNAL"
+    assert _classes(db, before) == {"T1": "INTERNAL"}
 
 
 # ---------------------------------------------------------------- unknown class, domains, PATCH, generic path

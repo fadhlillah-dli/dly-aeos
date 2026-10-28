@@ -766,9 +766,9 @@ def _collect_task_artifacts(col: _Collector, task: TaskSpec, artifacts: list[dic
             import json
 
             content = json.dumps(content, ensure_ascii=False, default=str)
-        # ADR-0133: a delivered attachment keeps its own class (the executor states it; unknown -> the project's
-        # highest class); other artifacts are part of the immutable TaskSpec and carry its class
-        own = art.get("classification") if art.get("kind") == "attachment" else task.data_classification  # own label (ADR-0133)
+        # ADR-0133: every artifact but a plain label keeps its own recorded class (the compiler/executor state it;
+        # none recorded -> the project's highest class, via the collector); a label is the TaskSpec's own text
+        own = task.data_classification if art.get("kind") == "label" else art.get("classification")  # own label (ADR-0133)
         col.add(kind="attachment", ref=f"task-artifact:{art.get('ref') or name}", content=content,
                 trust="UNTRUSTED_DATA", classification=own, title=name, truncatable=True,
                 provenance={"source": TASK_ARTIFACT_SOURCE, "task_spec_id": task.id, "ref": art.get("ref"),
