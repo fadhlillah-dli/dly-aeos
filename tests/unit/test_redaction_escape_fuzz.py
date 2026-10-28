@@ -4,8 +4,9 @@ Three reviews of 2026-10-28 each found one more escape form in front of a token 
 as a boundary (a colour code written as text, the OSC-8 terminator, a bare ESC + ``[`` and the textual BEL forms). Instead
 of one more context per review, this test generates the contexts: ``N_PREFIXES`` prefixes from a small grammar of
 escape atoms (newline, tab, quote, backslash, BEL, NUL, other control bytes, a non-ASCII letter, CSI sequences with and
-without parameters, a bare CSI introducer, OSC sequences ended by BEL or by ESC + backslash, a bare ESC and other ESC
-sequences), chained one to four, each atom written raw, JSON-escaped, JSON-escaped twice, as C/Python/shell text, or
+without parameters, a bare CSI introducer, a CSI cut off after its parameters, a CSI with a quote, apostrophe or slash
+intermediate, OSC sequences ended by BEL or by ESC + backslash, a bare ESC and other ESC sequences, ``ESC % G``),
+chained one to four, each atom written raw, JSON-escaped, JSON-escaped twice, as C/Python/shell text, or
 URL-encoded (once or twice, over any of those). Every corpus secret of test_redaction_never_weaker is placed after
 every prefix and before a generated suffix, and the test asserts that
 
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import urllib.parse
 from bisect import bisect_right
 from collections.abc import Callable
@@ -60,11 +62,18 @@ def _atoms(rng: random.Random) -> dict[str, Callable[[], str]]:
         "csi_intermediate": lambda: ESC + "[" + rng.choice(["2", "", "6"]) + " q",
         "csi_tilde": lambda: ESC + "[3~",
         "csi_introducer": lambda: ESC + "[",
+        # an intermediate that JSON and source text escape: DECSCA ``CSI 1 " q``, DECIC ``CSI 2 ' }``
+        "csi_escaped_intermediate": lambda: ESC + "[" + rng.choice(["0", "1", "", "61;1", "2"])
+        + rng.choice(['"', "'", "/"]) + rng.choice("pq}~"),
+        # cut off after its parameters (no final byte), the last one not a digit: ``;``, ``:``, ``?`` (URL-encoded,
+        # their hex digits must not read as a token start)
+        "csi_open_params": lambda: ESC + "[" + rng.choice(["1;", "31;", "38:5:", "2;4;", "?", "1;2:"]),
         "osc8_st": lambda: ESC + "]8;;https://h.example/x" + ESC + "\\",
         "osc_title_bel": lambda: ESC + "]0;build log" + BEL,
         "osc_introducer": lambda: ESC + "]",
         "string_terminator": lambda: ESC + "\\",
         "esc_charset": lambda: ESC + "(B",
+        "esc_docs": lambda: ESC + rng.choice(["%G", "%@", "%/G"]),  # ISO 2022 coding system: a ``%`` intermediate
         "esc_single": lambda: ESC + rng.choice("78=>"),
         "esc_bare": lambda: ESC,
     }
@@ -206,4 +215,44 @@ def test_bite_the_fuzz_is_red_without_the_cut_view_and_names_the_grammar(monkeyp
     assert any("csi_introducer/" in m.split(" suffix ")[0].rsplit("+", 1)[-1] and "outgoing guard does not find it" in m
                for m in misses), misses[:5]
     secrets = [item for _, kind, item, _ in VARIANTS if kind == "anthropic_key"]
+    assert not any(item[4:4 + PIECE] in m for m in misses for item in secrets)  # L26
+
+
+def _last_atom(grammar: str) -> str:
+    """The atom (name/encoding) of a prefix grammar that sits directly before the secret."""
+    return grammar.split(" prefix ", 1)[1].split(" suffix ", 1)[0].rsplit("+", 1)[-1]
+
+
+# The escape boundary of e143cd0: an intermediate byte only raw or URL-encoded and never ``%``, and a cut view that
+# keeps an escape tail from its first token-start character, also a hex digit inside an encoded byte.
+_INTERMEDIATE_E143CD0 = redaction._raw_or_encoded(r"[ -$&-/]", "2[0-46-9A-Fa-f]")
+
+
+def _first_token_start_e143cd0(text: str, tail: int, end: int) -> int:
+    first = redaction._TOKEN_START_RE.search(text, tail, end)
+    return first.start() if first else end
+
+
+@pytest.mark.parametrize("old, atoms", [
+    ("intermediate", ("esc_docs/", "csi_escaped_intermediate/json")),
+    ("tail", ("csi_open_params/url",)),
+])
+def test_bite_the_e143cd0_boundary_misses_a_google_token_after_the_new_atoms(monkeypatch, old, atoms):
+    """Review of e143cd0 (2026-10-28): ``ESC % G`` and a CSI whose quote or slash intermediate is JSON-escaped left
+    their final letter glued to a Google key or refresh token, and a URL-encoded CSI cut off after its parameters
+    started the cut view at the ``A`` of ``%3A``, so the encoded bytes stayed glued to the token: red, naming the kind,
+    the variant and the atom before the token. Today's boundary is the near miss (the fuzz above is green)."""
+    if old == "intermediate":
+        boundary = re.compile(redaction._ESCAPE_BOUNDARY.pattern.replace(redaction._INTERMEDIATE,
+                                                                          _INTERMEDIATE_E143CD0))
+        assert boundary.pattern != redaction._ESCAPE_BOUNDARY.pattern
+        monkeypatch.setattr(redaction, "_ESCAPE_BOUNDARY", boundary)
+    else:
+        monkeypatch.setattr(redaction, "_tail_token_start", _first_token_start_e143cd0)
+    cases = [c for c in PREFIXES if _last_atom(c[2]).startswith(atoms)]
+    misses = fuzz_misses(frozenset({"google_api_key_1", "google_refresh"}), cases)
+    for atom in atoms:
+        assert any(_last_atom(m.split(" after ", 1)[1]).startswith(atom) and "outgoing guard does not find it" in m
+                   for m in misses), (atom, misses[:5])
+    secrets = [item for _, kind, item, _ in VARIANTS if kind in ("google_api_key", "google_refresh_token")]
     assert not any(item[4:4 + PIECE] in m for m in misses for item in secrets)  # L26

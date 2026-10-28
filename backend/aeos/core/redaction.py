@@ -202,7 +202,7 @@ def _reads_as_identifier(body: str) -> bool:
 # the JSON escape ``\b``; read without the tail, ``ESC[31m`` followed by a Google key leaves the ``m`` glued to it. So the
 # guard reads the text twice, and a token found in either reading is found: the greedy view blanks every escape
 # whole; the cut view blanks each escape only up to the first character of its tail that could begin a token
-# (_TOKEN_START), and keeps the rest. Both views have the length of the text, so a span found in either is the same
+# (_TOKEN_START, after the last encoded byte or backslash of the tail), and keeps the rest. Both views have the length of the text, so a span found in either is the same
 # span of the text. Each escape is matched from its first character and every alternative that starts a run of
 # backslashes always succeeds, possessively, so a long run of escapes costs linear time, not quadratic.
 _PERCENT = r"%(?:25)*"  # a percent sign, URL-encoded any number of times
@@ -220,8 +220,13 @@ _RBRACKET = _raw_or_encoded(r"\]", "5[dD]")
 _LBRACE = _raw_or_encoded(r"\{", "7[bB]")
 _RBRACE = _raw_or_encoded(r"\}", "7[dD]")
 _PARAMETER = _raw_or_encoded(r"[0-?]", "3" + _HEX)  # a CSI parameter byte, 0x30-0x3F
-# an intermediate byte, 0x20-0x2F, except ``%`` (0x25): a percent sign starts an encoded byte
-_INTERMEDIATE = _raw_or_encoded(r"[ -$&-/]", "2[0-46-9A-Fa-f]")
+# An intermediate byte, 0x20-0x2F: raw, URL-encoded, or backslash-escaped as JSON, C, Python and shell text write a
+# quote, an apostrophe or a slash (``\"``, ``\'``, ``\/``, ``\x22``, ``\u0022``; ``ESC[0"q`` in a JSON string). A ``%``
+# (0x25, ``ESC%G``), raw or encoded, is an intermediate only when no two hex digits follow it: then it starts an encoded
+# byte (a raw ESC before a URL-encoded escape).
+_NOT_HEX_PAIR = r"(?!" + _HEX + r"{2})"
+_INTERMEDIATE = (r"(?:[ -$&-/]|%" + _NOT_HEX_PAIR + r"|" + _PERCENT + r"2(?:[0-46-9A-Fa-f]|5" + _NOT_HEX_PAIR + r")|"
+                 + _BACKSLASH + r"++(?:[\"'/]|" + _PERCENT + r"2[27Ff]|x2" + _HEX + r"|u002" + _HEX + r"))")
 _ESC_FORM = (r"(?:\x1b|" + _PERCENT + r"1[bB]|" + _raw_or_encoded(r"\^", "5[eE]") + _LBRACKET + r"|"
              + _BACKSLASH + r"++(?:[eE]|x1[bB]|0?33|u001[bB]|U0000001[bB]|u" + _LBRACE + r"0*1[bB]" + _RBRACE + r"))")
 # Final bytes exclude ``\`` (a string terminator's backslash is an escape of its own) and ``^`` (a caret ESC ``^[``).
@@ -240,13 +245,35 @@ _TAIL_GROUPS = ("csi", "osc", "esc", "oct", "letter")
 # one of these, and the grammar fuzz finds every corpus token after every escape it generates.
 _TOKEN_START = frozenset('"-1AIRUbghirsuxy')
 _TOKEN_START_RE = re.compile("[" + re.escape("".join(sorted(_TOKEN_START))) + "]")
+# In the tail of an escape, an encoded byte (``%3A``, ``%253B``), a run of backslashes and a hex escape of an
+# intermediate (``\x22``, ``\u0022``) are never part of a token (no token pattern holds ``%`` or a backslash): a token
+# that the tail's last characters begin starts after the last of them, never at a hex digit or letter inside one (the
+# ``A`` of ``%3A``). A quote after a backslash can still begin one (the `operator init` JSON does).
+_TAIL_TOKEN_START_RE = re.compile(r"(?P<skip>" + _PERCENT + _HEX + r"{2}|" + _BACKSLASH + r"++(?:x" + _HEX + r"{2}|u"
+                                  + _HEX + r"{4})?)|[" + re.escape("".join(sorted(_TOKEN_START))) + r"]")
+_TAIL_ENCODED = re.compile(r"[\\%]")
 _NEEDS_VIEW = re.compile(r"[\\%\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\^\[")
+
+
+def _tail_token_start(text: str, tail: int, end: int) -> int:
+    """Where a token in the escape tail ``text[tail:end]`` would begin: the first _TOKEN_START character after the last
+    encoded byte or backslash of the tail, or *end*. Linear in the length of the tail."""
+    if not _TAIL_ENCODED.search(text, tail, end):
+        first = _TOKEN_START_RE.search(text, tail, end)
+        return first.start() if first else end
+    keep = end
+    for hit in _TAIL_TOKEN_START_RE.finditer(text, tail, end):
+        if hit.group("skip") is not None:
+            keep = end
+        elif keep == end:
+            keep = hit.start()
+    return keep
 
 
 def _boundary_views(text: str) -> tuple[str, str | None]:
     """The greedy view of *text* (every escape of _ESCAPE_BOUNDARY replaced by as many spaces) and the cut view (each
-    escape blanked only up to the first character of its tail in _TOKEN_START), or None for the cut view when it would
-    equal the greedy one. Both have the length of *text*. Linear."""
+    escape blanked only up to the character of its tail where a token would begin, _tail_token_start), or None for the
+    cut view when it would equal the greedy one. Both have the length of *text*. Linear."""
     if not _NEEDS_VIEW.search(text):
         return text, None
     greedy: list[str] = []
@@ -259,8 +286,7 @@ def _boundary_views(text: str) -> tuple[str, str | None]:
         for name in _TAIL_GROUPS:
             tail = m.start(name)
             if tail != -1:
-                first = _TOKEN_START_RE.search(text, tail, end)
-                keep = first.start() if first else end
+                keep = _tail_token_start(text, tail, end)
                 break
         between = text[pos:start]
         greedy += (between, " " * (end - start))

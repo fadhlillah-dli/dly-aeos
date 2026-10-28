@@ -80,8 +80,10 @@
      of them (JSON `\n`, `\t`, `\r`, `\"`, `\\`, `\/`, `\b`, `\f`, `\uXXXX`, encoded once or several times; C,
      Python and shell `\a`, `\e`, `\v`, `\xNN`, `\NNN` octal, `\0`, `\UXXXXXXXX`, `\u{X}`); an ESC in any form (raw,
      `\u001b`, `\x1b`, `\033`, `\e`, `\u{1b}`, caret `^[`, `%1B`) with the CSI sequence after it (`[` or `%5B`,
-     parameter bytes, intermediate bytes, a final byte; with or without parameters), the head of an OSC sequence (`]`
-     with its number and `;`) or another escape (`ESC(B`, `ESC7`); the OSC terminator (BEL, or ESC + backslash) as an
+     parameter bytes, intermediate bytes, a final byte; with or without parameters; an intermediate raw, URL-encoded
+     or backslash-escaped as JSON and source text write a quote, apostrophe or slash: `\"`, `\'`, `\/`, `\x22`), the
+     head of an OSC sequence (`]` with its number and `;`) or another escape (`ESC(B`, `ESC7`, `ESC%G`: a `%`
+     intermediate, raw or encoded, when no two hex digits follow it); the OSC terminator (BEL, or ESC + backslash) as an
      escape of its own; and any URL-encoded byte (`%XX`, `%25XX`). The OSC text (a hyperlink's URL, a window title) stays
      visible, because a token can sit in it.
    * **Never a token character.** No token pattern holds a backslash, `%` or a control character, so blanking those
@@ -95,7 +97,8 @@
    * **Two readings, one finding.** The guard scans two views of the text, each the same length as the text, and a
      token found in either is found: the greedy view blanks every escape whole; the cut view blanks each escape only up
      to the first character of its tail that can begin a token (`_TOKEN_START`: the first characters of every
-     high-confidence pattern, kept complete by a test over the corpus) and keeps the rest. A finding of the cut view
+     high-confidence pattern, kept complete by a test over the corpus) after the last encoded byte or backslash of the
+     tail (a token holds neither, and a hex digit inside `%3A` never starts one) and keeps the rest. A finding of the cut view
      that a greedy finding overlaps is not reported twice. The cut view is built only when it differs.
    * **Linear.** Each escape is matched from its first character, every alternative that starts at a backslash
      always succeeds, possessively, so no run of escapes is rescanned; a 2 MB text of escapes whose tails all differ
@@ -165,6 +168,18 @@ E. **One general escape rule, generated contexts (review of HEAD 528d93f, 2026-1
    red. `redact_text` and its patterns are unchanged (byte-identical to origin/main but for the same-language rewrite
    of the unseal-key label's whitespace, decision 6).
 
+F. **Escaped intermediates and encoded tails (review of HEAD e143cd0, 2026-10-28).** Two forms still left a letter
+   glued to a Google key or refresh token that `redact_text` masks: `ESC % G` (ISO 2022, a `%` intermediate the
+   grammar excluded because a `%` starts an encoded byte) and a CSI whose quote or slash intermediate is JSON-escaped
+   or written as text (`\u001b[0\"q`), whose final byte stayed visible after the backslash escape. And the cut view
+   started a URL-encoded CSI tail cut off after its parameters (`%1B%5B1%3A`) at the `A` of `%3A`, so the encoded byte
+   stayed glued to the token (a regression of decision 7 against 528d93f). Decided: the intermediate byte is read raw,
+   encoded or backslash-escaped, a `%` too unless two hex digits follow it; the cut view starts after the last encoded
+   byte or backslash of a tail. The fuzz grammar has the three atoms (`esc_docs`, `csi_escaped_intermediate`,
+   `csi_open_params`), and a bite test replays e143cd0's boundary and is red on each, naming the atom. The committed
+   seed and four further seeds (1,950,000 cases) have no miss; over 330 MB of dependency source (22,557 files) the
+   guard reports exactly what e143cd0 reported. `redact_text` is unchanged.
+
 Evidence: E2, unit tests on macOS arm64 (the differential corpus, the escape contexts through the broker's
 `sensitive_content_findings`, the grammar fuzz, the investigation and precedence tests with red fixtures on the first
 build).
@@ -186,8 +201,10 @@ NOT-PROVEN on Windows and macOS Intel until CI runs.
 * **Escape readings neither view resolves** (decision 7), each written in a way the language itself reads
   differently: an octal escape of one or two digits that starts with `1` directly before a Google refresh token
   (`\1` then `1//`: C reads `\11`); a CSI sequence cut off after its parameters, with no final byte of its own,
-  directly before a token (its first letter is read as the final byte, or it stays glued to the last parameter
-  digit); an OSC text (a title, a URL) with no terminator directly glued to a token (it is text, not an escape).
+  whose last parameter is a digit, directly before a token (its first letter is read as the final byte, or it stays
+  glued to that digit; a last parameter `;`, `:` or `?`, raw or URL-encoded, is resolved); an `ESC %` sequence whose
+  final byte is a hex digit (`ESC % B`) directly before a token that begins with one (`%BA` reads as an encoded
+  byte); an OSC text (a title, a URL) with no terminator directly glued to a token (it is text, not an escape).
 * **Escape forms outside the grammar**: caret notation other than `^[` (`^G`, `^M`), quoted-printable (`=0A`),
   HTML entities whose last character is a letter or digit glued to the token (a numeric entity ends with `;`, a
   boundary already), language-specific escapes such as `%u001b` or `\N{ESCAPE}`. Adding a form means adding it to the
