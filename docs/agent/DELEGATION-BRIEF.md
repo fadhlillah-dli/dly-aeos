@@ -41,8 +41,11 @@ RULES (lesson ids in brackets)
 9. Secrets [L1]. Never print, paste, log or commit a secret. If one appears, stop and report it
    without repeating its value.
 10. Owner-facing commands [L2, L13]. Run every command meant for the owner in zsh first. Every owner
-    script is dry-run with scripts/owner_dryrun.py and its capability diff is shown before the commands
-    are given to the owner; OWNER_DRYRUN: DEGRADED stops it unless the reason is given with --accept-degrade.
+    command or script that writes state is dry-run before it is given to the owner, and the result is
+    shown with it: an owner script with scripts/owner_dryrun.py (its capability diff; OWNER_DRYRUN:
+    DEGRADED stops it unless the reason is given with --accept-degrade); any other owner command that
+    writes state in-process against a temporary database, or wrapped in a tiny owner script and run
+    through scripts/owner_dryrun.py.
     Commands for the owner are drafted into a file and checked with scripts/paste_safe.py --check
     before they are shown; one prompting command (a password or a typed confirmation) per block, last
     (no inline '#' comment, every '[]', '*' and '<placeholder>' quoted, no line over 80 characters).

@@ -16,20 +16,26 @@ What it does:
 1. Copies the live database (the path of the real settings) with sqlite3's online backup from a read-only
    connection (``mode=ro``) into a new temporary data dir, and copies the real ``aeos.yaml`` beside it; the data dir
    of the dry run is the temporary one (``AEOS_DATA_DIR``). The live file is only read.
-2. Reads which secret references are PRESENT with the real ``aeos secrets status --include-office`` in a child
-   process (metadata only, never a value). In the dry run every secret access goes to an in-memory mirror that
-   reports exactly those references as present, with dummy values. A real store that cannot be read (sealed or
-   stopped OpenBao: backend none, or a reference UNKNOWN) fails the dry run before anything is copied: without the
-   presence the result says nothing about the real system. The dry-run process itself has the null keyring
+2. Reads which secret references are PRESENT with the real ``aeos secrets status`` in a child process (metadata
+   only, never a value). Owner scripts run in the PERSONAL domain, so only PERSONAL references are mirrored: the
+   status runs without ``--include-office`` and an ``office/*`` row is ignored. In the dry run every secret access
+   goes to an in-memory mirror that reports exactly those references as present, with dummy values; ``office/*`` is
+   NO_ACCESS there, as it is for the controller until a company authorisation. A real store that cannot be read
+   (sealed or stopped OpenBao: backend none, or a PERSONAL reference UNKNOWN) fails the dry run before anything is
+   copied: without the presence the result says nothing about the real system. The dry-run process itself has the null keyring
    backend, OpenBao at a closed loopback port, and refuses every TCP connect to a non-loopback address and to the
    loopback ports of the real OpenBao and the real Control Center, so no provider call and no live write can happen.
 3. Creates a temporary SUPER_ADMIN in the copy and calls ``run(client, username, password, ask)`` with a TestClient
-   of the real app; ``ask`` returns the ``--answer`` values in order. A prompt with no answer left fails the run.
+   of the real app; ``ask``, ``input()`` and ``getpass.getpass()`` all take the ``--answer`` values in order (a
+   getpass answer is not echoed). A prompt with no answer left fails the run: ``no --answer left for prompt: P``.
 4. Runs the Doctor (non-functional checks only: no Claude call, no quota, no network probe) before and after, and
    prints the capability table (before -> after) and every check whose status changed. A gating check (critical or
-   required tier, a project check, a FAILED guard) of a capability that newly fails also counts as worse, even when
-   the capability was already BLOCKED before (``CAN_RUN_WORKER: BLOCKED -> BLOCKED``): the real system may be
-   READY where the copy is not.
+   required tier, a project check, a FAILED guard) of a capability that newly fails always counts as worse, also
+   when the capability was already BLOCKED before (``CAN_RUN_WORKER: BLOCKED -> BLOCKED``) and when it got better
+   at the same time because another check recovered (``BLOCKED -> DEGRADED``): the real system may be READY where
+   the copy is not. Host checks observe the real machine as ``aeos doctor`` does: while the Doctor runs (never
+   while the script runs) the loopback port of the real Control Center is open to it, so ``host.port`` sees the
+   running server (CONNECTED through ``/api/health``) instead of a port the harness made unbindable.
 
 Exit codes and the last line: 0 ``OWNER_DRYRUN: OK``; 1 ``OWNER_DRYRUN: DEGRADED`` when a capability got worse
 (READY < DEGRADED < UNKNOWN < BLOCKED; NOT_APPLICABLE counts as READY) or one of its gating checks newly fails; 0 ``OWNER_DRYRUN: DEGRADED-ACCEPTED`` when
@@ -143,9 +149,14 @@ def _when(text: str) -> datetime | None:
         return None
 
 
+def _office(ref: str) -> bool:
+    return ref.split("/", 1)[0] == "office"
+
+
 def parse_presence(text: str) -> Presence:
-    """Parse the output of ``aeos secrets status --include-office``. A store that is unavailable (backend none, or
-    a reference UNKNOWN) is returned as unavailable with no references; ``dry_run`` refuses to run on it."""
+    """Parse the output of ``aeos secrets status`` (the PERSONAL view). ``office/*`` rows are ignored even when
+    present: owner scripts run in the PERSONAL domain. A store that is unavailable (backend none, or a PERSONAL
+    reference UNKNOWN) is returned as unavailable with no references; ``dry_run`` refuses to run on it."""
     store = None
     rows: list[tuple[str, str, str]] = []
     for line in text.splitlines():
@@ -154,7 +165,7 @@ def parse_presence(text: str) -> Presence:
             store = m.group(2)
             continue
         r = _ROW.match(line)
-        if r:
+        if r and not _office(r.group(1)):
             rows.append((r.group(1), r.group(2), r.group(5)))
     if store is None:
         raise HarnessError("could not read 'aeos secrets status' (no 'store:' line); nothing to mirror")
@@ -173,11 +184,11 @@ def parse_presence(text: str) -> Presence:
 
 
 def probe_presence() -> Presence:
-    """Run the real ``aeos secrets status`` (the metadata-only status path) in a child process with the owner's
-    environment; this process never opens the real keyring or OpenBao itself."""
+    """Run the real ``aeos secrets status`` (the metadata-only status path, PERSONAL view: no ``--include-office``)
+    in a child process with the owner's environment; this process never opens the real keyring or OpenBao itself."""
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(p for p in (str(ROOT / "backend"), env.get("PYTHONPATH", "")) if p)
-    argv = [sys.executable, "-m", "aeos", "secrets", "status", "--include-office"]
+    argv = [sys.executable, "-m", "aeos", "secrets", "status"]
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=str(ROOT), timeout=180, check=False)
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -191,12 +202,14 @@ def probe_presence() -> Presence:
 
 
 class PresenceMirror:
-    """Secret provider of the dry run: the real store's references, dummy values, nothing else."""
+    """Secret provider of the dry run: the real store's PERSONAL references, dummy values, nothing else. ``office/*``
+    is not mirrored: it is NO_ACCESS, as for the controller until a recorded company authorisation (§23)."""
 
     name = "dry-run-mirror"
+    denied_namespaces = ("office",)
 
     def __init__(self, presence: Presence) -> None:
-        self._present = dict(presence.present)
+        self._present = {r: e for r, e in presence.present.items() if not _office(r)}
         self._no_access = set(presence.no_access)
 
     def _status(self, ref: str) -> Any:
@@ -204,6 +217,9 @@ class PresenceMirror:
         from aeos.secrets.facade import SecretStatus, validate_ref
 
         validate_ref(ref)
+        if _office(ref):
+            raise PolicyDenied(f"secret {ref}: office references are not mirrored in a PERSONAL dry run",
+                               code="SECRET_NO_ACCESS")
         if ref in self._no_access:
             raise PolicyDenied(f"secret {ref}: controller policy denies this path (mirrored)", code="SECRET_NO_ACCESS")
         exists = ref in self._present
@@ -266,20 +282,56 @@ def load_script(path: Path) -> Callable[..., Any]:
 
 
 class Answers:
+    """The --answer queue. ``ask(prompt)``, ``input(prompt)`` and ``getpass.getpass(prompt)`` all take the next value;
+    a getpass answer is not echoed."""
+
     def __init__(self, values: Sequence[str]) -> None:
         self.values = list(values)
         self.used = 0
         self.missing: str | None = None
 
-    def __call__(self, prompt: object = "") -> str:
+    def _take(self, prompt: object, *, hidden: bool) -> str:
         text = str(prompt).strip()
         if self.used >= len(self.values):
             self.missing = text
             raise MissingAnswer(text)
         value = self.values[self.used]
         self.used += 1
-        say(f"{text} [--answer {self.used}: {value}]")
+        say(f"{text} [--answer {self.used}: {'(hidden, getpass)' if hidden else value}]")
         return value
+
+    def __call__(self, prompt: object = "") -> str:
+        return self._take(prompt, hidden=False)
+
+    def getpass(self, prompt: object = "Password: ", stream: Any = None) -> str:
+        return self._take(prompt, hidden=True)
+
+
+# getpass.getpass is bound per platform at import (unix_getpass, win_getpass, fallback_getpass); route them all
+_GETPASS_NAMES = ("getpass", "unix_getpass", "win_getpass", "fallback_getpass")
+
+
+@contextlib.contextmanager
+def prompts_routed(answers: Answers) -> Iterator[None]:
+    """``input()`` and ``getpass.getpass()`` take the --answer queue; ``sys.stdin`` reads give EOF.
+
+    getpass does not read sys.stdin: it opens /dev/tty (POSIX) or reads the console (Windows), so on a real terminal
+    an unrouted getpass would block the dry run waiting for the owner. Applied while the script is imported (a
+    module-level ``from getpass import getpass`` then binds the routed function) and while ``run()`` runs."""
+    import getpass as getpass_mod
+
+    saved_stdin, saved_input = sys.stdin, builtins.input
+    saved_getpass = {n: getattr(getpass_mod, n) for n in _GETPASS_NAMES if hasattr(getpass_mod, n)}
+    sys.stdin = io.StringIO("")
+    builtins.input = answers
+    for n in saved_getpass:
+        setattr(getpass_mod, n, answers.getpass)
+    try:
+        yield
+    finally:
+        for n, fn in saved_getpass.items():
+            setattr(getpass_mod, n, fn)
+        sys.stdin, builtins.input = saved_stdin, saved_input
 
 
 # ---------------------------------------------------------------------------------- isolation
@@ -359,9 +411,28 @@ def network_refused(denied_loopback_ports: set[int]) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def doctor_probe_window(denied_ports: set[int], port: int) -> Iterator[None]:
+    """Opens the real Control Center's loopback port while the Doctor runs, and only then (never during the script).
+
+    ``host.port`` observes the machine, not the database: with the real server running, ``aeos doctor`` reports it
+    CONNECTED through ``GET /api/health``. With the port refused the probe saw a port it could not bind and reported
+    FAILED PORT_BIND_DENIED, a BLOCKED CAN_OPEN_DASHBOARD that does not exist. The non-functional Doctor only reads
+    that port (a TCP connect and the health GET); the script cannot reach it, because it does not run meanwhile."""
+    was_denied = port in denied_ports
+    denied_ports.discard(port)
+    try:
+        yield
+    finally:
+        if was_denied:
+            denied_ports.add(port)
+
+
+@contextlib.contextmanager
 def isolated(data_dir: Path, config: Path, presence: Presence, denied_ports: set[int], bao_port: int) -> Iterator[Any]:
     """The dry-run process state: temp data dir and config, null keyring, closed OpenBao, refused network, the
-    presence mirror as secret provider and a database engine on the copy. Everything is restored afterwards."""
+    presence mirror as secret provider and a database engine on the copy. Everything is restored afterwards.
+    ``denied_ports`` is the guard's live set (the closed OpenBao port is added to it): ``doctor_probe_window``
+    opens one port of it while only the Doctor runs."""
     import keyring
     from keyring.backends import null
 
@@ -379,7 +450,8 @@ def isolated(data_dir: Path, config: Path, presence: Presence, denied_ports: set
                        "AEOS_OPENBAO_ADDR": f"http://127.0.0.1:{bao_port}", "PYTHON_KEYRING_BACKEND": NULL_KEYRING})
     keyring.set_keyring(null.Keyring())
     try:
-        with network_refused(denied_ports | {bao_port}):
+        denied_ports.add(bao_port)
+        with network_refused(denied_ports):
             config_mod.reset_settings_cache()
             provider_mod.reset_provider_cache()
             clear_probe_cache()
@@ -520,7 +592,8 @@ def newly_failing(before: Snapshot, after: Snapshot, cap: str) -> dict[str, str]
 
 def print_diff(before: Snapshot, after: Snapshot) -> list[str]:
     """Print the capability table and the changed checks; return the capabilities that got worse: a worse status,
-    or a gating check that newly fails under an unchanged status (BLOCKED -> BLOCKED hides a regression)."""
+    or any gating check that newly fails, whatever the status did. An unchanged status (BLOCKED -> BLOCKED) and a
+    better one (BLOCKED -> DEGRADED, because another check recovered) both can hide a regression."""
     from aeos.inventory.asciitext import table
 
     rows, degraded = [], []
@@ -530,9 +603,10 @@ def print_diff(before: Snapshot, after: Snapshot) -> list[str]:
         a, reason = after.capabilities.get(cap, ("UNKNOWN", ""))
         change = "WORSE" if worse(b, a) else ("better" if worse(a, b) else ("changed" if a != b else ""))
         fresh = newly_failing(before, after, cap)
-        if change == "" and fresh:
-            change, reason = "WORSE", "newly failing: " + ", ".join(sorted(fresh))
+        if fresh:
             regressed[cap] = fresh
+            if change != "WORSE":
+                change, reason = "WORSE", "newly failing: " + ", ".join(sorted(fresh))
         if change == "WORSE":
             degraded.append(cap)
         rows.append([cap, b, a, change, reason if a != b or cap in regressed else ""])
@@ -564,15 +638,14 @@ def run_script(run: Callable[..., Any], settings: Any, username: str, password: 
     from aeos.api.app import create_app
 
     say("--- script output ---")
-    saved_stdout, saved_stdin, saved_input = sys.stdout, sys.stdin, builtins.input
+    saved_stdout = sys.stdout
     sys.stdout = _AsciiWriter(saved_stdout)  # type: ignore[assignment]
-    sys.stdin = io.StringIO("")  # a direct input() or getpass() gets EOF instead of waiting on the terminal
-    builtins.input = answers
     try:
-        with TestClient(create_app(settings, testing=True, init_db=False), base_url="http://testserver") as client:
+        with prompts_routed(answers), TestClient(create_app(settings, testing=True, init_db=False),
+                                                 base_url="http://testserver") as client:
             result = run(client, username, password, answers)
     finally:
-        sys.stdout, sys.stdin, builtins.input = saved_stdout, saved_stdin, saved_input
+        sys.stdout = saved_stdout
     say("--- end of script output ---")
     if answers.missing is not None:  # the script caught MissingAnswer itself
         raise MissingAnswer(answers.missing)
@@ -593,7 +666,8 @@ def dry_run(script: Path, *, answers: Sequence[str], user: str, accept_degrade: 
     live_db = live.layout.db_path
     if not live_db.is_file():
         raise HarnessError(f"no live database at {data_dir_label(live)}")
-    denied = {_port(live.openbao_addr, 8200), int(live.port)}
+    bao_live, cc_port = _port(live.openbao_addr, 8200), int(live.port)
+    denied = {bao_live, cc_port}
     say(f"script: {script.name}")
     say(f"live data dir: {data_dir_label(live)} (read only; copied with sqlite3 backup, mode=ro)")
     presence = probe_presence()
@@ -618,18 +692,25 @@ def dry_run(script: Path, *, answers: Sequence[str], user: str, accept_degrade: 
         with isolated(data_dir, config, presence, denied, bao_port) as settings:
             say("dry run: temporary data dir, null keyring, OpenBao at a closed loopback port, network refused")
             check_schema()
-            run = load_script(script)
+            ask = Answers(answers)
+            with prompts_routed(ask):
+                run = load_script(script)
             password = "Dry-" + uuid.uuid4().hex + "-Run!"
             create_dryrun_admin(user, password)
             say(f"temporary SUPER_ADMIN in the copy: {user}")
-            say("Doctor before (non-functional checks) ...")
-            before = doctor_snapshot(settings)
-            ask = Answers(answers)
+            # host.port as `aeos doctor` sees it (the running server CONNECTED), unless that port is OpenBao's too
+            window = cc_port not in (bao_live, bao_port)
+            say(f"Doctor before (non-functional checks; loopback port {cc_port} of the real Control Center is "
+                + ("open to the Doctor, as in 'aeos doctor', never to the script) ..." if window
+                   else "refused: it is OpenBao's too, so host.port may differ from 'aeos doctor') ..."))
+            with doctor_probe_window(denied, cc_port) if window else contextlib.nullcontext():
+                before = doctor_snapshot(settings)
             run_script(run, settings, user, password, ask)
             if ask.used < len(ask.values):
                 say(f"WARNING: {len(ask.values) - ask.used} --answer value(s) were not asked for")
             say("Doctor after ...")
-            after = doctor_snapshot(settings)
+            with doctor_probe_window(denied, cc_port) if window else contextlib.nullcontext():
+                after = doctor_snapshot(settings)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         if tmp.exists():
@@ -674,7 +755,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return dry_run(Path(args.script).expanduser(), answers=args.answer, user=args.user.strip().lower(),
                        accept_degrade=args.accept_degrade.strip() if args.accept_degrade else None)
     except MissingAnswer as exc:
-        say(f"the script asked a question with no --answer left: '{exc}'; give one --answer per prompt, in order")
+        say(f"no --answer left for prompt: {exc}")
+        say("give one --answer per prompt (ask, input or getpass), in order")
     except HarnessError as exc:
         say(f"harness failure: {exc}")
     except Exception as exc:

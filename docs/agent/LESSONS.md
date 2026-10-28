@@ -74,7 +74,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 * L10 Reuse the canonical module or script instead of re-implementing it (the changelog fragment format lives only in scripts/changelog.py).
 * L11 Quote the owner decision verbatim with its exact scope in the brief and the PR. Widening is a new question.
 * L12 A change for one domain is proven not to alter the other domain's view.
-* L13 Dry-run every owner script with `scripts/owner_dryrun.py` (a copy of the live database, the real store's secret presence without values, Doctor capabilities before and after) and show its capability diff before the commands reach the owner; `OWNER_DRYRUN: DEGRADED` stops it unless the reason is given with `--accept-degrade`.
+* L13 Dry-run every owner command or script that writes state before it reaches the owner, and show the result with it. An owner script goes through `scripts/owner_dryrun.py` (a copy of the live database, the real store's PERSONAL secret presence without values, Doctor capabilities before and after): show its capability diff; `OWNER_DRYRUN: DEGRADED` stops it unless the reason is given with `--accept-degrade`. Any other owner command that writes state is dry-run in-process against a temporary database, or wrapped in a tiny owner script and run through the harness.
 * L14 Diagnose input, then environment, then code. No background job without a deadline and a failure marker. zsh does not word-split a variable: use an array.
 * L15 A flaky test is a defect: record it and fix its timing assumption. A re-run is not a fix.
 * L16 Owner scripts live in a persistent private folder outside the repository.
@@ -91,7 +91,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 |---|---|---|---|
 | Blind verifier: give a second reader the claim, not the evidence | Re-run the verifier on the same claim and compare verdicts | A claim confirmed only because the reader saw the author's reasoning | A tool derives the verdict from the evidence record |
 | Adversarial review, then delta-only re-review | Diff of the fixes against the findings list | Endless full re-reviews, or fixes nobody re-checked | Findings are tracked by a tool that re-checks each fix |
-| In-process dry-run of owner scripts against a temporary database | `scripts/owner_dryrun.py SCRIPT`: the capability diff and the OWNER_DRYRUN verdict | Owner-run scripts failing on validation that was checkable up front | The harness dry-runs every owner script automatically |
+| In-process dry-run of owner commands and scripts against a temporary database | `scripts/owner_dryrun.py SCRIPT` (another command wrapped in a tiny owner script): the capability diff and the OWNER_DRYRUN verdict | Owner-run scripts failing on validation that was checkable up front | The harness dry-runs every owner script automatically |
 | Merge main into a branch and resolve the changelog before push | The merge commit exists and the branch has no conflict with main | A conflict found only after a long CI run | Changelog fragments make the conflict impossible |
 | Violating fixture red plus near-miss fixture green for every gate | The bite tests of the gate in a temporary directory | A gate that never fails, or one that rejects legitimate input | The gate is replaced by a stronger check with its own bite test |
 

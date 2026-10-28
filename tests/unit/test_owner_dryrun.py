@@ -118,6 +118,17 @@ def _route(db) -> None:
     db.flush()
 
 
+def _disable_agent(path: Path) -> None:
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    try:
+        with con:
+            con.execute("UPDATE agent_definitions SET enabled = 0 WHERE agent_key = 'opencode-implementer'")
+    finally:
+        con.close()  # the last connection: the WAL is checkpointed and the file is stable again
+
+
 def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -221,8 +232,11 @@ def test_without_the_credential_in_the_real_store_the_gate_is_not_ready_before(l
 @USES
 def test_a_gating_check_that_newly_fails_under_an_already_blocked_capability_is_red(live, tmp_path, capsys):
     """Review finding: BLOCKED -> BLOCKED hid route.registry CONFIGURED -> MISSING. The copy may be BLOCKED where the
-    real system is READY, so a critical check that newly fails is a regression even when the status stays."""
-    live["state"]["present"] = {}
+    real system is READY, so a critical check that newly fails is a regression even when the status stays.
+    The key stays present (a keyless active route already fails route.registry since route key eligibility); the
+    gate is BLOCKED before by a disabled worker agent instead."""
+    _disable_agent(live["db"])
+    live["digest"] = _digest(live["db"])
     code = od.main([_script(tmp_path, "disable", DISABLE), "--answer", "JA"])
     out = capsys.readouterr().out
     assert code == 1, out
@@ -279,7 +293,7 @@ def test_a_prompt_without_an_answer_fails_with_its_text(live, tmp_path, capsys):
     code = od.main([_script(tmp_path, "disable", DISABLE)])
     out = capsys.readouterr().out
     assert code == 2, out
-    assert "the script asked a question with no --answer left: 'Disable the route? Type JA:'" in out
+    assert "no --answer left for prompt: Disable the route? Type JA:" in out
     assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: FAIL"
     _untouched(live)
 
@@ -303,7 +317,7 @@ def test_the_status_output_is_parsed_into_names_without_values():
     assert p.available and p.backend == "openbao"
     assert set(p.present) == {"personal/github", "workers/opencode-go"}
     assert p.present["workers/opencode-go"] is not None and p.present["personal/github"] is None
-    assert p.missing == {"workers/openrouter"} and p.no_access == {"office/atlassian"}
+    assert p.missing == {"workers/openrouter"} and p.no_access == set()  # office/* is not mirrored
 
 
 def test_an_unavailable_store_is_mirrored_as_unavailable_and_garbage_is_refused():
@@ -321,3 +335,171 @@ def test_has_run_reads_the_script_without_executing_it(tmp_path):
     short = tmp_path / "short.py"
     short.write_text("def run(client):\n    pass\n", encoding="utf-8")
     assert not od.has_run(short)
+
+
+# ------------------------------------------------------------------ round 3 review findings (bite tests)
+
+
+def _snap(caps: dict, checks: dict, gating: dict):
+    return od.Snapshot({k: (v, "") for k, v in caps.items()}, {k: (v, "") for k, v in checks.items()}, gating)
+
+
+BEFORE_X = _snap({"CAP_X": "BLOCKED"}, {"a": "MISSING", "b": "VERIFIED"}, {"CAP_X": {"a": "MISSING"}})
+
+
+def test_a_newly_failing_gating_check_is_red_even_when_the_capability_got_better(live, tmp_path, capsys, monkeypatch):
+    """Review finding: the regression was flagged only under an unchanged status. Critical a recovers and required b
+    newly fails: BLOCKED -> DEGRADED looks better and hid b VERIFIED -> MISSING (verdict OK). It is DEGRADED now."""
+    after = _snap({"CAP_X": "DEGRADED"}, {"a": "VERIFIED", "b": "MISSING"}, {"CAP_X": {"b": "MISSING"}})
+    snaps = iter([BEFORE_X, after])
+    monkeypatch.setattr(od, "doctor_snapshot", lambda settings: next(snaps))
+    code = od.main([_script(tmp_path, "noop", NOOP)])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "CAP_X: BLOCKED -> DEGRADED (gating check newly failing: b VERIFIED -> MISSING)" in out
+    assert _cap_row(out, "CAP_X")[1:4] == ["BLOCKED", "DEGRADED", "WORSE"], out
+    assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: DEGRADED"
+    _untouched(live)
+
+
+def test_near_miss_a_recovery_without_a_new_failure_is_better_not_worse(capsys):
+    after = _snap({"CAP_X": "READY"}, {"a": "VERIFIED", "b": "VERIFIED"}, {"CAP_X": {}})
+    assert od.print_diff(BEFORE_X, after) == []
+    assert _cap_row(capsys.readouterr().out, "CAP_X")[1:4] == ["BLOCKED", "READY", "better"]
+
+
+CC_PROBE = LOGIN + '''
+
+def run(client, username, password, ask):
+    import socket
+
+    _login(client, username, password)
+    try:
+        socket.create_connection(("127.0.0.1", int(ask("port"))), timeout=2).close()
+        print("connected to the real Control Center")
+    except OSError as exc:
+        print("refused control center", type(exc).__name__)
+'''
+
+
+@pytest.mark.parametrize("window", [True, False], ids=["doctor-sees-the-real-port", "bite-without-the-window"])
+@pytest.mark.usefixtures("no_docker", "opencode_installed")
+def test_a_running_control_center_on_aeos_port_is_no_false_blocked(live, tmp_path, capsys, monkeypatch, window):
+    """Review finding: with the real Control Center running, the guard refused its port, host.port could not bind it
+    and reported FAILED PORT_BIND_DENIED, so CAN_OPEN_DASHBOARD was BLOCKED before and after. The Doctor now sees the
+    port as `aeos doctor` does (CONNECTED through /api/health); the script stays refused. Without the window (the
+    old harness) the same setup is red with the bind failure: the test bites."""
+    import contextlib
+
+    from aeos.core import config as config_mod
+    from aeos.inventory.probes import HttpResult, set_runner_override
+    from tests.unit.test_inventory_fakes import base_runner
+
+    snaps: list = []
+    real_snapshot = od.doctor_snapshot
+    monkeypatch.setattr(od, "doctor_snapshot", lambda settings: snaps.append(real_snapshot(settings)) or snaps[-1])
+    if not window:
+        monkeypatch.setattr(od, "doctor_probe_window", lambda denied, port: contextlib.nullcontext())
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(16)
+        port = srv.getsockname()[1]
+        monkeypatch.setenv("AEOS_PORT", str(port))
+        config_mod.reset_settings_cache()
+        health = HttpResult(200, {"status": "ok", "version": "0.0.0-dryrun-test"})
+        set_runner_override(base_runner(http={f"http://127.0.0.1:{port}/api/health": health}))
+        try:
+            code = od.main([_script(tmp_path, "ccprobe", CC_PROBE), "--answer", str(port)])
+        finally:
+            set_runner_override(None)
+    out = capsys.readouterr().out
+    assert len(snaps) == 2, out
+    assert "refused control center ConnectionRefusedError" in out and "connected to" not in out
+    for snap in snaps:
+        status, summary = snap.checks["host.port"]
+        if window:
+            assert status == "CONNECTED", summary
+            assert "host.port" not in snap.gating["CAN_OPEN_DASHBOARD"]
+        else:
+            assert status == "FAILED" and "tidak dapat di-bind" in summary, summary
+            assert snap.gating["CAN_OPEN_DASHBOARD"]["host.port"] == "FAILED"
+            assert snap.capabilities["CAN_OPEN_DASHBOARD"][0] == "BLOCKED"
+    assert code == 0, out
+    _untouched(live)
+
+
+GETPASS = LOGIN + '''
+import getpass
+from getpass import getpass as imported_getpass
+
+
+def run(client, username, password, ask):
+    _login(client, username, password)
+    token = getpass.getpass("Vault token: ")
+    again = imported_getpass("Again: ")
+    print("got", len(token), token == again)
+'''
+
+
+@pytest.mark.parametrize("answers", [["s3cr3t-v4lue", "s3cr3t-v4lue"], ["s3cr3t-v4lue"]], ids=["answered", "short"])
+def test_getpass_inside_run_takes_the_answer_queue_never_the_terminal(live, tmp_path, capsys, monkeypatch, answers):
+    """Review finding: getpass reads /dev/tty or the console, not sys.stdin, so it blocked the dry run on a real
+    terminal. The real getpass is replaced by a tripwire here: reaching it fails the test, as it would hang a terminal."""
+    import getpass
+
+    def tripwire(prompt="Password: ", stream=None):
+        raise AssertionError("the real getpass was reached: it would wait on the terminal")
+
+    monkeypatch.setattr(getpass, "getpass", tripwire)
+    argv = [_script(tmp_path, "getpass", GETPASS)]
+    for a in answers:
+        argv += ["--answer", a]
+    code = od.main(argv)
+    out = capsys.readouterr().out
+    assert getpass.getpass is tripwire, "getpass was not restored"
+    assert "the real getpass was reached" not in out
+    assert "s3cr3t-v4lue" not in out, "a getpass answer was echoed"
+    assert "Vault token: [--answer 1: (hidden, getpass)]" in out
+    if len(answers) == 2:
+        assert code == 0 and "got 12 True" in out, out
+        assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: OK"
+    else:
+        assert code == 2, out
+        assert "no --answer left for prompt: Again:" in out
+        assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: FAIL"
+    _untouched(live)
+
+
+STATUS_OFFICE_UNKNOWN = """store: CONNECTED backend=openbao
+office/atlassian             UNKNOWN  backend=none                 updated=- expires=-
+personal/github              PRESENT  backend=openbao              updated=2026-10-20T10:00:00+00:00 expires=-
+workers/opencode-go          PRESENT  backend=openbao              updated=2026-10-20T10:00:00+00:00 expires=-
+"""
+
+
+def test_an_unknown_office_row_does_not_fail_a_personal_dry_run(monkeypatch):
+    """Review finding: the harness read the office view too, and an UNKNOWN office row made the whole store
+    unavailable. Owner scripts run in PERSONAL: the status runs without --include-office and office rows are ignored."""
+    import subprocess
+
+    from aeos.core.errors import PolicyDenied
+
+    seen: list = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, STATUS_OFFICE_UNKNOWN, "")
+
+    monkeypatch.setattr(od.subprocess, "run", fake_run)
+    p = od.probe_presence()
+    assert seen and seen[0][-2:] == ["secrets", "status"] and "--include-office" not in seen[0]
+    assert p.available and set(p.present) == {"personal/github", "workers/opencode-go"}
+    assert not any(r.startswith("office/") for r in (*p.present, *p.missing, *p.no_access))
+    mirror = od.PresenceMirror(od.Presence("openbao", True, present={"office/atlassian": None, "personal/github": None}))
+    with pytest.raises(PolicyDenied):
+        mirror.status("office/atlassian")
+    assert mirror.status("personal/github").exists
+    # near miss on the other side: an UNKNOWN PERSONAL row still makes the store unavailable
+    personal_unknown = STATUS_OFFICE_UNKNOWN.replace("personal/github              PRESENT  backend=openbao",
+                                                     "personal/github              UNKNOWN  backend=none   ")
+    assert not od.parse_presence(personal_unknown).available
