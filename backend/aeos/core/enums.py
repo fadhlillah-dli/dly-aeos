@@ -232,3 +232,22 @@ class DataMode(StrEnum):
     DEMO = "DEMO"
     DESIGN = "DESIGN"
     ESTIMATE = "ESTIMATE"
+
+
+class RouteStatus(StrEnum):
+    """ModelRoute.status (§23). TRIAL and APPROVED are the two ACTIVE states (a human decision is bound to the
+    config hash); CANDIDATE/UNTESTED are catalogue rows, DISABLED is an owner switch-off."""
+
+    CANDIDATE = "CANDIDATE"
+    UNTESTED = "UNTESTED"
+    TRIAL = "TRIAL"
+    APPROVED = "APPROVED"
+    DISABLED = "DISABLED"
+
+
+class RouteAvailability(StrEnum):
+    """ModelRoute.availability: whether the provider catalogue listed the model at the last refresh."""
+
+    AVAILABLE = "AVAILABLE"
+    MISSING = "MISSING"
+    UNKNOWN = "UNKNOWN"

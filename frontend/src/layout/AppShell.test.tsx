@@ -1,8 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, vi } from "vitest";
+import { get } from "../api/client";
 import { AuthProvider } from "../auth/AuthContext";
 import { mockApi } from "../components/proposals/testUtils";
 import { THEME_STORAGE_KEY } from "../lib/theme";
@@ -22,9 +23,9 @@ const overview = (mode: string) => ({
   sections: {},
 });
 
-function api(opts: { mode?: string; queue?: unknown[] } = {}) {
+function api(opts: { mode?: string; queue?: unknown[]; health?: Record<string, unknown> } = {}) {
   return mockApi({
-    "/api/health": { status: "ok", version: "0.1.0", environment: "local" },
+    "/api/health": { status: "ok", version: "0.1.0", environment: "local", ...opts.health },
     "/api/control-center/overview": overview(opts.mode ?? "LIVE"),
     "/api/decisions/queue": { items: opts.queue ?? [], counts: {}, checked_at: new Date().toISOString(), mode: "LIVE" },
     "/api/projects": { items: [{ id: "p1", name: "DLY AEOS", project_key: "dly-aeos", domain: "PERSONAL" }] },
@@ -135,5 +136,138 @@ describe("theme toggle", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
     expect(screen.getByRole("button", { name: /^Tema gelap aktif/ })).toBeInTheDocument();
+  });
+});
+
+describe("AppShell installs the shared event -> query invalidation (R28)", () => {
+  class FakeEventSource {
+    static last: FakeEventSource | null = null;
+    onopen: (() => void) | null = null;
+    onmessage: ((m: MessageEvent<string>) => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor() {
+      FakeEventSource.last = this;
+    }
+    close() {}
+    send(frame: Record<string, unknown>) {
+      this.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent<string>);
+    }
+  }
+
+  it("a decision event refetches an inventory query mounted on any page; a heartbeat does not", async () => {
+    const calls = api();
+    vi.stubGlobal("EventSource", FakeEventSource);
+    function Probe() {
+      useQuery({ queryKey: ["inventory", "probe"], queryFn: () => get("/api/inventory/probe") });
+      return <h1>Probe page</h1>;
+    }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AuthProvider>
+          <MemoryRouter>
+            <Routes>
+              <Route element={<AppShell />}>
+                <Route index element={<Probe />} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("heading", { name: "Probe page" });
+    await waitFor(() => expect(FakeEventSource.last).not.toBeNull());
+    const probeCalls = () => calls.filter((c) => c.url.startsWith("/api/inventory/probe")).length;
+    await waitFor(() => expect(probeCalls()).toBe(1));
+    const es = FakeEventSource.last as FakeEventSource;
+    await act(async () => {
+      es.onopen?.();
+      es.send({ type: "ready", cursor: 0 });
+      es.send({ type: "event", seq: 1, source: "runner", kind: "run.heartbeat" });
+    });
+    await new Promise((r) => setTimeout(r, 700));
+    expect(probeCalls()).toBe(1); // a heartbeat refreshes nothing
+    await act(async () => {
+      es.send({ type: "event", seq: 2, source: "policy", kind: "decision.recorded" });
+    });
+    await waitFor(() => expect(probeCalls()).toBe(2), { timeout: 3000 });
+  });
+});
+
+describe("freshness banner (R28: the page or the server is out of date)", () => {
+  const TREE_A = "a".repeat(40);
+  const TREE_B = "b".repeat(40);
+  const health = (o: { served?: string | null; drift?: string; ui?: string; judged?: string | null } = {}) => {
+    const served = o.served === undefined ? TREE_A : o.served;
+    return {
+      ui_build: { status: o.ui ?? "FRESH", reason: null, bundle_frontend_tree: o.judged === undefined ? served : o.judged },
+      freshness: {
+        served_bundle: { frontend_tree: served },
+        code_drift: { status: o.drift ?? "CURRENT", loaded_commit: "0123456789abcdef", head_commit: "fedcba9876543210" },
+        checked_at: new Date().toISOString(),
+      },
+    };
+  };
+
+  async function healthLoaded(calls: { url: string }[]) {
+    await waitFor(() => expect(calls.some((c) => c.url === "/api/health")).toBe(true));
+    await screen.findByTestId("environment");
+    await waitFor(() => expect(screen.getByTestId("environment")).toHaveTextContent("local"));
+  }
+
+  it("stays hidden when the bundle, the served bundle and the server code are current", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    const calls = api({ health: health() });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
+  });
+
+  it("asks for a reload when the bundle in the browser differs from the one the server serves", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    api({ health: health({ served: TREE_B }) });
+    renderShell();
+    const banner = await screen.findByTestId("freshness-banner");
+    expect(banner).toHaveTextContent("Tampilan lebih lama dari server: muat ulang halaman");
+    expect(within(banner).getByRole("button", { name: "Muat ulang" })).toBeInTheDocument();
+    expect(banner).not.toHaveTextContent("restart");
+  });
+
+  it("asks for a restart when the server runs older backend code", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    api({ health: health({ drift: "DRIFT" }) });
+    renderShell();
+    const banner = await screen.findByTestId("freshness-banner");
+    expect(banner).toHaveTextContent("Server menjalankan kode lama (0123456789ab): restart ./aeos serve");
+    expect(within(banner).queryByRole("button", { name: "Muat ulang" })).not.toBeInTheDocument();
+  });
+
+  it("says when the server serves a STALE bundle (the page is the bundle ui_build judged)", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    api({ health: health({ ui: "STALE" }) });
+    renderShell();
+    expect(await screen.findByTestId("freshness-banner")).toHaveTextContent("menyajikan bundle tampilan usang (STALE)");
+  });
+
+  it("shows no STALE notice in the Vite dev server (no tree baked in)", async () => {
+    const calls = api({ health: health({ ui: "STALE" }) });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
+  });
+
+  it("shows no STALE notice after a manual rebuild while serving (served tree differs from the judged one)", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    const calls = api({ health: health({ ui: "STALE", served: TREE_A, judged: TREE_B }) });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
+  });
+
+  it("compares nothing in dev mode (no tree baked in) and with an older server without the block", async () => {
+    const calls = api({ health: { ...health({ served: TREE_B }), freshness: undefined } });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
   });
 });

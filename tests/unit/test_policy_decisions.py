@@ -144,6 +144,34 @@ def test_invalidate_expire_and_supersede(db, owner):
     assert d3.status == "SUPERSEDED" and d3.superseded_by == d4.id
 
 
+def test_expiry_emits_exactly_one_decision_expired_event_per_decision(db, owner):
+    """R28 round 3: a page shows an expired TRIAL until it refetches, and the shared event map refreshes on
+    ``decision.*``. The single owner of expiry (expire_due_decisions -> _set_lifecycle) emits one domain-scoped
+    ``decision.expired`` per expired decision, with the decision id and its target; none for an unexpired one and none
+    on a second (idempotent) run."""
+    due1 = _record(db, owner.id, target_id="o/due1", expires_at=utcnow() + timedelta(hours=1))
+    due2 = _record(db, owner.id, kind="TRIAL", target_type="model_route", target_id="openrouter/x:free",
+                   expires_at=utcnow() + timedelta(hours=1), domain="OFFICE")
+    later = _record(db, owner.id, target_id="o/later", expires_at=utcnow() + timedelta(hours=1))
+    db.commit()
+    due1.expires_at = due2.expires_at = utcnow() - timedelta(seconds=1)
+    db.commit()
+    assert registry.expire_due_decisions(db) == 2
+    db.commit()
+    expired = db.query(Event).filter(Event.kind == "decision.expired").all()
+    assert sorted(e.entity_id for e in expired) == sorted([due1.id, due2.id]), "exactly one event per expired decision"
+    by = {e.entity_id: e for e in expired}
+    assert by[due2.id].source == "policy" and by[due2.id].entity_type == "decision"
+    assert by[due2.id].domain == "OFFICE" and by[due1.id].domain == "PERSONAL"  # domain-scoped like the others
+    assert by[due2.id].payload["kind"] == "TRIAL" and by[due2.id].payload["target_type"] == "model_route"
+    assert by[due2.id].payload["target_id"] == "openrouter/x:free"
+    assert later.status == "ACTIVE"
+    assert db.query(Event).filter(Event.kind == "decision.expired", Event.entity_id == later.id).count() == 0
+    assert registry.expire_due_decisions(db) == 0  # idempotent: no second event
+    db.commit()
+    assert db.query(Event).filter(Event.kind == "decision.expired").count() == 2
+
+
 def test_revoke_requires_admin_and_reason(db, owner):
     d = _record(db, owner.id)
     viewer = create_viewer(db)

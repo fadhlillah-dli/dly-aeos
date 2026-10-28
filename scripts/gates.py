@@ -89,7 +89,9 @@ GATE_TIMEOUT_SECONDS = 1800
 # re-authored to this repository's user.email.
 AMEND_EXEC = (f"git merge-base --is-ancestor HEAD {DEFAULT_BASE} || "
               "git commit --amend --no-edit --reset-author --allow-empty")
-SHELLCHECK_COMMAND = "shellcheck scripts/*.sh scripts/git-hooks/pre-push"  # the CI step, word for word
+# the CI step, word for word
+SHELLCHECK_COMMAND = "shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge"
+SHELL_HOOKS = ("pre-push", "post-merge")  # the git hooks of SHELLCHECK_COMMAND, in its order
 ACTIONLINT = "actionlint"
 ACTIONLINT_CONTROL = "actionlint-control"
 ACTIONLINT_COMMAND = "actionlint"  # the CI step, word for word (no arguments: every file of .github/workflows)
@@ -241,8 +243,7 @@ def commit_subject_gate(base: str, head: str) -> Gate:
 def shell_files(root: Path) -> list[str]:
     """The files of SHELLCHECK_COMMAND (what CI's shell glob expands to), relative to the checkout, forward slashes."""
     files = sorted(p.relative_to(root).as_posix() for p in (root / "scripts").glob("*.sh"))
-    if (root / "scripts" / "git-hooks" / "pre-push").is_file():
-        files.append("scripts/git-hooks/pre-push")
+    files += [f"scripts/git-hooks/{h}" for h in SHELL_HOOKS if (root / "scripts" / "git-hooks" / h).is_file()]
     return files
 
 

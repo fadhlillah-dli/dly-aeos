@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -419,24 +420,85 @@ def quota_exhausted(session: Session, route: ModelRoute) -> QuotaState | None:
     return None
 
 
-def credential_rejections(route: ModelRoute, *, domain: str) -> list[str]:
-    """§26 credential paths (integration amendment, ADR-0041): a route the broker could not authenticate
-    for *domain* is never eligible. OpenRouter routes may use the default worker refs; any other remote
-    OpenAI-compatible upstream must name ``mode_params.credential_ref`` in a namespace the broker allows
-    for the domain (loopback test endpoints may run without a key)."""
+# The broker model proxy's default OpenRouter references for PERSONAL, in the order it tries them.
+OPENROUTER_DEFAULT_REFS = ("workers/openrouter", "personal/openrouter")
+CREDENTIAL_PRESENT = "PRESENT"
+CREDENTIAL_ABSENT = "ABSENT"
+CREDENTIAL_STORE_UNAVAILABLE = "STORE_UNAVAILABLE"
+_STORE_KEY = "\0store"  # memo entry: the store already failed once in this eligibility call
+_NOT_STORED = re.compile(r"^credential (\S+) not stored: aeos secrets set \S+")
+_STORE_UNAVAILABLE = re.compile(r"^credential (\S+) cannot be checked: secret store unavailable")
+
+
+def credential_state(ref: str, states: dict[str, str] | None = None) -> str:
+    """PRESENT | ABSENT | STORE_UNAVAILABLE for *ref*: a status lookup of the secret store (metadata only; the value
+    is never read and no provider is called). Any failure is STORE_UNAVAILABLE (fail closed). *states* memoizes the
+    answer per reference for one eligibility call; once the store failed, no further reference is looked up."""
+    if states is not None:
+        if ref in states:
+            return states[ref]
+        if _STORE_KEY in states:
+            return CREDENTIAL_STORE_UNAVAILABLE
+    try:
+        from aeos.secrets.facade import secret_status
+
+        state = CREDENTIAL_PRESENT if secret_status(ref).exists else CREDENTIAL_ABSENT
+    except Exception as exc:  # Blocked (sealed/unreachable/no store), import or backend error: fail closed
+        log.debug("credential status of %s unavailable: %s", ref, type(exc).__name__)
+        state = CREDENTIAL_STORE_UNAVAILABLE
+    if states is not None:
+        states[ref] = state
+        if state == CREDENTIAL_STORE_UNAVAILABLE:
+            states[_STORE_KEY] = state
+    return state
+
+
+def unstored_credential_ref(reason: str) -> str | None:
+    """The reference named by a ``credential <ref> not stored: ...`` rejection reason, else None."""
+    m = _NOT_STORED.match(reason or "")
+    return m.group(1) if m else None
+
+
+def store_unavailable_credential_ref(reason: str) -> str | None:
+    """The reference named by a ``credential <ref> cannot be checked: secret store unavailable`` rejection (the store
+    is sealed, unreachable or unknown, so the key's presence is not known), else None."""
+    m = _STORE_UNAVAILABLE.match(reason or "")
+    return m.group(1) if m else None
+
+
+def _presence_rejections(refs: tuple[str, ...], states: dict[str, str] | None) -> list[str]:
+    """[] when one of *refs* (the broker tries them in order) is stored, else the reason (never a value)."""
+    unavailable = False
+    for ref in refs:
+        state = credential_state(ref, states)
+        if state == CREDENTIAL_PRESENT:
+            return []
+        unavailable = unavailable or state == CREDENTIAL_STORE_UNAVAILABLE
+    first = refs[0]
+    if unavailable:
+        return [f"credential {first} cannot be checked: secret store unavailable (sealed, unreachable or unknown; "
+                "fail closed)"]
+    also = f" (also accepted: {', '.join(refs[1:])})" if len(refs) > 1 else ""
+    return [f"credential {first} not stored: aeos secrets set {first}{also}"]
+
+
+def _credential_paths(route: ModelRoute, *, domain: str) -> tuple[list[str], tuple[str, ...]]:
+    """(problems, references the broker would try in order) without looking at the secret store."""
     if route.provider == "claude-native":
-        return []
+        return [], ()
     ref = (route.mode_params or {}).get("credential_ref")
     if not ref:
         endpoint = urlparse(route.endpoint or "")
         # same test as the broker (scheme + parsed host): "http://localhost.example" is not loopback
-        loopback = endpoint.scheme == "http" and endpoint.hostname in {"127.0.0.1", "localhost", "::1"}
+        loopback = endpoint.scheme == "http" and endpoint.hostname in LOOPBACK_HOSTS
         if route.provider == "openrouter":
             # the broker's default OpenRouter references are worker/PERSONAL ones; OFFICE has none
-            return ["OFFICE routes need an office/ mode_params.credential_ref"] if domain == Domain.OFFICE.value else []
+            if domain == Domain.OFFICE.value:
+                return ["OFFICE routes need an office/ mode_params.credential_ref"], ()
+            return [], OPENROUTER_DEFAULT_REFS
         if route.provider == "local" or loopback:
-            return []
-        return ["no mode_params.credential_ref: the broker has no credential for this upstream"]
+            return [], ()
+        return ["no mode_params.credential_ref: the broker has no credential for this upstream"], ()
     ref = str(ref)
     try:
         from aeos.broker.facade import credential_ref_problem
@@ -445,8 +507,150 @@ def credential_rejections(route: ModelRoute, *, domain: str) -> list[str]:
         project_id = ref.split("/")[1] if ref.startswith("projects/") and ref.count("/") >= 2 else None
         problem = credential_ref_problem(domain, ref, project_id=project_id)
     except (ImportError, ModuleNotFoundError):
-        return ["broker unavailable: credential reference cannot be checked (fail closed)"]
-    return [f"credential_ref {ref}: {problem}"] if problem else []
+        return ["broker unavailable: credential reference cannot be checked (fail closed)"], ()
+    if problem:
+        return [f"credential_ref {ref}: {problem}"], ()
+    try:
+        from aeos.secrets.facade import parse_ref
+    except (ImportError, ModuleNotFoundError):
+        return [f"credential {ref} cannot be checked: secrets module unavailable (fail closed)"], ()
+    if parse_ref(ref) != ref:  # the broker refuses a malformed reference too (UPSTREAM_CREDENTIAL_MISSING)
+        return [f"credential_ref {ref}: not a valid secret reference"], ()
+    return [], (ref,)
+
+
+def credential_rejections(route: ModelRoute, *, domain: str, states: dict[str, str] | None = None,
+                          presence: bool = True) -> list[str]:
+    """§26 credential paths (integration amendment, ADR-0041): a route the broker could not authenticate
+    for *domain* is never eligible. OpenRouter routes may use the default worker refs; any other remote
+    OpenAI-compatible upstream must name ``mode_params.credential_ref`` in a namespace the broker allows
+    for the domain (loopback test endpoints may run without a key). With *presence* the reference the broker would
+    use must also be PRESENT in the secret store (a status lookup, never the value; a store that cannot answer fails
+    closed); *states* memoizes the lookups of one eligibility call."""
+    problems, refs = _credential_paths(route, domain=domain)
+    if problems or not refs or not presence:
+        return problems
+    return _presence_rejections(refs, states)
+
+
+def credential_presence_rejections(route: ModelRoute, *, domain: str,
+                                   states: dict[str, str] | None = None) -> list[str]:
+    """Only the secret-store part of ``credential_rejections`` (the path rules are reported separately)."""
+    problems, refs = _credential_paths(route, domain=domain)
+    return [] if problems or not refs else _presence_rejections(refs, states)
+
+
+# Credential block of the route view (R28 round 3): what the router's credential rules say for one domain.
+VIEW_CREDENTIAL_PRESENT = "PRESENT"
+VIEW_CREDENTIAL_MISSING = "MISSING"
+VIEW_CREDENTIAL_UNAVAILABLE = "UNAVAILABLE"
+VIEW_CREDENTIAL_NOT_NEEDED = "NOT_NEEDED"
+# The route is not eligible in the viewed domain: the router never serves it to a task of that domain, and its key is
+# checked only in a session of an eligible domain (never looked up across domains).
+VIEW_CREDENTIAL_NOT_ELIGIBLE = "NOT_ELIGIBLE_IN_DOMAIN"
+# The reference is private to a project this viewer cannot see in this domain: neither its name nor its status.
+VIEW_CREDENTIAL_WITHHELD = "WITHHELD"
+CREDENTIAL_USABLE = frozenset({VIEW_CREDENTIAL_PRESENT, VIEW_CREDENTIAL_NOT_NEEDED})
+
+
+def _ref_withheld(ref: str, *, domain: str, project_visible: Callable[[str], bool] | None) -> bool:
+    """True when the reference name is private to another domain or to a project the viewer cannot see, by the rule
+    the Doctor and secrets readiness apply (``doctor.secret_ref_scope``): ``office/`` names stay inside OFFICE and a
+    ``projects/<id>/`` name is quoted only when *project_visible* confirms the viewer's access to that project in
+    *domain*. Fail closed: without the rule, the name is withheld."""
+    try:
+        from aeos.doctor.facade import secret_ref_scope
+
+        private, owner = secret_ref_scope(ref)
+    except (ImportError, ModuleNotFoundError):
+        return True
+    if not private:
+        return False
+    if owner is not None:
+        return owner != domain
+    parts = ref.split("/")
+    project = parts[1] if len(parts) >= 3 and parts[1] else None
+    return not (project and project_visible is not None and project_visible(project))
+
+
+def withheld_ref_label(ref: str) -> str:
+    """What a payload shows in place of a reference name the viewer may not see: the namespace, never the name."""
+    return f"<{ref.partition('/')[0]}/ reference, name withheld>"
+
+
+def withheld_refs(routes: Iterable[ModelRoute], *, domain: str,
+                  project_visible: Callable[[str], bool] | None) -> dict[str, str]:
+    """{configured ``mode_params.credential_ref``: label} of *routes* whose name the viewer of *domain* may not see
+    (``_ref_withheld``, the one rule of the credential block). Empty when every name may be quoted."""
+    out: dict[str, str] = {}
+    for route in routes:
+        ref = (route.mode_params or {}).get("credential_ref")
+        name = str(ref) if ref else ""
+        if name and name not in out and _ref_withheld(name, domain=domain, project_visible=project_visible):
+            out[name] = withheld_ref_label(name)
+    return out
+
+
+def withhold_refs(payload: Any, names: dict[str, str]) -> Any:
+    """*payload* with every name of *names* (``withheld_refs``) replaced by its label in every string, keys and values,
+    at any depth: a route payload (view, config, eligibility reasons, decision rationales) never quotes a reference
+    name private to another domain or to a project the viewer cannot see (L12)."""
+    if not names:
+        return payload
+    ordered = sorted(names, key=len, reverse=True)  # a longer name first: never a partial replacement of it
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            for name in ordered:
+                value = value.replace(name, names[name])
+            return value
+        if isinstance(value, dict):
+            return {walk(k): walk(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [walk(v) for v in value]
+        return value
+
+    return walk(payload)
+
+
+def credential_view(route: ModelRoute, *, domain: str, states: dict[str, str] | None = None,
+                    project_visible: Callable[[str], bool] | None = None) -> dict[str, Any]:
+    """{state, ref, reason, domain} for *route* in *domain*, built from the same rules as ``credential_rejections``
+    (the router rejects every state but PRESENT and NOT_NEEDED). Metadata only: a status lookup of the secret store
+    (memoized in *states*, one per reference and call), never the value, never a provider call. MISSING carries the
+    router's reason (``credential <ref> not stored: aeos secrets set <ref>`` or a path problem, then ref may be None);
+    UNAVAILABLE means the store is sealed, unreachable or unknown (fail closed). NOT_ELIGIBLE_IN_DOMAIN: *domain* is
+    not one of the route's eligible domains, so nothing is looked up. A reference name private to another domain or to
+    a project the viewer cannot see (*project_visible*) is never quoted: a path problem keeps its reason with the name
+    replaced, and an otherwise usable private reference is WITHHELD (no lookup, so its status is not shown either)."""
+    if domain not in (route.eligible_domains or []):
+        return {"state": VIEW_CREDENTIAL_NOT_ELIGIBLE, "ref": None,
+                "reason": (f"route not eligible in {domain} (eligible_domains {list(route.eligible_domains or [])}): "
+                           "the router never serves it to a task of this domain; its key is checked only in a "
+                           "session of an eligible domain"), "domain": domain}
+    configured = (route.mode_params or {}).get("credential_ref")
+    configured = str(configured) if configured else None
+    withheld = configured is not None and _ref_withheld(configured, domain=domain, project_visible=project_visible)
+    problems, refs = _credential_paths(route, domain=domain)
+    if problems:
+        reason = problems[0]
+        if withheld and configured is not None:
+            reason = reason.replace(configured, withheld_ref_label(configured))
+        return {"state": VIEW_CREDENTIAL_MISSING, "ref": None if withheld else configured,
+                "reason": reason, "domain": domain}
+    if not refs:
+        return {"state": VIEW_CREDENTIAL_NOT_NEEDED, "ref": None, "reason": None, "domain": domain}
+    if withheld:
+        return {"state": VIEW_CREDENTIAL_WITHHELD, "ref": None,
+                "reason": "credential reference private to a project not visible in this session: name and key "
+                          "status withheld", "domain": domain}
+    states = {} if states is None else states
+    for ref in refs:
+        if credential_state(ref, states) == CREDENTIAL_PRESENT:
+            return {"state": VIEW_CREDENTIAL_PRESENT, "ref": ref, "reason": None, "domain": domain}
+    reason = _presence_rejections(refs, states)[0]  # every lookup is memoized: no second store call
+    state = VIEW_CREDENTIAL_UNAVAILABLE if store_unavailable_credential_ref(reason) else VIEW_CREDENTIAL_MISSING
+    return {"state": state, "ref": refs[0], "reason": reason, "domain": domain}
 
 
 # ------------------------------------------------------------------------------ runtime binding (§23)
@@ -661,6 +865,7 @@ def _route_rejections(
     session: Session, route: ModelRoute, *, domain: str, data_classification: str, needs_tools: bool,
     min_context: int | None, office: dict[str, Any] | None = None, office_reason: str = "",
     tools: list[str] | None = None, runtime: dict[str, str | None] | None = None,
+    credential_states: dict[str, str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """(hard-filter reasons, rate/quota limit reasons). A route rejected by limit reasons only would serve once the
     limit resets: decision C's no-paid-fallback rule (``select_route``) needs to tell the two apart."""
@@ -726,7 +931,7 @@ def _route_rejections(
         reasons.append(f"availability {route.availability or 'UNKNOWN'}: never observed in a provider catalog "
                        f"({remedy})")
     reasons += region_rejections(route, domain=domain, office=office)
-    reasons += credential_rejections(route, domain=domain)
+    reasons += credential_rejections(route, domain=domain, presence=False)
     reasons += request_shape_rejections(route)
     restriction = client_restriction_problem(route)
     if restriction:
@@ -753,6 +958,10 @@ def _route_rejections(
         if not ok:
             label = "free period expired" if route.is_free == "YES" else f"is_free={route.is_free}"
             reasons.append(f"{budget_label(route)}: {why}" if is_subscription(route) else f"paid route ({label}): {why}")
+    if not reasons:
+        # last and only for a route nothing else rejects: one secret-store status lookup per reference and
+        # eligibility call (``credential_states``), never for the catalog rows that are not activated
+        reasons += credential_presence_rejections(route, domain=domain, states=credential_states)
     return reasons, limits
 
 
@@ -781,10 +990,12 @@ def _eligibility(
     rejected: dict[str, list[str]] = {}
     limited: list[str] = []
     runtime = runtime_context()
+    credential_states: dict[str, str] = {}  # one secret-store status lookup per reference for this call
     for r in _candidates(session, pool):
         reasons, limits = _route_rejections(session, r, domain=domain, data_classification=data_classification,
                                             needs_tools=needs_tools, min_context=min_context, office=office,
-                                            office_reason=office_reason, tools=tools, runtime=runtime)
+                                            office_reason=office_reason, tools=tools, runtime=runtime,
+                                            credential_states=credential_states)
         if reasons or limits:
             rejected[r.route_key] = reasons + limits
             if limits and not reasons and free_tier.is_decision_c_route(r):
@@ -1540,6 +1751,11 @@ def activate_route(
         route.eval_results = results
     session.flush()
     notify_readiness(session, route.route_key, reason=f"status {previous_status} -> {mode}", pool=route.pool)
+    from aeos.events.service import emit
+
+    # the one emit point of an activation: the API and the CLI both call this function (event parity)
+    emit(session, source="routing", kind="route.activated", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"mode": mode, "decision_id": decision.id})
     return route, decision
 
 
@@ -1602,6 +1818,11 @@ def set_local_endpoint(
     changed = refresh_config_hash(session, route, reason=f"owner set LOCAL endpoint {previous['endpoint'] or 'none'} "
                                                           f"-> {base}: {redact_text(rationale.strip())[:120]}")
     session.flush()
+    from aeos.events.service import emit
+
+    # the one emit point of an endpoint change: the API and the CLI both call this function (event parity)
+    emit(session, source="routing", kind="route.endpoint_set", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"endpoint": route.endpoint, "config_changed": changed})
     return route, {"previous": previous, "config_changed": changed, "config_hash": route.config_hash,
                    "needs_new_trial": changed and previous["status"] in {"APPROVED", "TRIAL"}}
 
@@ -1640,6 +1861,11 @@ def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: st
     changed = refresh_config_hash(session, route, reason=reason)  # invalidates the route's decisions, readiness STALE
     notify_readiness(session, route.route_key, reason=reason, pool=previous["pool"])  # the old pool's checks too
     session.flush()
+    from aeos.events.service import emit
+
+    # the one emit point of a pool move: the API and the CLI both call this function (event parity)
+    emit(session, source="routing", kind="route.pool_set", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"pool": route.pool, "previous_pool": previous["pool"]})
     return route, {"previous": previous, "config_changed": changed, "config_hash": route.config_hash,
                    "needs_new_trial": changed and previous["status"] in {"APPROVED", "TRIAL"}}
 
@@ -1658,4 +1884,9 @@ def disable_route(session: Session, route_key: str, *, reason: str) -> ModelRout
     session.flush()
     notify_readiness(session, route.route_key, reason=f"status {previous_status} -> DISABLED: {reason}",
                      pool=route.pool)
+    from aeos.events.service import emit
+
+    # the one emit point of a disable: the API and the CLI both call this function (event parity)
+    emit(session, source="routing", kind="route.disabled", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         payload={"reason": reason})
     return route

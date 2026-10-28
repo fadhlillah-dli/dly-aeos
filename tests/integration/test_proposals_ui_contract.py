@@ -83,6 +83,8 @@ def test_component_and_route_detail_shapes_match_ui_fixtures(personal_client: Au
     key = _fixture("models", "route-detail")["route_key"]
     route = personal_client.get(f"/api/routes/{key}").json()
     assert set(route) == set(_fixture("models", "route-detail"))
+    # the route drawer badges the credential block (R28): its keys are part of the contract
+    assert set(route["credential"]) == set(_fixture("models", "route-detail")["credential"])
 
 
 def test_subscription_shapes_match_ui_fixtures(personal_client: AuthedClient, db):
@@ -98,6 +100,7 @@ def test_subscription_shapes_match_ui_fixtures(personal_client: AuthedClient, db
     route = personal_client.get(f"/api/routes/{key}").json()
     fx = _fixture("models", "route-detail-go")
     assert set(route) == set(fx)
+    assert set(route["credential"]) == set(fx["credential"])
     assert route["billing"] == fx["billing"] == "SUBSCRIPTION" and fx["budget_note"]
     assert set(route["subscription"]) == set(fx["subscription"])
     assert set(route["subscription"]["windows"][0]) == set(fx["subscription"]["windows"][0])

@@ -7,6 +7,7 @@ without an ACTIVE human decision bound to its current configuration hash is NOT 
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -93,13 +94,79 @@ def eligible_worker_routes_by_class(session: Any) -> tuple[dict[str, list[str]],
     return by_class, rejected, None
 
 
+def keyless_excluded(session: Any, rejected: dict[str, list[str]]) -> dict[str, str]:
+    """{route key: missing secret reference} of the ACTIVE (TRIAL/APPROVED) WORKER routes that routing kept out because
+    the key they need is not stored (``credential <ref> not stored``). Status lookups only, never a value."""
+    return _active_excluded(session, rejected, "unstored_credential_ref")
+
+
+def store_unavailable_excluded(session: Any, rejected: dict[str, list[str]]) -> dict[str, str]:
+    """{route key: secret reference} of the ACTIVE (TRIAL/APPROVED) WORKER routes that routing kept out because the
+    secret store could not say whether their key is stored (sealed, unreachable or unknown; fail closed)."""
+    return _active_excluded(session, rejected, "store_unavailable_credential_ref")
+
+
+def _active_excluded(session: Any, rejected: dict[str, list[str]], matcher: str) -> dict[str, str]:
+    try:
+        from aeos.routing import facade as routing
+    except (ImportError, ModuleNotFoundError):
+        return {}
+    from aeos.models.routing import ModelRoute
+
+    match = getattr(routing, matcher)
+    active = {k for (k,) in session.execute(select(ModelRoute.route_key).where(
+        ModelRoute.pool == "WORKER", ModelRoute.status.in_(("APPROVED", "TRIAL"))))}
+    out: dict[str, str] = {}
+    for key in sorted(rejected):
+        if key not in active:
+            continue
+        ref = next((r for r in (match(x) for x in rejected[key]) if r), None)
+        if ref:
+            out[key] = ref
+    return out
+
+
+def _keyless_text(excluded: dict[str, str], limit: int = 5) -> str:
+    return ", ".join(f"{k} ({ref})" for k, ref in list(excluded.items())[:limit])
+
+
+def keyless_remedies(excluded: dict[str, str]) -> list[dict[str, str]]:
+    """Both remedies per keyless route: store its key, or disable the route (the owner chooses)."""
+    return [{"route_key": k, "ref": ref, "store_key": aeos_cmd(f"secrets set {ref}"),
+             "disable": aeos_cmd(f'routes disable {k} --reason "kunci belum disimpan"')}
+            for k, ref in excluded.items()]
+
+
 @check("route.registry", "MODEL_ROUTE", "Route pekerja APPROVED/TRIAL yang eligible", component_id="model-routing",
        needs_db=True, ttl_seconds=3600, invalidators=("config:routes", "model:route", "config:budget",
-                                                      "config:office_policy"),
+                                                      "config:office_policy", "secret:workers/*",
+                                                      "secret:personal/openrouter", "secret:store"),
        ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH", fingerprint=_routes_fp,
        description="Hard filter routing (keputusan manusia terikat hash konfigurasi, domain, data terms, tool support, "
-                   "kuota, kesegaran harga/terms, budget) untuk PERSONAL / INTERNAL, atau PUBLIC saja (keputusan C).")
+                   "kuota, kesegaran harga/terms, budget, kunci tersimpan) untuk PERSONAL / INTERNAL, atau PUBLIC "
+                   "saja (keputusan C).")
 def route_registry(ctx: CheckContext) -> Outcome:
+    assert ctx.session is not None
+    return withhold_private_refs(ctx.session, _route_registry(ctx))
+
+
+def withhold_private_refs(session: Any, outcome: Outcome) -> Outcome:
+    """*outcome* with every route credential reference name private to OFFICE or to a project replaced by its label in
+    the summary, the evidence and the remedy (L12): this row has no domain, so every session reads it, and the rejection
+    reasons it quotes name the reference (``credential_ref office/...: office/ credentials are never used outside
+    OFFICE``). The one rule of the route views (``routing.withhold_private_refs``), for the viewer this check is
+    evaluated for (ROUTE_DOMAIN, no project scope)."""
+    try:
+        from aeos.routing import facade as routing
+    except (ImportError, ModuleNotFoundError):  # pragma: no cover - eligibility already reports UNKNOWN without it
+        return outcome
+    summary, evidence, remedy = routing.withhold_private_refs(
+        session, [outcome.summary, outcome.evidence, outcome.remedy.as_dict() if outcome.remedy else None],
+        domain=ROUTE_DOMAIN)
+    return replace(outcome, summary=summary, evidence=evidence, remedy=Remedy(**remedy) if remedy else None)
+
+
+def _route_registry(ctx: CheckContext) -> Outcome:
     from aeos.models.routing import ModelRoute
 
     assert ctx.session is not None
@@ -125,6 +192,13 @@ def route_registry(ctx: CheckContext) -> Outcome:
     evidence["eligible"] = eligible
     evidence["eligible_by_class"] = {c: keys for c, keys in by_class.items() if keys}
     evidence["rejected_decided"] = {k: v[:4] for k, v in rejected.items() if k in decided_keys}
+    keyless = keyless_excluded(ctx.session, rejected) if not error else {}
+    store_down = store_unavailable_excluded(ctx.session, rejected) if not error else {}
+    evidence["excluded_keyless"] = keyless
+    evidence["excluded_store_unavailable"] = store_down
+    excluded_note = (f" Dikecualikan: kunci belum disimpan: {_keyless_text(keyless)}." if keyless else "")
+    if store_down:
+        excluded_note += f" Dikecualikan: secret store tidak tersedia: {_keyless_text(store_down)}."
     activate = Remedy(operation="Evaluasi lalu aktifkan satu route pekerja lewat keputusan manusia (ROUTE_ACTIVATION "
                       "atau TRIAL terikat hash konfigurasi; route berbayar butuh keputusan BUDGET, route langganan "
                       "butuh keputusan BUDGET untuk biaya paket bulanannya)",
@@ -138,14 +212,14 @@ def route_registry(ctx: CheckContext) -> Outcome:
     internal = by_class.get(ROUTE_CLASSIFICATION, [])
     if internal:
         return Outcome("CONFIGURED", f"{len(internal)} route pekerja eligible untuk {ROUTE_DOMAIN}/{ROUTE_CLASSIFICATION}: "
-                       f"{', '.join(internal[:5])} (keputusan manusia terikat hash; belum bukti kualitas).",
-                       evidence=evidence)
+                       f"{', '.join(internal[:5])} (keputusan manusia terikat hash; belum bukti kualitas)."
+                       f"{excluded_note}", evidence=evidence)
     if eligible:
         # decision C: only PUBLIC work can run; INTERNAL tasks wait (routing refuses them on these routes)
         return Outcome("CONFIGURED", f"{len(eligible)} route pekerja eligible untuk {ROUTE_DOMAIN}/PUBLIC saja "
                        f"(keputusan C): {', '.join(eligible[:5])}; tugas INTERNAL menunggu route yang mengizinkan "
-                       "INTERNAL (mis. OpenCode Go) (keputusan manusia terikat hash; belum bukti kualitas).",
-                       evidence=evidence)
+                       "INTERNAL (mis. OpenCode Go) (keputusan manusia terikat hash; belum bukti kualitas)."
+                       f"{excluded_note}", evidence=evidence)
     # §08: the remedy (activating a worker route) may be a paid write when any candidate is not free. A flat-fee
     # SUBSCRIPTION candidate (ADR-0080 amendment 2026-10-26) is neither free nor an unpriced paid route: activating it
     # is a BUDGET decision for its plan fee (a paid write); incomplete subscription terms stay unknown-price.
@@ -156,11 +230,37 @@ def route_registry(ctx: CheckContext) -> Outcome:
         return Outcome("MISSING", "Belum ada route pekerja APPROVED/TRIAL; kandidat tidak otomatis aktif (§23).",
                        evidence=evidence, error_code="NO_APPROVED_WORKER_ROUTE", remedy=activate,
                        requires_paid_write=bool(paid or subscription))
+    if store_down:
+        # the store cannot answer, so whether the keys are stored is not known: the cause is the store, and the remedy
+        # restores it (no route activation, nothing paid); route.worker_key and secret.status say the same
+        return Outcome("UNKNOWN", f"{decided} route APPROVED/TRIAL tetapi eligibilitasnya tidak dapat dinilai: secret "
+                       f"store tidak tersedia (sealed, tidak terjangkau atau tidak dikenal), status kunci "
+                       f"{_keyless_text(store_down)} tidak dapat dibaca (fail closed).", evidence=evidence,
+                       error_code="SECRET_STORE_UNAVAILABLE", remedy=_store_remedy(store_down))
+    if keyless:
+        # an active route is kept out only for its key: storing it (or disabling the route) is the remedy, not a new
+        # activation; the example names that cause
+        ref = next(iter(keyless.values()))
+        return Outcome("MISSING", f"{decided} route APPROVED/TRIAL tetapi tidak ada yang eligible (kunci belum "
+                       f"disimpan: {ref}).{excluded_note}", evidence=evidence, error_code="NO_ELIGIBLE_WORKER_ROUTE",
+                       remedy=_keyless_remedy(keyless))
     first = next(iter(evidence["rejected_decided"].items()), None)
     why = f" (mis. {first[0]}: {first[1][0]})" if first and first[1] else ""
-    return Outcome("MISSING", f"{decided} route APPROVED/TRIAL tetapi tidak ada yang eligible{why}.", evidence=evidence,
+    return Outcome("MISSING", f"{decided} route APPROVED/TRIAL tetapi tidak ada yang eligible{why}.{excluded_note}",
+                   evidence=evidence,
                    error_code="NO_ELIGIBLE_WORKER_ROUTE", remedy=activate,
                    requires_paid_write=bool(paid or subscription))
+
+
+def _store_remedy(store_down: dict[str, str]) -> Remedy:
+    """Restore the secret store; no route change. No single command: sealed and unreachable need different ones, and
+    the precise cause is in secret.status / secret.openbao_health."""
+    return Remedy(operation=f"Pulihkan secret store lalu jalankan ulang Doctor: buka segel OpenBao bila sealed "
+                  f"({aeos_cmd('vault unseal')}), jalankan bila tidak terjangkau ({aeos_cmd('vault start')}); penyebab "
+                  "persisnya ada di secret.status dan secret.openbao_health. Route tidak perlu diaktifkan ulang",
+                  source="SecretProvider (OpenBao / OS credential store, §26)",
+                  target=", ".join(store_down)[:300], privilege="pemilik", cost="tidak ada",
+                  evidence_to_collect="secret.status CONFIGURED, route.registry CONFIGURED")
 
 
 def _non_free_candidates(session: Any) -> tuple[list[str], list[str]]:
@@ -183,15 +283,17 @@ def _non_free_candidates(session: Any) -> tuple[list[str], list[str]]:
     return sorted(paid), sorted(subscription)
 
 
-def _required_key_refs(ctx: CheckContext) -> tuple[list[str], list[tuple[str, tuple[str, ...]]]]:
-    """(eligible route keys, [(route_key, acceptable refs)]) for the eligible PERSONAL worker routes, with the
-    broker model proxy's credential rules (``mode_params.credential_ref``, else OpenRouter's worker/personal key)."""
+def _required_key_refs(ctx: CheckContext) -> tuple[list[str], list[tuple[str, tuple[str, ...]]], dict[str, str]]:
+    """(eligible route keys, [(route_key, acceptable refs)], keyless excluded routes) for the eligible PERSONAL worker
+    routes, with the broker model proxy's credential rules (``mode_params.credential_ref``, else OpenRouter's
+    worker/personal key). Routing already keeps a route whose key is not stored out (``keyless_excluded``)."""
     if ctx.session is None:
-        return [], []
+        return [], [], {}
     from aeos.inventory.probes import is_loopback_url
     from aeos.models.routing import ModelRoute
 
-    eligible, _rejected, _error = eligible_worker_routes(ctx.session)
+    eligible, rejected, error = eligible_worker_routes(ctx.session)
+    keyless = keyless_excluded(ctx.session, rejected) if not error else {}
     out: list[tuple[str, tuple[str, ...]]] = []
     for key in eligible:
         r = ctx.session.scalar(select(ModelRoute).where(ModelRoute.route_key == key))
@@ -205,21 +307,42 @@ def _required_key_refs(ctx: CheckContext) -> tuple[list[str], list[tuple[str, tu
         elif not (r.endpoint and r.endpoint.startswith("http://") and is_loopback_url(r.endpoint)):
             out.append((key, ()))  # https upstream without credential_ref: the broker proxy refuses it
         # a loopback http endpoint without credential_ref needs no upstream key
-    return eligible, out
+    return eligible, out, keyless
+
+
+def _keyless_remedy(keyless: dict[str, str]) -> Remedy:
+    """Both owner remedies for an active route kept out because its key is not stored: store the key, or disable it."""
+    key, ref = next(iter(keyless.items()))
+    base = set_secret_remedy(ref, KEY_LABELS.get(ref, ref))
+    disable = aeos_cmd(f'routes disable {key} --reason "kunci belum disimpan"')
+    return replace(base, operation=f"{base.operation}; atau nonaktifkan route yang tidak dipakai: {disable}",
+                   target=", ".join(keyless)[:300])
 
 
 # Secret changes are signalled by explicit invalidators (secret:<ref>), not by reading the store. ``secret:workers/*``
 # covers every worker-model key an eligible route may name (workers/openrouter, workers/opencode-go, ...).
 @check("route.worker_key", "MODEL_ROUTE", "Referensi kunci route pekerja (tanpa panggilan)", component_id="openrouter",
        ttl_seconds=3600, invalidators=("secret:workers/*", "secret:personal/openrouter", "config:routes",
-                                       "model:route"),
+                                       "model:route", "secret:store"),
        ok={"CONFIGURED", "VERIFIED", "NOT_APPLICABLE"}, severity_fail="HIGH", observation="configuration")
 def route_worker_key(ctx: CheckContext) -> Outcome:
-    eligible, required = _required_key_refs(ctx)
+    # the reference names it quotes (missing keys, keyless routes) follow the same rule as route.registry (L12)
+    outcome = _route_worker_key(ctx)
+    return withhold_private_refs(ctx.session, outcome) if ctx.session is not None else outcome
+
+
+def _route_worker_key(ctx: CheckContext) -> Outcome:
+    eligible, required, keyless = _required_key_refs(ctx)
+    keyless_ev: dict[str, Any] = ({"excluded_keyless": keyless, "keyless_remedies": keyless_remedies(keyless)}
+                                  if keyless else {})
+    note = (f" Catatan (tidak memblokir): route aktif dikecualikan karena kunci belum disimpan: {_keyless_text(keyless)}; "
+            "simpan kuncinya (aeos secrets set <ref>) atau nonaktifkan route-nya (aeos routes disable <route_key> "
+            '--reason "...").' if keyless else "")
     if eligible and not required:
         return Outcome("NOT_APPLICABLE", f"Route eligible ({', '.join(eligible[:5])}) adalah endpoint loopback tanpa "
-                       "credential; tidak ada kunci upstream yang dibutuhkan.",
-                       evidence={"routes": eligible, "paid_call_made": False})
+                       f"credential; tidak ada kunci upstream yang dibutuhkan.{note}",
+                       evidence={"routes": eligible, "paid_call_made": False, **keyless_ev},
+                       remedy=_keyless_remedy(keyless) if keyless else None)
     # No eligible route yet (route.registry reports why): report the default worker key the first
     # OpenRouter route would need, so the owner can prepare it.
     no_ref = [k for k, refs in required if not refs]
@@ -232,14 +355,21 @@ def route_worker_key(ctx: CheckContext) -> Outcome:
                                      command=aeos_cmd("secrets set workers/<provider>"), target=", ".join(no_ref),
                                      privilege="pemilik", cost="sesuai route",
                                      evidence_to_collect="route.worker_key CONFIGURED"))
-    targets = required or [("<default>", (WORKER_KEY_REF,))]
+    # Routing keeps a route whose key is not stored out, so eligible routes normally have theirs. With no eligible
+    # route at all, the keys of the active routes kept out for a missing key are what is missing (else the default).
+    if required:
+        targets = required
+    elif keyless:
+        targets = [(k, OPENROUTER_PERSONAL_REFS if ref == WORKER_KEY_REF else (ref,)) for k, ref in keyless.items()]
+    else:
+        targets = [("<default>", (WORKER_KEY_REF,))]
     missing: list[str] = []
     store_down = False
     states: dict[str, str] = {}
     for route_key, refs in targets:
         found = False
         for ref in refs:
-            state, _ev = secret_ref_status(ref)
+            state = states.get(ref) or secret_ref_status(ref)[0]
             states[ref] = state
             if state == "PRESENT":
                 found = True
@@ -249,15 +379,20 @@ def route_worker_key(ctx: CheckContext) -> Outcome:
         if not found:
             missing.append(f"{route_key}: {' / '.join(refs)}")
     evidence: dict[str, Any] = {"paid_call_made": False, "ref_states": states,
-                                "routes": [k for k, _ in targets if k != "<default>"]}
+                                "routes": [k for k, _ in targets if k != "<default>"], **keyless_ev}
     if not missing:
         return Outcome("CONFIGURED", f"Kunci untuk {len(targets)} route tersimpan ({', '.join(sorted(states))}); belum "
-                       "diuji (tidak ada panggilan berbayar).", evidence=evidence)
+                       f"diuji (tidak ada panggilan berbayar).{note if required else ''}", evidence=evidence,
+                       remedy=_keyless_remedy(keyless) if keyless and required else None)
     if "NOT_IMPLEMENTED" in states.values():
         return Outcome("UNKNOWN", "Modul secrets belum tersedia.", evidence=evidence, error_code="SECRETS_NOT_IMPLEMENTED")
     if store_down:
         return Outcome("MISSING", "Secret store tidak tersedia; status kunci tidak dapat dibaca (fail closed).",
                        evidence=evidence, error_code="SECRET_STORE_UNAVAILABLE")
+    if not required and keyless:
+        return Outcome("MISSING", f"Tidak ada route pekerja eligible: kunci route aktif belum disimpan: "
+                       f"{'; '.join(missing)}.", evidence=evidence, error_code="WORKER_KEY_MISSING",
+                       remedy=_keyless_remedy(keyless))
     ref = (required[0][1][0] if required else WORKER_KEY_REF)
     return Outcome("MISSING", f"Kunci route belum disimpan: {'; '.join(missing)}.", evidence=evidence,
                    error_code="WORKER_KEY_MISSING", remedy=set_secret_remedy(ref, KEY_LABELS.get(ref, ref)))

@@ -8,7 +8,9 @@ import { Button, ErrorBox, Field, Freshness, KeyValue, Loading, Mono, Notice, in
 import { absoluteTime, shortHash } from "../../lib/format";
 import { ActivationDialog } from "./ActivationDialog";
 import { useDisableRoute, useRouteDetail, useSetRouteEndpoint } from "./api";
-import { POOL_LABELS, type RouteItem } from "./types";
+import { CopyCommand } from "../integrations/CopyCommand";
+import { RouteStatusBadge, credentialProblem, credentialRemedy, isActiveRoute, isCredentialBlockedRoute } from "./badges";
+import { POOL_LABELS, type FreeTierView, type RouteItem } from "./types";
 
 function freeLabel(r: RouteItem) {
   if (r.is_free === "YES" && r.effectively_free) return <StatusBadge status="CANDIDATE" label="Gratis (katalog E1)" />;
@@ -18,6 +20,49 @@ function freeLabel(r: RouteItem) {
 }
 
 export { freeLabel };
+
+/** Decision C (ADR-0041 amendment): today's use of the account-wide free-model quota and the WORKER eligibility.
+ * Only for a `:free` route (the API sends `free_tier: null` for every other one). The count covers requests this AEOS
+ * instance sent; the provider's own 429 stays authoritative. */
+export function FreeTierBlock({ tier }: { tier: FreeTierView }) {
+  const c = tier.decision_c;
+  return (
+    <div data-testid="free-tier-block" className="space-y-2 rounded-md border border-line p-3 text-sm">
+      <div className="font-medium">Kuota gratis (free tier)</div>
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge
+          status={tier.state}
+          label={tier.state === "LIMIT_REACHED" ? "Batas harian tercapai" : "Di bawah batas"}
+          title={tier.reason ?? tier.state}
+        />
+        <span data-testid="free-tier-usage">
+          Hari ini (UTC): <strong>{tier.requests_today_utc}</strong> dari {tier.daily_limit} permintaan · menit terakhir{" "}
+          {tier.requests_last_minute} dari {tier.rpm_limit}
+        </span>
+      </div>
+      <div className="text-xs text-ink-3">
+        Batas harian dari {tier.daily_basis === "KEY_ENDPOINT" ? "endpoint kunci penyedia" : "pengaturan pemilik"}; {tier.scope}. {tier.counted}.
+      </div>
+      {tier.reason && <div className="text-xs text-warn">{tier.reason}</div>}
+      {c && (
+        <div className="space-y-1 border-t border-line pt-2" data-testid="free-tier-decision-c">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-medium">Keputusan C:</span>
+            <StatusBadge status={c.status} />
+          </div>
+          <div className="text-xs text-ink-2">{c.note}</div>
+          {c.problems.length > 0 && (
+            <ul className="list-disc pl-5 text-xs text-warn">
+              {c.problems.map((p) => (
+                <li key={p}>{p}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** §37: an identity field that is not recorded shows UNKNOWN, never a guess. */
 function cfgText(config: Record<string, unknown> | undefined, key: string): string {
@@ -220,6 +265,28 @@ function LocalEndpointForm({ route, config }: { route: RouteItem; config?: Recor
   );
 }
 
+/** The credential block as stored-or-not metadata (never a value): which reference, for which domain. */
+function credentialCell(r: RouteItem): ReactNode {
+  const c = r.credential;
+  if (!c) return <StatusBadge status="UNKNOWN" label="Tidak dilaporkan server" />;
+  const label: Record<string, [string, string]> = {
+    PRESENT: ["CONFIGURED", "Tersimpan"],
+    NOT_NEEDED: ["NOT_APPLICABLE", "Tidak perlu kunci"],
+    MISSING: ["MISSING", "Belum tersedia"],
+    UNAVAILABLE: ["UNKNOWN", "Tidak dapat diperiksa (vault terkunci/tidak terjangkau)"],
+    NOT_ELIGIBLE_IN_DOMAIN: ["NOT_APPLICABLE", "Tidak diperiksa: rute tidak berlaku di domain sesi ini"],
+    WITHHELD: ["UNKNOWN", "Disembunyikan: referensi proyek di luar cakupan Anda"],
+  };
+  const [status, text] = label[c.state] ?? ["UNKNOWN", c.state];
+  return (
+    <span key="cred" className="inline-flex flex-wrap items-center gap-1">
+      <StatusBadge status={status} label={text} />
+      {c.ref && <Mono>{c.ref}</Mono>}
+      <span className="text-xs text-ink-3">domain {c.domain}</span>
+    </span>
+  );
+}
+
 export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: () => void }) {
   const { isAdmin } = useAuth();
   const q = useRouteDetail(routeKey);
@@ -250,12 +317,33 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
         {r && (
           <div className="space-y-4">
             <div className="flex flex-wrap gap-2">
-              <StatusBadge status={r.status} />
+              <RouteStatusBadge route={r} />
+              {isActiveRoute(r) && r.active_decision?.expires_at && (
+                <span className="self-center text-xs text-ink-2" data-testid="route-valid-until">
+                  s/d {absoluteTime(r.active_decision.expires_at)}
+                </span>
+              )}
               <StatusBadge status={r.mode} />
               {freeLabel(r)}
               <StatusBadge status={r.identity_status === "UNVERIFIED" ? "UNVERIFIED" : "CANDIDATE"} label={`Identitas: ${r.identity_status}`} />
               <StatusBadge status={r.availability === "MISSING" ? "MISSING" : r.availability === "AVAILABLE" ? "CONNECTED" : "UNKNOWN"} label={`Katalog: ${r.availability}`} />
             </div>
+            {isCredentialBlockedRoute(r) && (
+              <div data-testid="route-credential-remedy">
+                <Notice tone="warn">
+                  Aktif, tidak dapat dipakai: {credentialProblem(r)}. Router menolak rute ini sampai kuncinya tersedia
+                  {r.credential?.reason ? ` (${r.credential.reason})` : ""}.
+                  {credentialRemedy(r) && (
+                    <div className="mt-2">
+                      <CopyCommand
+                        command={credentialRemedy(r) as string}
+                        why={r.credential?.state === "UNAVAILABLE" ? "Buka vault, lalu muat ulang" : "Simpan kunci (nilai diminta tersembunyi)"}
+                      />
+                    </div>
+                  )}
+                </Notice>
+              </div>
+            )}
             {r.mode === "DESIGN" && (
               <Notice tone="mock">Entri desain dari master §23 (E1) — bukan bukti rute terpasang, terhubung, teruji atau dipakai.</Notice>
             )}
@@ -266,6 +354,7 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 ["Model ID persis", <Mono key="m">{r.model_id}</Mono>],
                 ["Permintaan upstream", upstreamRequest(r)],
                 ["Syarat klien penyedia", clientRestriction(r)],
+                ["Kunci (kredensial)", credentialCell(r)],
                 ["Keputusan BUDGET", budgetRequired(r)],
                 ...(r.billing === "SUBSCRIPTION" ? ([["Penagihan", billingCell(r)]] as [ReactNode, ReactNode][]) : []),
                 ["Versi teresolusi", r.resolved_version === "UNKNOWN" ? <StatusBadge status="UNKNOWN" /> : <Mono>{r.resolved_version}</Mono>],
@@ -320,6 +409,7 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
                 ["Sumber", r.source_refs.join(", ")],
               ]}
             />
+            {r.free_tier && <FreeTierBlock tier={r.free_tier} />}
             <ExplainButtons
               content={{
                 what: (

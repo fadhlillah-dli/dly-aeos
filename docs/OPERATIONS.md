@@ -67,9 +67,9 @@ that does not read it, when its "Source" does not match its readers, and when a 
 | `AEOS_COMMIT_AUTHOR_EMAIL` | Settings field | `Settings` | unset | Fallback commit e-mail for the **github** identity only; `commit_identities` wins (see "Commit identity and no AI attribution") |
 | `AEOS_COMMIT_AUTHOR_NAME` | Settings field | `Settings` | unset | Fallback commit name for the **github** identity only |
 | `AEOS_COMMIT_IDENTITIES` | Settings field | `Settings` | unset | JSON `{"github": {"name", "email"}, "bitbucket": {...}}`, the commit identity per code host; only in local configuration, never committed |
-| `AEOS_CONFIG` | direct read | `backend/aeos/core/config.py` | `<config dir>/aeos.yaml` | Path of the non-secret YAML settings file |
+| `AEOS_CONFIG` | direct read + script | `backend/aeos/core/config.py`, `scripts/owner_dryrun.py` | `<config dir>/aeos.yaml` | Path of the non-secret YAML settings file. The owner dry run points it at its temporary copy of `aeos.yaml` and restores it afterwards |
 | `AEOS_CONFLUENCE_PROJECTS_PARENT_ID` | Settings field | `Settings` | unset | Declared field that no code reads for its value (it only enters the settings hash); setting it changes no behaviour. The Confluence parent the publisher uses is the `CONFLUENCE_PROJECTS_PARENT_ID` key of the project integration config (`aeos.publisher.providers.atlassian`, §04) |
-| `AEOS_DATA_DIR` | Settings field + script | `Settings`, `scripts/dev.ps1`, `scripts/dev.sh` | OS default (see "Data locations") | Data root; must be absolute and outside the checkout. The dev scripts set a separate dev profile when it is unset |
+| `AEOS_DATA_DIR` | Settings field + script | `Settings`, `scripts/dev.ps1`, `scripts/dev.sh`, `scripts/owner_dryrun.py` | OS default (see "Data locations") | Data root; must be absolute and outside the checkout. The dev scripts set a separate dev profile when it is unset; the owner dry run points it at its temporary copy of the live database and restores it afterwards |
 | `AEOS_DEV_FRONTEND_PORT` | Settings field | `Settings` | `5173` | Port of the Vite dev server whose origin is allowed in dev mode; the dev scripts set it |
 | `AEOS_DEV_MODE` | Settings field | `Settings` | `false` | Dev mode: allow the Vite origin, enable API docs. `aeos serve --dev` sets it for its own process |
 | `AEOS_ENVIRONMENT` | Settings field | `Settings` | `local` | Environment label shown in the Control Center header |
@@ -84,7 +84,7 @@ that does not read it, when its "Source" does not match its readers, and when a 
 | `AEOS_MCI_SOURCE_PATH` | Settings field | `Settings` | unset (`<data>/policy/canonical/<file>`) | Absolute path of the owner-supplied canonical MCI_V2 source; a path inside the repository is refused |
 | `AEOS_MMDC_BINARY` | Settings field + direct read | `Settings`, `backend/aeos/docs_engine/visuals.py` | unset (`mmdc` on `PATH`) | Path of the optional mermaid-cli renderer; without it visuals stay "pending". Only the environment variable is read (`visuals.py`): an `mmdc_binary` key in `aeos.yaml` fills the `Settings` field but the renderer does not read it. A path that is not a file means no renderer (`PATH` is not tried) |
 | `AEOS_OFFICE_EXTERNAL_WORKER_ALLOWED` | Settings field | `Settings` | `false` | Authorises nothing. OFFICE stays default deny until a recorded company authorisation (§23). The only read is `backend/aeos/policy/office.py` (`_config_override_requested`): `office_policy` reports `config_override_ignored: true` when it is set, and the value is never used to relax any rule. It also enters the settings hash |
-| `AEOS_OPENBAO_ADDR` | Settings field + script | `Settings`, `scripts/component_status.py` | `http://127.0.0.1:8200` | Address of the OpenBao server (the script reads the environment only, not `aeos.yaml`) |
+| `AEOS_OPENBAO_ADDR` | Settings field + script | `Settings`, `scripts/component_status.py`, `scripts/owner_dryrun.py` | `http://127.0.0.1:8200` | Address of the OpenBao server (`component_status.py` reads the environment only, not `aeos.yaml`; the owner dry run sets a closed loopback port for its run and restores it afterwards) |
 | `AEOS_OPENBAO_BINARY` | Settings field | `Settings` | unset (found in `<data>/bin` or on `PATH`) | Path of the `bao` binary; an unusable path is authoritative and reported, never skipped |
 | `AEOS_OPENCODE_BINARY` | Settings field + direct read | `Settings`, `backend/aeos/worker_runtime/opencode.py` | unset (`opencode` on `PATH`) | Path of the OpenCode executable; `Settings` (so `aeos.yaml` too) is used first, `worker_runtime/opencode.py` falls back to the environment variable, then to `PATH` |
 | `AEOS_OPENROUTER_FREE_DAILY_LIMIT` | Settings field | `Settings` | `50` | Requests per UTC day for `:free` models; 1 to 1000 (1000 only after at least 10 credits were bought). The cap in force is the lower of this value and the limit the OpenRouter key endpoint reported at the last catalog refresh |
@@ -224,6 +224,101 @@ The CI zip and the zip of `aeos ops release build` are both `git archive` of the
 prefix `dly-aeos-X.Y.Z/` and the local one has none, and they are made by different git versions on different hosts:
 their file hashes differ, and a byte-for-byte match of their contents is NOT-PROVEN. Tie them by the commit, which the
 attestation and the local provenance both record, not by the file hash.
+
+## After git pull: restart serve (UI bundle and backend freshness)
+
+`git pull` updates the source, but not `frontend/dist` (a build output) and not the code a running `aeos serve`
+imported at start (incident 2026-10-28, LESSONS L23: a bundle built on 2026-10-26 was served for two days while five
+frontend commits were missing). After a pull that changed `frontend/` or `backend/`, stop `aeos serve` (Ctrl+C) and
+start it again. The `post-merge` hook in `scripts/git-hooks` prints `frontend/backend changed: restart ./aeos serve`
+after a `git pull` or `git merge` that changed them (installed with `git config core.hooksPath scripts/git-hooks`; it
+only prints and never fails; `git pull --rebase` does not run it).
+
+On start, `aeos serve` (checkout mode, not `--release active`) compares the bundle with HEAD and builds it once when
+it is STALE (built from another frontend tree), MISSING (no `frontend/dist/index.html`) or UNVERIFIED (no build record,
+or a record of a build with uncommitted changes), and only when all of these hold: the tree is a git checkout,
+`frontend/node_modules` matches `frontend/package-lock.json` (the hidden lockfile `node_modules/.package-lock.json`
+lists the same versions), `git status --porcelain -- frontend` is empty and `--no-ui-build` is not given. It never runs
+`npm ci` or `npm install`, and a release install is never rebuilt.
+
+The build is atomic: `npm run build -- --outDir dist.next` (300 s timeout, one log line, output in
+`<data>/logs/ui-build.log`) writes into `frontend/dist.next`, never into `frontend/dist`, because Vite empties its
+output directory before it writes. Only when the build exits 0 and `dist.next/aeos-build.json` names a clean build of
+HEAD does serve rename `frontend/dist` to `frontend/dist.prev`, `frontend/dist.next` to `frontend/dist`, and delete
+`frontend/dist.prev`. A failed, killed or timed-out build leaves `frontend/dist` untouched and deletes the partial
+`dist.next`. When a rename fails (on Windows a file in `frontend/dist` can be locked by another server, an editor or a
+virus scanner), serve undoes the renames it made, reports the failure and still starts. Both directories are
+gitignored. At the next start a leftover `dist.prev` is put back when `dist` has no `index.html`, before the safety
+checks above (restoring needs no npm), so the old bundle is served even with `--no-ui-build`, an out-of-date
+`node_modules`, a changed `frontend/` or no npm; `ui_build.note` then says it was restored. When the restore fails
+while `frontend/dist` (without `index.html`) is still there, serve does not start the rebuild (its swap could not move
+`dist` aside) and reports `ui_build` MISSING with the restore failure as the reason; the old bundle stays in `dist.prev`.
+A leftover `dist.prev` next to a complete `dist`, and any `dist.next`, are deleted before the next rebuild.
+
+Whatever failed, serve then judges `frontend/dist` as it is on disk now (after a restore and after the build): a bundle
+is there, it starts with it and reports `ui_build` STALE or UNVERIFIED with the reason; no `index.html`, it reports
+`ui_build` MISSING with the remedy (the Control Center pages return `FRONTEND_NOT_BUILT`, the API runs).
+`ui_build.status` in `GET /api/health` is FRESH, REBUILT (with `previous_status`), STALE, UNVERIFIED, MISSING or
+NOT_RECORDED (the server was not started by `aeos serve` from a checkout); `note` says when the old bundle was
+restored from `dist.prev` or could not be deleted. The manual rebuild, from the repository root:
+
+```bash
+cd frontend && npm ci --no-audit --no-fund && npm run build
+```
+
+What the Doctor says. `runtime.frontend_dist` is the existence check and is critical for `CAN_OPEN_DASHBOARD`: without
+`index.html` the capability is BLOCKED and `aeos doctor` exits 1. `runtime.frontend_fresh` is in the required tier: a
+stale or unverified bundle still opens the dashboard with an older UI, so `CAN_OPEN_DASHBOARD` is DEGRADED, never
+BLOCKED, and `aeos doctor` exits 0.
+
+| Check | Status | Meaning |
+|---|---|---|
+| `runtime.frontend_dist` | VERIFIED | `frontend/dist/index.html` exists (whether it matches the code: `runtime.frontend_fresh`) |
+| `runtime.frontend_dist` | MISSING `FRONTEND_NOT_BUILT` | no built bundle: the dashboard cannot open (`CAN_OPEN_DASHBOARD` BLOCKED, exit 1) |
+| `runtime.frontend_fresh` | VERIFIED | the build record `frontend/dist/aeos-build.json` names a clean build of `git rev-parse HEAD:frontend` (a release install: the correspondence its provenance recorded) |
+| `runtime.frontend_fresh` | CONFIGURED `FRONTEND_STALE` | "bundle built from frontend tree <a>, HEAD has <b>": restart `aeos serve` or rebuild (`CAN_OPEN_DASHBOARD` DEGRADED) |
+| `runtime.frontend_fresh` | UNKNOWN `FRONTEND_BUILD_UNVERIFIED` | no build record, a build of uncommitted changes or no git checkout: UNVERIFIED, never shown as a pass (`CAN_OPEN_DASHBOARD` DEGRADED) |
+| `runtime.frontend_fresh` | NOT_APPLICABLE | no bundle to compare; `runtime.frontend_dist` reports it MISSING |
+| `runtime.code_drift` | CONFIGURED `CODE_DRIFT` | the running server loaded an older commit and HEAD changed `backend/`, `requirements.lock` or `pyproject.toml`: "restart aeos serve to load <sha>" |
+| `runtime.code_drift` | VERIFIED | the server runs HEAD, or HEAD changed only other paths (docs, frontend source) |
+| `runtime.code_drift` | NOT_APPLICABLE | no `aeos serve` from a checkout is running (the start record `<data>/run/serve.json` names a process that is gone), or `--reload` |
+
+The fingerprint of `runtime.frontend_fresh` includes the HEAD frontend tree and that of `runtime.backend_deps` the
+hash of `requirements.lock`, so a pull that changes them marks the previous result STALE. A backend-only commit keeps
+`runtime.frontend_fresh` VERIFIED. Caching: `index.html`, the SPA fallback and `aeos-build.json` are sent with
+`Cache-Control: no-cache`, the content-hashed `/assets/*` with `public, max-age=31536000, immutable`, `/api/*` keeps
+`no-store`, and a missing `/assets/*` file is a 404 (not `index.html`). A tab still on an older build reloads once on
+the `vite:preloadError` event (a time marker in `sessionStorage` stops a reload loop).
+
+The Control Center says it too. `GET /api/health` carries `freshness` (additive; the code drift is computed at most
+once per 30 s per server, so a refetch makes no git call inside the window and at most two git calls of at most 5 s
+each outside it): `served_bundle.frontend_tree` (the build record of the bundle served now, read from disk on every
+request, never cached, so a page reloaded right after a manual `npm run build` is not told it is out of date),
+`code_drift` of this server process (CURRENT, OUTSIDE_BACKEND, DRIFT with `loaded_commit`, `head_commit` and
+`changed_count`, RELOAD, UNKNOWN or NOT_RECORDED; the file names stay in the Doctor), `checked_at` (when the code drift
+was computed) and `max_age_seconds`. The Vite build bakes the frontend tree into the bundle (`__AEOS_FRONTEND_TREE__`, the same value as `aeos-build.json`). The header reads health with the
+normal query (refetched on window focus after 30 s, no polling) and shows a banner (text, icon, colour) only when:
+
+| Condition | Banner |
+|---|---|
+| the tree in the browser's bundle differs from `served_bundle.frontend_tree` | "Tampilan lebih lama dari server: muat ulang halaman" with a "Muat ulang" button |
+| `freshness.code_drift.status` is DRIFT | "Server menjalankan kode lama (<sha>): restart ./aeos serve" |
+| `ui_build.status` is STALE or MISSING, the page is a built bundle and `served_bundle.frontend_tree` equals `ui_build.bundle_frontend_tree` | "Server menyajikan bundle tampilan usang (STALE): restart ./aeos serve atau build ulang frontend" (the reason and remedy in the tooltip) |
+
+In the Vite dev server (no baked tree), or when the served bundle has no build record, nothing is compared, and the
+`ui_build` notice is not shown either. `ui_build` is judged once when serve starts: after a manual rebuild while the
+server runs, the served tree differs from the tree `ui_build` judged and the STALE or MISSING notice is not shown
+(the reload notice covers a page older than the rebuilt bundle). The
+`post-merge` hook prints its
+reminder with `printf '%s\n'` (sh's `echo` turned the `\a` of `.\aeos.ps1` into a BEL character) and CI lints it with
+`shellcheck` like the `pre-push` hook.
+
+NOT-PROVEN: the rebuild, the directory swap on a locked file and the hook on Windows and macOS Intel (unit and
+git-subprocess tests with a fake build runner and a fake failing rename ran on macOS arm64 only; one real
+`npm run build -- --outDir dist.next` ran there); uncommitted backend edits are not code drift (only commits are
+compared); a `git pull` that changes only `frontend/` while the server runs is not shown by the banner (the served
+bundle is unchanged until the restart rebuilds it; the `post-merge` hook and `runtime.frontend_fresh` report it); the
+banner is proven by component tests with a mocked health response, not in a browser against a real rebuild.
 
 ## SLIs and alerts
 
@@ -537,6 +632,31 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   Deployment target" / "Produksi — Deployment target": the https base URL and an optional health path (validated
   with the observer's rule). AEOS only GETs it (G6/G8, `aeos delivery observe-target`, `aeos docs screenshot`);
   deploying stays a human action. The GitHub Actions pipeline reference is "CI — GitHub Actions" on the same page.
+* **Route keys (2026-10-28):** routing rejects a remote route whose key (`mode_params.credential_ref`, or the default
+  OpenRouter worker keys) is not stored, with `credential <ref> not stored: aeos secrets set <ref>`; a sealed,
+  unreachable or unknown store rejects every keyed route (fail closed). It is a status lookup, only for a route
+  nothing else rejects and once per reference and eligibility call, never a value read and never a provider call;
+  loopback LOCAL and `claude-native` routes need no key. Doctor: `route.registry` names the active routes kept out ("Dikecualikan: kunci belum disimpan");
+  `route.worker_key` lists them as a non-blocking note while another route is eligible (both remedies: store the
+  key, or `aeos routes disable <key> --reason "..."`) and stays MISSING when no route is left. With no route left,
+  `route.registry` names the cause: a sealed or unreachable store gives UNKNOWN `SECRET_STORE_UNAVAILABLE` (restore
+  the store; no route needs activating), keyless active routes give the store-the-key remedy. What marks both
+  checks STALE (a result is never kept until its one-hour TTL): `secret:store`, sent by `aeos vault start`,
+  `aeos vault stop`, an unseal (OS keyring, the auto-unseal of `aeos serve`, or the prompt) and `aeos vault init`;
+  and storing or deleting a `workers/*` or `personal/openrouter` key (`secret:workers/*`,
+  `secret:personal/openrouter`). Each of these also emits one dashboard event, source `secrets`:
+  `secret.store_changed` (payload: the transition `started`, `stopped`, `unsealed` or `initialised`) or
+  `secret.presence_changed` (payload: the reference name only, never a value; an `office/` name only into the
+  OFFICE domain, a `projects/` name withheld). `route.activated`, `route.disabled`, `route.pool_set` and
+  `route.endpoint_set` are emitted once from the routing service, so the CLI and the API record the same event.
+  `GET /api/routes` and `GET /api/routes/<key>` carry a `credential` block per route (`state` PRESENT, MISSING,
+  UNAVAILABLE or NOT_NEEDED, `ref`, `reason`, `domain`: the session's domain), built from the same rules with one
+  status lookup per reference and list call (metadata only). A route not eligible in the session's domain is
+  `NOT_ELIGIBLE_IN_DOMAIN` (nothing looked up); an `office/` name outside OFFICE or a `projects/` name of a project the
+  viewer cannot see is never quoted (`WITHHELD` when the path is otherwise usable); `counts.approved` and the Models page count a route as
+  active only with PRESENT or NOT_NEEDED. The Control Center refreshes routes and Readiness on `secret.*` events and
+  the Models page refetches once at the nearest decision expiry (`decision.expired` is emitted only when the server
+  next reconciles expiries).
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111; WORKER too):** activate the free (or local, or flat-fee
   subscription) route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic

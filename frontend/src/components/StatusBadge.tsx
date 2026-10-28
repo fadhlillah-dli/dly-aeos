@@ -79,6 +79,28 @@ const SPECS: Record<string, Spec> = {
   NOT_PROVEN: { tone: "warn", label: "Belum terbukti", icon: CircleHelp },
   UNVERIFIED: { tone: "warn", label: "Belum diverifikasi", icon: CircleHelp },
   UNKNOWN: { tone: "warn", label: "Tidak diketahui", icon: CircleHelp },
+  // Routes (backend RouteStatus / RouteAvailability): TRIAL and APPROVED are both ACTIVE (a human decision is bound
+  // to the config hash); UNTESTED and CANDIDATE are catalogue rows, never rendered as active.
+  TRIAL: { tone: "ok", label: "Aktif · TRIAL", icon: FlaskConical },
+  UNTESTED: { tone: "muted", label: "Belum diuji", icon: CircleDashed },
+  AVAILABLE: { tone: "info", label: "Tersedia di katalog", icon: CheckCircle2 },
+  // Inventory admission / lifecycle / installation / configuration / design labels (backend §38 enums)
+  DISCOVERED: { tone: "muted", label: "Ditemukan, belum ada keputusan", icon: Clock },
+  UNDER_REVIEW: { tone: "warn", label: "Sedang ditinjau", icon: Clock },
+  TRIAL_APPROVED: { tone: "info", label: "Disetujui · TRIAL", icon: FlaskConical },
+  SUSPENDED: { tone: "bad", label: "Ditangguhkan", icon: Ban },
+  INSTALL_FAILED: { tone: "bad", label: "Instalasi gagal", icon: XCircle },
+  REMOVED: { tone: "muted", label: "Dihapus", icon: Ban },
+  INVALID: { tone: "bad", label: "Konfigurasi tidak valid", icon: XCircle },
+  DEPRECATED: { tone: "warn", label: "Usang (deprecated)", icon: AlertTriangle },
+  PROFILE_DESIGN: { tone: "mock", label: "Desain profil", icon: CircleDashed },
+  OPTIONAL_CANDIDATE: { tone: "muted", label: "Kandidat opsional", icon: FlaskConical },
+  REFERENCE_ONLY: { tone: "muted", label: "Rujukan saja", icon: MinusCircle },
+  WATCHLIST: { tone: "muted", label: "Watchlist", icon: FlaskConical },
+  // Free tier (decision C): account-wide limit state and the WORKER eligibility of a :free route
+  LIMIT_REACHED: { tone: "bad", label: "Batas harian tercapai", icon: Ban },
+  INELIGIBLE: { tone: "bad", label: "Tidak memenuhi syarat", icon: Ban },
+  ELIGIBLE_IF_ACTIVATED: { tone: "info", label: "Memenuhi syarat bila diaktifkan", icon: CircleHelp },
   // Intake / portfolio lifecycle
   CLEAN: { tone: "ok", label: "Bersih", icon: CheckCircle2 },
   FLAGGED: { tone: "warn", label: "Ditandai", icon: AlertTriangle },
@@ -145,9 +167,14 @@ const TONE_CLASS: Record<Tone, string> = {
   mock: "bg-mock-bg text-mock",
 };
 
+/** True when StatusBadge names the status itself (not the grey raw-code fallback). */
+export function hasStatusSpec(status: string): boolean {
+  return Object.prototype.hasOwnProperty.call(SPECS, status);
+}
+
 export function statusSpec(status: string | null | undefined): Spec {
   if (!status) return SPECS.UNKNOWN;
-  return SPECS[status] ?? { tone: "muted", label: status, icon: CircleHelp };
+  return (hasStatusSpec(status) ? SPECS[status] : undefined) ?? { tone: "muted", label: status, icon: CircleHelp };
 }
 
 export function StatusBadge({

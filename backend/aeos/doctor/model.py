@@ -75,6 +75,11 @@ def npm_cmd(args: str) -> str:
     return f"npm.cmd {args}" if sys.platform == "win32" else f"npm {args}"
 
 
+def frontend_build_command() -> str:
+    """Rebuild the Control Center from the lockfile, from the repository root (bootstrap does the same)."""
+    return shell_chain("cd frontend", npm_cmd("ci --no-audit --no-fund"), npm_cmd("run build"))
+
+
 @dataclass(frozen=True)
 class Remedy:
     """A remediation PROPOSAL. AEOS never executes it (§08: no auto-install/IAM/hidden fix)."""

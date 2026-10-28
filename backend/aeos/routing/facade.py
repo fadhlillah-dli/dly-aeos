@@ -8,6 +8,7 @@ only to already-approved routes; no silent paid fallback or supervisor downgrade
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -141,3 +142,32 @@ def free_tier_count_lock(session: Session) -> bool:
     from aeos.routing.free_tier import acquire_count_lock as impl
 
     return impl(session)
+
+
+def unstored_credential_ref(reason: str) -> str | None:
+    """The secret reference a ``credential <ref> not stored: aeos secrets set <ref>`` rejection names (additive,
+    2026-10-28): the key the route needs is not in the secret store. None for any other reason."""
+    from aeos.routing.service import unstored_credential_ref as impl
+
+    return impl(reason)
+
+
+def store_unavailable_credential_ref(reason: str) -> str | None:
+    """The secret reference a ``credential <ref> cannot be checked: secret store unavailable`` rejection names
+    (additive, 2026-10-28): the store could not say whether the route's key is stored. None for any other reason."""
+    from aeos.routing.service import store_unavailable_credential_ref as impl
+
+    return impl(reason)
+
+
+def withhold_private_refs(session: Session, payload: Any, *, domain: str) -> Any:
+    """*payload* with every route credential reference name that a viewer of *domain* without any project scope may
+    not see replaced by its label (additive, 2026-10-28; L12): ``office/`` names outside OFFICE and every
+    ``projects/<id>/`` name. The one rule of the route views (``service.withheld_refs``/``withhold_refs``), for a
+    platform-level payload every session reads (the Doctor's route rows)."""
+    from sqlalchemy import select
+
+    from aeos.routing.service import withheld_refs, withhold_refs
+
+    routes = session.scalars(select(ModelRoute)).all()
+    return withhold_refs(payload, withheld_refs(routes, domain=domain, project_visible=None))

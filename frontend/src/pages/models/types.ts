@@ -138,6 +138,14 @@ export interface RouteItem {
     rollback_target?: { action: string; decision_id: string | null; config_hash: string | null; note?: string } | null;
   } | null;
   quota: { state: string; scope?: string; resets_at?: string | null; source?: string; note?: string };
+  /** What the router's credential rules say for the session's domain (metadata only: stored or not, never the value).
+   * Only PRESENT (key stored) and NOT_NEEDED (local, loopback, native) let the router use the route; MISSING names the
+   * reference to store (`aeos secrets set <ref>`) or a path problem; UNAVAILABLE = the store is sealed/unreachable;
+   * NOT_ELIGIBLE_IN_DOMAIN = the route does not serve the session's domain (nothing looked up); WITHHELD = the reference
+   * is private to a project outside the viewer's scope (name and status not shown). A name private to another domain
+   * or project is never sent (ref null).
+   * Absent on older servers: then a route is never shown as active (fail closed). */
+  credential?: RouteCredential;
   source_refs: string[];
   notes: string;
   // §23 per-route assessment (absent on older servers)
@@ -164,6 +172,41 @@ export interface RouteItem {
   budget_note?: string | null;
   /** plan + allowance per window of a SUBSCRIPTION route (cost module); null for any other route */
   subscription?: SubscriptionStatus | null;
+  /** OpenRouter `:free` route only (null for every other route): account-wide free-model limits, this instance's count
+   * and, for a WORKER route, the decision C eligibility. Absent on older servers. */
+  free_tier?: FreeTierView | null;
+}
+
+export interface RouteCredential {
+  state: "PRESENT" | "MISSING" | "UNAVAILABLE" | "NOT_NEEDED" | "NOT_ELIGIBLE_IN_DOMAIN" | "WITHHELD" | string;
+  ref: string | null;
+  reason: string | null;
+  domain: string;
+}
+
+export interface FreeTierView {
+  provider: string;
+  scope: string;
+  rpm_limit: number;
+  daily_limit: number;
+  /** OWNER_SETTING | KEY_ENDPOINT (the limit the provider key endpoint reported, when lower) */
+  daily_basis: string;
+  requests_last_minute: number;
+  requests_today_utc: number;
+  /** OK | LIMIT_REACHED */
+  state: string;
+  reason: string | null;
+  /** what the count covers: only requests this AEOS instance sent, so the provider's own 429 stays authoritative */
+  counted: string;
+  checked_at: string;
+  decision_c?: {
+    /** INELIGIBLE | ELIGIBLE_IF_ACTIVATED */
+    status: string;
+    problems: string[];
+    data_classes: string[];
+    domains: string[];
+    note: string;
+  };
 }
 
 export interface UpstreamRequest {

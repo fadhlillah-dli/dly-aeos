@@ -73,6 +73,21 @@ def register_free_route(db: Session, key: str, *, model_id: str = GENERAL_FREE_M
     return r
 
 
+def ensure_worker_key(monkeypatch: Any, ref: str = "workers/openrouter") -> Any:
+    """The owner stored the worker key the route needs (routing keeps a route whose key is not stored out of
+    eligibility). Uses the test's secret store when one is installed (``vault``/``secrets_memory``), else an
+    in-memory store for this test only. A fake value; the SecretGuard still hides the real keyring and vault."""
+    from aeos.secrets import provider as secret_provider
+
+    store = secret_provider._override
+    if store is None:
+        store = secret_provider.MemorySecretProvider()
+        monkeypatch.setattr(secret_provider, "_override", store)
+    if not store.status(ref).exists:
+        store.put(ref, "fake-worker-key-" + "k" * 24, actor="owner")
+    return store
+
+
 def activate_route(client: AuthedClient, key: str, *, mode: str = "TRIAL", budget_decision_id: str | None = None
                    ) -> dict[str, Any]:
     """Owner reviews the route (exact config hash) and activates it: a TRIAL decision. A production
@@ -380,6 +395,7 @@ def worker_ready(client: AuthedClient, db: Session, monkeypatch: Any, *, tasks: 
     seed_catalog(db)
     fake_opencode(monkeypatch)
     register_free_route(db, WORKER_ROUTE, model_id=FREE_TIER_MODEL if free_tier else GENERAL_FREE_MODEL)
+    ensure_worker_key(monkeypatch)
     activate_route(client, WORKER_ROUTE)
     # ``cover_r3``: the owner's exception explicitly covers R3 (protected-path) work under the process sandbox
     # (ADR-0051 amendment 2026-10-19); without it R3 waits for the container sandbox.

@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { clsx } from "clsx";
 import { Layers, Network, Search, TableIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -9,7 +9,6 @@ import { DomainRequired } from "../../components/inventory/DomainRequired";
 import { Badge, LENS_LABELS, RELATION_LABELS } from "../../components/inventory/labels";
 import type { BlastRadius, MapNode, PathResult, RelationView, SnapshotDiff, SystemMap } from "../../components/inventory/types";
 import { Button, Card, EmptyState, ErrorBox, inputBase, Loading, Notice, PageHeader, Table } from "../../components/ui";
-import { useEventStream } from "../../lib/events";
 import { applyDiff, foldGraph, groupId, hideNodes, type GEdge, type GNode } from "./layout";
 import { MapGraph } from "./MapGraph";
 import { DataFlowView } from "./DataFlow";
@@ -27,7 +26,6 @@ const DRIFT_LABEL: Record<string, string> = {
 
 export default function SystemMapPage() {
   const { domain } = useAuth();
-  const qc = useQueryClient();
   const [params, setParams] = useSearchParams();
   const lens = (params.get("lens") ?? "DESIGN").toUpperCase();
   const blastRoot = params.get("blast") ?? "";
@@ -72,9 +70,7 @@ export default function SystemMapPage() {
     queryFn: () => get<BlastRadius>(`/api/inventory/blast-radius/${encodeURIComponent(blastRoot)}?direction=${direction}`),
     enabled: !!domain && !!blastRoot,
   });
-  useEventStream((e) => {
-    if (e.kind === "inventory.reconcile.completed" || e.kind.startsWith("inventory.drift")) qc.invalidateQueries({ queryKey: ["inventory", "map"] });
-  });
+  // Live refresh: one shared event -> query map in AppShell (lib/eventInvalidation.ts), not a per-page filter.
 
   const setParam = (k: string, v: string) => {
     const next = new URLSearchParams(params);
