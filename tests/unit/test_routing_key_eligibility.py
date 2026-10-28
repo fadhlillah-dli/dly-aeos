@@ -28,7 +28,7 @@ from aeos.secrets.facade import SecretStatus
 from tests.conftest import ADMIN_PW, AuthedClient, create_admin
 from tests.unit.test_doctor_capabilities import ok_row
 from tests.unit.test_inventory_fakes import base_runner
-from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS, install_fakes
+from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS, install_fakes, memory_keyring  # noqa: F401 - fixture
 from tests.unit.test_routing_free_worker import FREE, _worker
 from tests.unit.test_routing_service import DS, GLM, approve
 
@@ -278,3 +278,127 @@ def test_bite_d_api_activation_and_disable_emit_exactly_one_event(personal_clien
     res = personal_client.post(f"/api/routes/{DS}/disable", json={"reason": "kunci belum disimpan"})
     assert res.status_code == 200, res.text
     assert _events(db, "route.disabled", DS) == 1
+
+
+# ------------------------------------------------------------------------------ round 2 (e) store state signal
+# A route check taken while the store was down kept that result until its 3600 s TTL: nothing re-ran it when the
+# vault was unsealed, started or stopped. Every such path signals ``secret:store`` (aeos.secrets.readiness, the one
+# owner) and both route checks declare it.
+
+ROUTE_CHECKS = ("route.registry", "route.worker_key")
+
+
+def _route_rows(db) -> dict[str, Any]:
+    from aeos.doctor.runner import latest_results
+
+    db.expire_all()
+    return latest_results(db, list(ROUTE_CHECKS))
+
+
+def _store_down_results(routes, settings, monkeypatch) -> None:
+    from aeos.doctor.runner import run_doctor
+
+    install_fakes(monkeypatch, doctor=False, inventory=False)  # the real Doctor stores and invalidates the rows
+    _worker(routes)  # keyed: openrouter :free WORKER TRIAL
+    _install_store(monkeypatch, CountingStore({"workers/openrouter"}, down=True))
+    run_doctor(settings, routes, checks=list(ROUTE_CHECKS), runner=base_runner())
+    routes.commit()
+    rows = _route_rows(routes)
+    assert {cid: (rows[cid].status, rows[cid].error_code) for cid in ROUTE_CHECKS} == {
+        "route.registry": ("UNKNOWN", "SECRET_STORE_UNAVAILABLE"),
+        "route.worker_key": ("MISSING", "SECRET_STORE_UNAVAILABLE")}
+
+
+@pytest.mark.usefixtures("memory_keyring")
+def test_bite_e_an_unseal_makes_both_store_down_route_checks_stale(routes, settings, monkeypatch):
+    import respx
+
+    from aeos.secrets import unseal as unseal_mod
+    from aeos.secrets.provider import bootstrap_store
+    from tests.unit.test_vault_keyring_unseal import KEYS_B64, _vault
+
+    _store_down_results(routes, settings, monkeypatch)
+    bootstrap_store(settings).set_unseal_keys(KEYS_B64)
+    with respx.mock(assert_all_called=False) as m:
+        _vault(m, sealed=True)
+        assert unseal_mod.unseal_from_keyring(settings, trigger="cli").status == unseal_mod.UNSEALED
+    rows = _route_rows(routes)
+    for cid in ROUTE_CHECKS:
+        assert rows[cid].status == "STALE", f"{cid} kept its store-down result after the vault was unsealed"
+        assert "secret-ref store" in rows[cid].observed_evidence["stale_reason"], cid
+    assert routes.query(Event).filter(Event.kind == "doctor.check.stale",
+                                      Event.entity_id.in_(ROUTE_CHECKS)).count() == 2
+
+
+@pytest.mark.usefixtures("memory_keyring")
+def test_near_miss_e_an_already_unsealed_vault_and_another_secret_signal_leave_the_route_checks(
+        routes, settings, monkeypatch):
+    import respx
+
+    from aeos.secrets import unseal as unseal_mod
+    from aeos.secrets.readiness import invalidate_secret_checks
+    from tests.unit.test_vault_keyring_unseal import _vault
+
+    _store_down_results(routes, settings, monkeypatch)
+    with respx.mock(assert_all_called=False) as m:
+        _vault(m, sealed=False)
+        assert unseal_mod.unseal_from_keyring(settings, trigger="cli").status == unseal_mod.ALREADY_UNSEALED
+    invalidate_secret_checks("platform/github", reason="another credential stored")
+    rows = _route_rows(routes)
+    assert {rows[cid].status for cid in ROUTE_CHECKS} == {"UNKNOWN", "MISSING"}  # nothing changed: not STALE
+
+
+@pytest.mark.usefixtures("memory_keyring")
+@pytest.mark.parametrize("path", ["start", "stop", "prompt-unseal"])
+def test_bite_e_every_vault_state_path_signals_secret_store(settings, monkeypatch, tmp_path, path):
+    """``vault start``, ``vault stop`` (OpenBao restarts sealed; there is no separate seal command) and the prompted
+    ``vault unseal`` each signal ``secret:store`` exactly once; the keyring unseal is covered above."""
+    from types import SimpleNamespace
+
+    from aeos.cli import app
+    from aeos.secrets import readiness, server
+
+    signals: list[str] = []
+    monkeypatch.setattr(readiness, "store_state_changed", lambda reason, **kw: signals.append(reason) or 0)
+    if path == "start":
+        monkeypatch.setattr(server, "running", lambda s: None)
+        monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **kw: SimpleNamespace(pid=4242))
+        monkeypatch.setattr(server.psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: 1.0))
+        server.start(settings, tmp_path / "bao")
+    elif path == "stop":
+        monkeypatch.setattr(server, "running", lambda s: {"alive": True, "pid": 4242})
+        monkeypatch.setattr(server.psutil, "Process", lambda pid: SimpleNamespace(terminate=lambda: None,
+                                                                                 wait=lambda timeout: None))
+        assert server.stop(settings) is True
+    else:
+        import respx
+
+        from aeos.secrets import vault_cli
+        from tests.unit.test_vault_keyring_unseal import _vault
+
+        typed = iter(["p1" * 16, "p2" * 16])
+        monkeypatch.setattr(vault_cli.getpass, "getpass", lambda prompt="": next(typed))
+        with respx.mock(assert_all_called=False) as m:
+            _vault(m, sealed=True)
+            r = CliRunner().invoke(app, ["vault", "unseal"])
+        assert r.exit_code == 0, r.output
+    assert len(signals) == 1, f"vault {path} sent {len(signals)} secret:store signal(s), expected exactly one"
+
+
+def test_near_miss_e_a_stop_with_nothing_running_sends_no_signal(settings, monkeypatch):
+    from aeos.secrets import readiness, server
+
+    signals: list[str] = []
+    monkeypatch.setattr(readiness, "store_state_changed", lambda reason, **kw: signals.append(reason) or 0)
+    monkeypatch.setattr(server, "running", lambda s: None)
+    assert server.stop(settings) is False and signals == []
+
+
+def test_both_route_checks_declare_the_store_signal():
+    from aeos.doctor.checks import REGISTRY, load_all
+    from aeos.secrets.readiness import STORE_INVALIDATOR
+
+    load_all()
+    for cid in (*ROUTE_CHECKS, "secret.status"):
+        assert STORE_INVALIDATOR in REGISTRY[cid].invalidators, cid
+

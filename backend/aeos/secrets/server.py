@@ -146,7 +146,14 @@ def start(settings: Settings, binary: Path) -> dict[str, Any]:
     info = {"pid": proc.pid, "create_time": ctime, "addr": settings.openbao_addr, "config": str(cfg),
             "log": str(log_path), "started_at": time.time()}
     pid_file(settings).write_text(json.dumps(info), encoding="utf-8")
+    _store_changed("OpenBao started")
     return info
+
+
+def _store_changed(reason: str) -> None:
+    from aeos.secrets.readiness import store_state_changed
+
+    store_state_changed(reason)  # checks that saw the store down (or up) re-run; never raises
 
 
 def stop(settings: Settings, *, timeout: float = 10.0) -> bool:
@@ -165,4 +172,5 @@ def stop(settings: Settings, *, timeout: float = 10.0) -> bool:
         p.kill()
         p.wait(timeout=5)
     pid_file(settings).unlink(missing_ok=True)
+    _store_changed("OpenBao stopped (it restarts sealed)")
     return True

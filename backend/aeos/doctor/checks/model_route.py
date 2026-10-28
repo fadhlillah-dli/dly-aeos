@@ -140,7 +140,7 @@ def keyless_remedies(excluded: dict[str, str]) -> list[dict[str, str]]:
 @check("route.registry", "MODEL_ROUTE", "Route pekerja APPROVED/TRIAL yang eligible", component_id="model-routing",
        needs_db=True, ttl_seconds=3600, invalidators=("config:routes", "model:route", "config:budget",
                                                       "config:office_policy", "secret:workers/*",
-                                                      "secret:personal/openrouter"),
+                                                      "secret:personal/openrouter", "secret:store"),
        ok={"CONFIGURED", "VERIFIED"}, severity_fail="HIGH", fingerprint=_routes_fp,
        description="Hard filter routing (keputusan manusia terikat hash konfigurasi, domain, data terms, tool support, "
                    "kuota, kesegaran harga/terms, budget, kunci tersimpan) untuk PERSONAL / INTERNAL, atau PUBLIC "
@@ -302,7 +302,7 @@ def _keyless_remedy(keyless: dict[str, str]) -> Remedy:
 # covers every worker-model key an eligible route may name (workers/openrouter, workers/opencode-go, ...).
 @check("route.worker_key", "MODEL_ROUTE", "Referensi kunci route pekerja (tanpa panggilan)", component_id="openrouter",
        ttl_seconds=3600, invalidators=("secret:workers/*", "secret:personal/openrouter", "config:routes",
-                                       "model:route"),
+                                       "model:route", "secret:store"),
        ok={"CONFIGURED", "VERIFIED", "NOT_APPLICABLE"}, severity_fail="HIGH", observation="configuration")
 def route_worker_key(ctx: CheckContext) -> Outcome:
     eligible, required, keyless = _required_key_refs(ctx)
