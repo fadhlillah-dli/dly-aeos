@@ -288,12 +288,13 @@ hash of `requirements.lock`, so a pull that changes them marks the previous resu
 `no-store`, and a missing `/assets/*` file is a 404 (not `index.html`). A tab still on an older build reloads once on
 the `vite:preloadError` event (a time marker in `sessionStorage` stops a reload loop).
 
-The Control Center says it too. `GET /api/health` carries `freshness` (additive; computed at most once per 30 s per
-server, so a refetch makes no git call inside the window and at most two git calls of at most 5 s each outside it):
-`served_bundle.frontend_tree` (the build record of the bundle served now, read from disk), `code_drift` of this server
-process (CURRENT, OUTSIDE_BACKEND, DRIFT with `loaded_commit`, `head_commit` and `changed_count`, RELOAD, UNKNOWN or
-NOT_RECORDED; the file names stay in the Doctor), `checked_at` and `max_age_seconds`. The Vite build bakes the frontend
-tree into the bundle (`__AEOS_FRONTEND_TREE__`, the same value as `aeos-build.json`). The header reads health with the
+The Control Center says it too. `GET /api/health` carries `freshness` (additive; the code drift is computed at most
+once per 30 s per server, so a refetch makes no git call inside the window and at most two git calls of at most 5 s
+each outside it): `served_bundle.frontend_tree` (the build record of the bundle served now, read from disk on every
+request, never cached, so a page reloaded right after a manual `npm run build` is not told it is out of date),
+`code_drift` of this server process (CURRENT, OUTSIDE_BACKEND, DRIFT with `loaded_commit`, `head_commit` and
+`changed_count`, RELOAD, UNKNOWN or NOT_RECORDED; the file names stay in the Doctor), `checked_at` (when the code drift
+was computed) and `max_age_seconds`. The Vite build bakes the frontend tree into the bundle (`__AEOS_FRONTEND_TREE__`, the same value as `aeos-build.json`). The header reads health with the
 normal query (refetched on window focus after 30 s, no polling) and shows a banner (text, icon, colour) only when:
 
 | Condition | Banner |

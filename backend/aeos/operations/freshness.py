@@ -16,8 +16,9 @@ imported at start. This module is the single owner of both questions:
 * **Code drift** (``code_drift``): ``aeos serve`` records the commit it loaded (``<data>/run/serve.json``); a later
   HEAD that changes backend-relevant paths means the server runs old code until it is restarted.
 * **Health block** (``health_freshness``): ``/api/health`` ``freshness`` = the build stamp of the bundle this server
-  serves now and the code drift of this process, cached for HEALTH_TTL_SECONDS so health stays cheap; the Control
-  Center compares the stamp with the tree baked into the bundle it runs and shows a reload / restart banner.
+  serves now (read from disk on every call) and the code drift of this process (cached for HEALTH_TTL_SECONDS so
+  health stays cheap); the Control Center compares the stamp with the tree baked into the bundle it runs and shows
+  a reload / restart banner.
 """
 
 from __future__ import annotations
@@ -499,7 +500,7 @@ def code_drift(settings: Settings, rec: dict[str, Any] | None = None, *, timeout
 HEALTH_TTL_SECONDS = 30.0
 HEALTH_GIT_TIMEOUT_SECONDS = 5.0
 CLOCK: Callable[[], float] = time.monotonic  # tests replace it
-_HEALTH_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_HEALTH_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}  # data dir -> (when, code drift block)
 _HEALTH_LOCK = threading.Lock()
 
 
@@ -523,16 +524,15 @@ def _health_drift(settings: Settings) -> dict[str, Any]:
 
 
 def health_freshness(settings: Settings, dist: Path | None) -> dict[str, Any]:
-    """``/api/health`` ``freshness``: what this server serves and runs, recomputed at most once per
-    HEALTH_TTL_SECONDS per data dir and bundle (code drift costs at most two bounded git calls, the stamp a file
-    read), so a browser refetching health never makes the endpoint slow."""
-    key = (str(settings.data_dir), str(dist))
+    """``/api/health`` ``freshness``: what this server serves and runs. Only the code drift (at most two bounded git
+    calls) is cached, once per HEALTH_TTL_SECONDS per data dir, so a browser refetching health never makes the
+    endpoint slow; the served bundle's stamp is a file read and is read on every call, so a page reloaded right after
+    a rebuild of ``dist`` is compared with the bundle on disk, never with a cached older stamp."""
+    key = str(settings.data_dir)
     now = CLOCK()
     with _HEALTH_LOCK:
         hit = _HEALTH_CACHE.get(key)
-        if hit is not None and now - hit[0] < HEALTH_TTL_SECONDS:
-            return hit[1]
-        block = {"served_bundle": served_bundle(dist), "code_drift": _health_drift(settings),
-                 "checked_at": utcnow().isoformat(), "max_age_seconds": int(HEALTH_TTL_SECONDS)}
-        _HEALTH_CACHE[key] = (now, block)
-        return block
+        if hit is None or now - hit[0] >= HEALTH_TTL_SECONDS:
+            hit = (now, {"code_drift": _health_drift(settings), "checked_at": utcnow().isoformat()})
+            _HEALTH_CACHE[key] = hit
+    return {"served_bundle": served_bundle(dist), **hit[1], "max_age_seconds": int(HEALTH_TTL_SECONDS)}

@@ -635,6 +635,22 @@ def test_health_freshness_is_cached_one_git_call_per_window(settings, repo, heal
     assert get()["freshness"]["code_drift"]["status"] == "DRIFT" and len(counter.calls) == 3  # rev-parse + diff
 
 
+def test_health_freshness_reads_the_served_stamp_on_every_call(settings, repo, health):
+    """Bite: a manual 'npm run build' while serving writes a new tree into dist; a page reloaded inside the 30 s
+    window runs that tree, so health must report it (not the cached stamp) or the banner calls a fresh page old."""
+    get, clock, counter = health
+    _stamp(repo, "a" * 40)
+    freshness.record_serve_start(settings, repo, ui_build=None)
+    first = get()["freshness"]
+    assert first["served_bundle"]["frontend_tree"] == "a" * 40 and len(counter.calls) == 1
+    _stamp(repo, "b" * 40)  # the rebuild
+    clock["now"] += 5
+    again = get()["freshness"]
+    assert again["served_bundle"]["frontend_tree"] == "b" * 40, "health served a cached bundle stamp"
+    assert again["code_drift"] == first["code_drift"] and again["checked_at"] == first["checked_at"]
+    assert len(counter.calls) == 1  # the drift is still cached: no git call for the stamp
+
+
 def test_health_freshness_without_a_serve_record_says_not_recorded(settings, health):
     get, _, counter = health
     block = get()["freshness"]
