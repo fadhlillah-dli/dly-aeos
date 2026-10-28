@@ -338,6 +338,7 @@ def test_partial_publication_never_makes_work_run_on_an_incomplete_contract(
         WORKER_ROUTE,
         activate_route,
         doctor_ready,
+        ensure_worker_key,
         fake_opencode,
         owner_exception,
         register_free_route,
@@ -358,6 +359,7 @@ def test_partial_publication_never_makes_work_run_on_an_incomplete_contract(
     seed_catalog(db)
     fake_opencode(monkeypatch)
     register_free_route(db, WORKER_ROUTE)
+    ensure_worker_key(monkeypatch)
     activate_route(personal_client, WORKER_ROUTE)
     owner_exception(personal_client, target_type="worker_sandbox", target_id="process",
                     details={"allow_process_sandbox": True})

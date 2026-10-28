@@ -37,6 +37,9 @@ from tests.unit.test_routing_fakes import human_decision, install_fakes
 from tests.unit.test_routing_service import GO_GLM, approve, task
 from tests.unit.test_workforce_support import FakeModules, make_plan, make_project, make_route
 
+# routing keeps a route whose worker key is not stored out of eligibility: these tests store fake keys
+pytestmark = pytest.mark.usefixtures("worker_keys")
+
 # The real routers (and the services they import at module level) load before FakeModules replaces implementation
 # modules in sys.modules (as in test_broker_model_proxy.py).
 for _mod in MODULE_ROUTERS:

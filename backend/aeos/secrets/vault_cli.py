@@ -537,6 +537,8 @@ def unseal_cmd(from_keyring: bool = typer.Option(
     reset_provider_cache()
     unseal.audit("openbao.unseal", "FAILED" if st.get("sealed") else "SUCCESS",
                  {"source": "prompt", "trigger": "cli", "keys_applied": applied}, prepare_db=True)
+    if not st.get("sealed"):
+        unseal.signal_store_changed("OpenBao unsealed with prompted key(s)")
     typer.echo("Unsealed." if not st.get("sealed") else "Still sealed - more keys needed.")
 
 
