@@ -137,11 +137,14 @@ def install_fakes(monkeypatch: pytest.MonkeyPatch, *, policy: bool = True, cost:
         monkeypatch.setitem(sys.modules, "aeos.verification.collector",
                             _simple("aeos.verification.collector", collect_evidence=collect_evidence))
     if doctor:
+        # the secret-reference scope rule (which names are private to a domain/project) stays the real one
+        from aeos.doctor.capabilities import _private_owner
+
         def invalidate(session, *, invalidator, reason=""):
             reg.invalidations.append({"invalidator": invalidator, "reason": reason})
             return 1
         monkeypatch.setitem(sys.modules, "aeos.doctor.capabilities",
-                            _simple("aeos.doctor.capabilities", invalidate=invalidate))
+                            _simple("aeos.doctor.capabilities", invalidate=invalidate, _private_owner=_private_owner))
     if inventory:
         def record_observation(**kw):
             reg.observations.append({k: v for k, v in kw.items() if k not in _DROP})

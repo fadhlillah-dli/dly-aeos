@@ -1,8 +1,9 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, vi } from "vitest";
+import { get } from "../api/client";
 import { AuthProvider } from "../auth/AuthContext";
 import { mockApi } from "../components/proposals/testUtils";
 import { THEME_STORAGE_KEY } from "../lib/theme";
@@ -135,6 +136,61 @@ describe("theme toggle", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
     expect(screen.getByRole("button", { name: /^Tema gelap aktif/ })).toBeInTheDocument();
+  });
+});
+
+describe("AppShell installs the shared event -> query invalidation (R28)", () => {
+  class FakeEventSource {
+    static last: FakeEventSource | null = null;
+    onopen: (() => void) | null = null;
+    onmessage: ((m: MessageEvent<string>) => void) | null = null;
+    onerror: (() => void) | null = null;
+    constructor() {
+      FakeEventSource.last = this;
+    }
+    close() {}
+    send(frame: Record<string, unknown>) {
+      this.onmessage?.({ data: JSON.stringify(frame) } as MessageEvent<string>);
+    }
+  }
+
+  it("a decision event refetches an inventory query mounted on any page; a heartbeat does not", async () => {
+    const calls = api();
+    vi.stubGlobal("EventSource", FakeEventSource);
+    function Probe() {
+      useQuery({ queryKey: ["inventory", "probe"], queryFn: () => get("/api/inventory/probe") });
+      return <h1>Probe page</h1>;
+    }
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <AuthProvider>
+          <MemoryRouter>
+            <Routes>
+              <Route element={<AppShell />}>
+                <Route index element={<Probe />} />
+              </Route>
+            </Routes>
+          </MemoryRouter>
+        </AuthProvider>
+      </QueryClientProvider>,
+    );
+    await screen.findByRole("heading", { name: "Probe page" });
+    await waitFor(() => expect(FakeEventSource.last).not.toBeNull());
+    const probeCalls = () => calls.filter((c) => c.url.startsWith("/api/inventory/probe")).length;
+    await waitFor(() => expect(probeCalls()).toBe(1));
+    const es = FakeEventSource.last as FakeEventSource;
+    await act(async () => {
+      es.onopen?.();
+      es.send({ type: "ready", cursor: 0 });
+      es.send({ type: "event", seq: 1, source: "runner", kind: "run.heartbeat" });
+    });
+    await new Promise((r) => setTimeout(r, 700));
+    expect(probeCalls()).toBe(1); // a heartbeat refreshes nothing
+    await act(async () => {
+      es.send({ type: "event", seq: 2, source: "policy", kind: "decision.recorded" });
+    });
+    await waitFor(() => expect(probeCalls()).toBe(2), { timeout: 3000 });
   });
 });
 

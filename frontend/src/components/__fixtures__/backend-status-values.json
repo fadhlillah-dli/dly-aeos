@@ -1,0 +1,94 @@
+{
+  "route.status": [
+    "CANDIDATE",
+    "UNTESTED",
+    "TRIAL",
+    "APPROVED",
+    "DISABLED"
+  ],
+  "route.availability": [
+    "AVAILABLE",
+    "MISSING",
+    "UNKNOWN"
+  ],
+  "inventory.admission": [
+    "DISCOVERED",
+    "UNDER_REVIEW",
+    "TRIAL_APPROVED",
+    "APPROVED",
+    "REJECTED",
+    "SUSPENDED"
+  ],
+  "inventory.installation": [
+    "NOT_INSTALLED",
+    "INSTALLED",
+    "INSTALL_FAILED",
+    "REMOVED",
+    "UNKNOWN"
+  ],
+  "inventory.configuration": [
+    "MISSING",
+    "CONFIGURED",
+    "INVALID",
+    "DRIFTED",
+    "UNKNOWN"
+  ],
+  "inventory.connectivity": [
+    "NOT_CHECKED",
+    "CONNECTED",
+    "UNREACHABLE",
+    "EXPIRED_AUTH",
+    "UNKNOWN"
+  ],
+  "inventory.functional": [
+    "NOT_TESTED",
+    "VERIFIED",
+    "FAILED",
+    "STALE",
+    "NOT_APPLICABLE"
+  ],
+  "inventory.enablement": [
+    "DISABLED",
+    "ENABLED"
+  ],
+  "inventory.usage": [
+    "NEVER_OBSERVED",
+    "IDLE",
+    "IN_USE",
+    "LAST_USED",
+    "STALE",
+    "UNKNOWN"
+  ],
+  "inventory.lifecycle_final": [
+    "ACTIVE",
+    "DEPRECATED",
+    "QUARANTINED",
+    "RETIRING",
+    "RETIRED"
+  ],
+  "inventory.design_label": [
+    "PLANNED",
+    "SELECTED_DESIGN",
+    "PROFILE_DESIGN",
+    "OPTIONAL_CANDIDATE",
+    "CANDIDATE",
+    "REFERENCE_ONLY",
+    "UNVERIFIED",
+    "WATCHLIST"
+  ],
+  "data_mode": [
+    "LIVE",
+    "MOCK",
+    "DEMO",
+    "DESIGN",
+    "ESTIMATE"
+  ],
+  "free_tier.state": [
+    "OK",
+    "LIMIT_REACHED"
+  ],
+  "free_tier.decision_c": [
+    "INELIGIBLE",
+    "ELIGIBLE_IF_ACTIVATED"
+  ]
+}

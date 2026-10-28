@@ -10,7 +10,6 @@ import { Badge, DIMENSION_LABELS, REQUIREMENT_LABELS } from "../../components/in
 import type { ComponentList, ComponentRow, DimensionValue, ProjectRepository, ProjectService, RoleRecord, RouteRecord } from "../../components/inventory/types";
 import { proposeComponentHref } from "../../components/proposals/PageLinks";
 import { Button, Card, ErrorBox, inputClass, LinkButton, Loading, Mono, Notice, PageHeader, Table } from "../../components/ui";
-import { useEventStream } from "../../lib/events";
 import { relativeTime, shortHash } from "../../lib/format";
 
 const DIMS = ["installation", "configuration", "connectivity", "functional", "enablement", "usage"] as const;
@@ -25,6 +24,15 @@ export function Dim({ d }: { d: DimensionValue }) {
       {d.at && <div className="mt-0.5 text-[11px] text-ink-3">{relativeTime(d.at)}</div>}
     </div>
   );
+}
+
+/** Default-view admission (the advanced "Admission" column stays): a trialled tool must not look merely DISABLED.
+ * TRIAL_APPROVED -> "TRIAL", APPROVED -> "Disetujui", anything else (DISCOVERED, ...) -> nothing. A change-proposal
+ * TRIAL decision carries no expires_at, so no date is shown for tools. */
+export function AdmissionBadge({ admission }: { admission: string | null | undefined }) {
+  if (admission === "TRIAL_APPROVED") return <span data-testid="admission-badge"><Badge status="TRIAL_APPROVED" label="TRIAL" /></span>;
+  if (admission === "APPROVED") return <span data-testid="admission-badge"><Badge status="APPROVED" label="Disetujui" /></span>;
+  return null;
 }
 
 function VersionCell({ row }: { row: ComponentRow }) {
@@ -72,9 +80,7 @@ export default function ToolsPage() {
     mutationFn: () => post("/api/inventory/refresh", {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["inventory"] }),
   });
-  useEventStream((e) => {
-    if (e.kind === "inventory.reconcile.completed" || e.kind.startsWith("inventory.drift")) qc.invalidateQueries({ queryKey: ["inventory"] });
-  });
+  // Live refresh: one shared event -> query map in AppShell (lib/eventInvalidation.ts), not a per-page filter.
 
   const data = list.data;
   const facets = data?.facets;
@@ -83,9 +89,12 @@ export default function ToolsPage() {
       header: "Komponen",
       cell: (r: ComponentRow) => (
         <div className="min-w-48">
-          <Link to={`/tools/${r.component_id}`} className="font-medium text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
-            {r.friendly_name || r.name}
-          </Link>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Link to={`/tools/${r.component_id}`} className="font-medium text-accent hover:underline" onClick={(e) => e.stopPropagation()}>
+              {r.friendly_name || r.name}
+            </Link>
+            <AdmissionBadge admission={r.dimensions.admission?.effective} />
+          </div>
           {/* §35: friendly name, reason used and next action come before the technical ID */}
           {r.why_selected && (
             <div className="line-clamp-2 max-w-80 text-xs text-ink-2" data-testid="why-selected">

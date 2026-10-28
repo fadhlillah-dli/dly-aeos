@@ -290,6 +290,13 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
     if "installed-but-disabled" in classes:
         return act("DECIDE_ENABLEMENT", "Terpasang tetapi tidak aktif: putuskan enable atau biarkan",
                    link=f"/proposals?component={comp.component_id}")
+    if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):
+        # Approved (trial) on paper but nothing installed: "pantau observasi" would hide the one thing left to do.
+        # Master §38: this stays a manual step; the decision is not an enablement basis and nothing installs itself.
+        # One label source: the label follows the admission (a full APPROVED is not a "trial").
+        label = ("Trial disetujui: pasang lalu probe" if dims["admission"]["value"] == "TRIAL_APPROVED"
+                 else "Disetujui: pasang lalu probe")
+        return act("INSTALL_TRIAL", label, link="/readiness")
     return act("MONITOR", "Tidak ada tindakan; pantau observasi")
 
 

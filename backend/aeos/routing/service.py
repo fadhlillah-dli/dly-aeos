@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -537,6 +538,119 @@ def credential_presence_rejections(route: ModelRoute, *, domain: str,
     """Only the secret-store part of ``credential_rejections`` (the path rules are reported separately)."""
     problems, refs = _credential_paths(route, domain=domain)
     return [] if problems or not refs else _presence_rejections(refs, states)
+
+
+# Credential block of the route view (R28 round 3): what the router's credential rules say for one domain.
+VIEW_CREDENTIAL_PRESENT = "PRESENT"
+VIEW_CREDENTIAL_MISSING = "MISSING"
+VIEW_CREDENTIAL_UNAVAILABLE = "UNAVAILABLE"
+VIEW_CREDENTIAL_NOT_NEEDED = "NOT_NEEDED"
+# The route is not eligible in the viewed domain: the router never serves it to a task of that domain, and its key is
+# checked only in a session of an eligible domain (never looked up across domains).
+VIEW_CREDENTIAL_NOT_ELIGIBLE = "NOT_ELIGIBLE_IN_DOMAIN"
+# The reference is private to a project this viewer cannot see in this domain: neither its name nor its status.
+VIEW_CREDENTIAL_WITHHELD = "WITHHELD"
+CREDENTIAL_USABLE = frozenset({VIEW_CREDENTIAL_PRESENT, VIEW_CREDENTIAL_NOT_NEEDED})
+
+
+def _ref_withheld(ref: str, *, domain: str, project_visible: Callable[[str], bool] | None) -> bool:
+    """True when the reference name is private to another domain or to a project the viewer cannot see, by the rule
+    the Doctor and secrets readiness apply (``doctor.secret_ref_scope``): ``office/`` names stay inside OFFICE and a
+    ``projects/<id>/`` name is quoted only when *project_visible* confirms the viewer's access to that project in
+    *domain*. Fail closed: without the rule, the name is withheld."""
+    try:
+        from aeos.doctor.facade import secret_ref_scope
+
+        private, owner = secret_ref_scope(ref)
+    except (ImportError, ModuleNotFoundError):
+        return True
+    if not private:
+        return False
+    if owner is not None:
+        return owner != domain
+    parts = ref.split("/")
+    project = parts[1] if len(parts) >= 3 and parts[1] else None
+    return not (project and project_visible is not None and project_visible(project))
+
+
+def withheld_ref_label(ref: str) -> str:
+    """What a payload shows in place of a reference name the viewer may not see: the namespace, never the name."""
+    return f"<{ref.partition('/')[0]}/ reference, name withheld>"
+
+
+def withheld_refs(routes: Iterable[ModelRoute], *, domain: str,
+                  project_visible: Callable[[str], bool] | None) -> dict[str, str]:
+    """{configured ``mode_params.credential_ref``: label} of *routes* whose name the viewer of *domain* may not see
+    (``_ref_withheld``, the one rule of the credential block). Empty when every name may be quoted."""
+    out: dict[str, str] = {}
+    for route in routes:
+        ref = (route.mode_params or {}).get("credential_ref")
+        name = str(ref) if ref else ""
+        if name and name not in out and _ref_withheld(name, domain=domain, project_visible=project_visible):
+            out[name] = withheld_ref_label(name)
+    return out
+
+
+def withhold_refs(payload: Any, names: dict[str, str]) -> Any:
+    """*payload* with every name of *names* (``withheld_refs``) replaced by its label in every string, keys and values,
+    at any depth: a route payload (view, config, eligibility reasons, decision rationales) never quotes a reference
+    name private to another domain or to a project the viewer cannot see (L12)."""
+    if not names:
+        return payload
+    ordered = sorted(names, key=len, reverse=True)  # a longer name first: never a partial replacement of it
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            for name in ordered:
+                value = value.replace(name, names[name])
+            return value
+        if isinstance(value, dict):
+            return {walk(k): walk(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [walk(v) for v in value]
+        return value
+
+    return walk(payload)
+
+
+def credential_view(route: ModelRoute, *, domain: str, states: dict[str, str] | None = None,
+                    project_visible: Callable[[str], bool] | None = None) -> dict[str, Any]:
+    """{state, ref, reason, domain} for *route* in *domain*, built from the same rules as ``credential_rejections``
+    (the router rejects every state but PRESENT and NOT_NEEDED). Metadata only: a status lookup of the secret store
+    (memoized in *states*, one per reference and call), never the value, never a provider call. MISSING carries the
+    router's reason (``credential <ref> not stored: aeos secrets set <ref>`` or a path problem, then ref may be None);
+    UNAVAILABLE means the store is sealed, unreachable or unknown (fail closed). NOT_ELIGIBLE_IN_DOMAIN: *domain* is
+    not one of the route's eligible domains, so nothing is looked up. A reference name private to another domain or to
+    a project the viewer cannot see (*project_visible*) is never quoted: a path problem keeps its reason with the name
+    replaced, and an otherwise usable private reference is WITHHELD (no lookup, so its status is not shown either)."""
+    if domain not in (route.eligible_domains or []):
+        return {"state": VIEW_CREDENTIAL_NOT_ELIGIBLE, "ref": None,
+                "reason": (f"route not eligible in {domain} (eligible_domains {list(route.eligible_domains or [])}): "
+                           "the router never serves it to a task of this domain; its key is checked only in a "
+                           "session of an eligible domain"), "domain": domain}
+    configured = (route.mode_params or {}).get("credential_ref")
+    configured = str(configured) if configured else None
+    withheld = configured is not None and _ref_withheld(configured, domain=domain, project_visible=project_visible)
+    problems, refs = _credential_paths(route, domain=domain)
+    if problems:
+        reason = problems[0]
+        if withheld and configured is not None:
+            reason = reason.replace(configured, withheld_ref_label(configured))
+        return {"state": VIEW_CREDENTIAL_MISSING, "ref": None if withheld else configured,
+                "reason": reason, "domain": domain}
+    if not refs:
+        return {"state": VIEW_CREDENTIAL_NOT_NEEDED, "ref": None, "reason": None, "domain": domain}
+    if withheld:
+        return {"state": VIEW_CREDENTIAL_WITHHELD, "ref": None,
+                "reason": "credential reference private to a project not visible in this session: name and key "
+                          "status withheld", "domain": domain}
+    states = {} if states is None else states
+    for ref in refs:
+        if credential_state(ref, states) == CREDENTIAL_PRESENT:
+            return {"state": VIEW_CREDENTIAL_PRESENT, "ref": ref, "reason": None, "domain": domain}
+    reason = _presence_rejections(refs, states)[0]  # every lookup is memoized: no second store call
+    state = VIEW_CREDENTIAL_UNAVAILABLE if store_unavailable_credential_ref(reason) else VIEW_CREDENTIAL_MISSING
+    return {"state": state, "ref": refs[0], "reason": reason, "domain": domain}
 
 
 # ------------------------------------------------------------------------------ runtime binding (§23)

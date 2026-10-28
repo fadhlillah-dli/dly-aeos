@@ -46,6 +46,12 @@ REQUIRED_PRICES = ("prompt", "completion")
 OTHER_PRICES = ("request", "image", "input_cache_read")
 CODE_INELIGIBLE = "FREE_WORKER_ROUTE_INELIGIBLE"
 CODE_LIMIT = "FREE_TIER_LIMIT_REACHED"
+# status() "state" and the route view's decision_c "status": the Control Center badges them (frontend StatusBadge
+# keeps a spec for each; tests/unit/test_status_vocabulary.py keeps the fixture in sync)
+STATE_OK = "OK"
+STATE_LIMIT_REACHED = "LIMIT_REACHED"
+DECISION_C_INELIGIBLE = "INELIGIBLE"
+DECISION_C_ELIGIBLE = "ELIGIBLE_IF_ACTIVATED"
 # Account-wide quota states of the free tier (``QuotaState`` provider ``openrouter``): ``free-daily`` is the existing
 # daily scope (catalog key info, ``service.note_rate_limited``); ``free-rpm`` holds a per-minute 429.
 SCOPE_DAILY = "free-daily"
@@ -371,7 +377,7 @@ def status(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
             "daily_limit": lim["daily"], "daily_basis": lim["daily_basis"],
             "owner_daily_setting": lim["owner_daily_setting"], "observed_daily_limit": lim["observed_daily_limit"],
             "requests_last_minute": used["minute"], "requests_today_utc": used["day"],
-            "state": "LIMIT_REACHED" if block else "OK", "reason": block["reason"] if block else None,
+            "state": STATE_LIMIT_REACHED if block else STATE_OK, "reason": block["reason"] if block else None,
             "counted": "requests this AEOS instance sent (broker and probes); other clients of the same OpenRouter "
                        "account are not visible, so OpenRouter's own 429 stays authoritative",
             "checked_at": current.isoformat()}

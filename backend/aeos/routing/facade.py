@@ -8,6 +8,7 @@ only to already-approved routes; no silent paid fallback or supervisor downgrade
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -157,3 +158,16 @@ def store_unavailable_credential_ref(reason: str) -> str | None:
     from aeos.routing.service import store_unavailable_credential_ref as impl
 
     return impl(reason)
+
+
+def withhold_private_refs(session: Session, payload: Any, *, domain: str) -> Any:
+    """*payload* with every route credential reference name that a viewer of *domain* without any project scope may
+    not see replaced by its label (additive, 2026-10-28; L12): ``office/`` names outside OFFICE and every
+    ``projects/<id>/`` name. The one rule of the route views (``service.withheld_refs``/``withhold_refs``), for a
+    platform-level payload every session reads (the Doctor's route rows)."""
+    from sqlalchemy import select
+
+    from aeos.routing.service import withheld_refs, withhold_refs
+
+    routes = session.scalars(select(ModelRoute)).all()
+    return withhold_refs(payload, withheld_refs(routes, domain=domain, project_visible=None))
