@@ -78,6 +78,7 @@ def office_accepted(db, wf, monkeypatch, settings, secrets_memory, tmp_path):
     cand, base, head = make_candidate(settings, w, head_files={"backend/extra.py": "X = 1\n"})
     git(cand, "branch", BRANCH, head)
     w.run.workspace_ref = str(cand)
+    w.run.git_dir_ref = str(cand / ".git")  # the trusted git dir the runtime records (ADR-0132)
     install_planning(monkeypatch, w.version)
     report = record_verification(db, w, head=head, base=base)
     # the Claude review PASS bound to this head, as review_run records it (owner rule R44, ADR-0132)

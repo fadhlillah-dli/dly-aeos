@@ -324,9 +324,12 @@ def prepare_pr(session: Session, task_id: str, *, actor_user_id: str, base_branc
     if scope_problems:
         raise PolicyDenied("delivery exceeds the TaskSpec capability scope: " + "; ".join(scope_problems),
                            code="CAPABILITY_SCOPE_DENIED", details={"problems": scope_problems})
-    # The broker pushes the branch tip: it must still be exactly the accepted head (read-only git plumbing).
+    # The broker pushes the branch tip: it must still be exactly the accepted head (read-only git plumbing), read
+    # through the trusted git dir the runtime recorded - never the worker-editable .git pointer (ADR-0132).
+    if not run.git_dir_ref:
+        raise Blocked("accepted run has no trusted git dir recorded by the runtime", code="NO_CANDIDATE")
     try:
-        local_head = GitReader(Path(run.workspace_ref)).branch_head(run.branch)
+        local_head = GitReader(Path(run.workspace_ref), git_dir=Path(run.git_dir_ref)).branch_head(run.branch)
     except GitError as exc:
         raise Blocked(f"task branch head could not be read from the candidate workspace: {exc}",
                       code="BRANCH_UNRESOLVED") from exc

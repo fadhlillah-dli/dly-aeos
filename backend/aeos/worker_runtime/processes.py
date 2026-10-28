@@ -60,18 +60,20 @@ _SANDBOX_SAFE_NAMES = {RUN_MARKER, "OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
 # Owner rule R44 (ADR-0132): git in a worker's environment refuses every remote transport, whatever the repository's
 # own config says (the ``worktree`` strategy shares the owner's repository config, remotes included). Command-line
 # config (``GIT_CONFIG_COUNT``) outranks the repository's: no credential helper, askpass and ssh replaced by a command
-# that fails (OpenSSH would otherwise find the OS account's ~/.ssh whatever HOME says), every transport disallowed
-# except ``file`` with git's own default ``user`` (a path the worker names itself; a submodule clone git starts on its
-# own is refused - ``always`` or ``GIT_ALLOW_PROTOCOL`` would undo that hardening). The worker's local git (status,
-# diff, commit, a clone of a local path) keeps working; it never needs a remote. Defence in depth: a worker with a
-# shell can change its own environment; the container's network is the boundary.
+# that fails (OpenSSH would otherwise find the OS account's ~/.ssh whatever HOME says), and every network transport
+# named ``never`` - ``protocol.allow`` alone would let a repository's own ``protocol.<name>.allow`` re-enable one, so
+# ssh, https, http, git and ext are each set too - while ``file`` keeps git's own default ``user`` (a path the worker
+# names itself; a submodule clone git starts on its own is refused - ``always`` or ``GIT_ALLOW_PROTOCOL`` would undo
+# that hardening). The worker's local git (status, diff, commit, a clone of a local path) keeps working; it never
+# needs a remote. Defence in depth: a worker with a shell can change its own environment or pass its own ``-c``
+# (which outranks this); the container's network is the boundary.
 GIT_REFUSING_COMMAND = "false"
 GIT_NO_REMOTE_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_ASKPASS": GIT_REFUSING_COMMAND,
     "SSH_ASKPASS": GIT_REFUSING_COMMAND,
     "GIT_SSH_COMMAND": GIT_REFUSING_COMMAND,
-    "GIT_CONFIG_COUNT": "5",
+    "GIT_CONFIG_COUNT": "10",
     "GIT_CONFIG_KEY_0": "core.sshCommand",
     "GIT_CONFIG_VALUE_0": GIT_REFUSING_COMMAND,
     "GIT_CONFIG_KEY_1": "protocol.allow",
@@ -82,6 +84,16 @@ GIT_NO_REMOTE_ENV: dict[str, str] = {
     "GIT_CONFIG_VALUE_3": "",
     "GIT_CONFIG_KEY_4": "core.askPass",
     "GIT_CONFIG_VALUE_4": GIT_REFUSING_COMMAND,
+    "GIT_CONFIG_KEY_5": "protocol.ssh.allow",
+    "GIT_CONFIG_VALUE_5": "never",
+    "GIT_CONFIG_KEY_6": "protocol.https.allow",
+    "GIT_CONFIG_VALUE_6": "never",
+    "GIT_CONFIG_KEY_7": "protocol.http.allow",
+    "GIT_CONFIG_VALUE_7": "never",
+    "GIT_CONFIG_KEY_8": "protocol.git.allow",
+    "GIT_CONFIG_VALUE_8": "never",
+    "GIT_CONFIG_KEY_9": "protocol.ext.allow",
+    "GIT_CONFIG_VALUE_9": "never",
 }
 # Hard backstop of the Windows Job Object (kernel-enforced); the cross-platform watchdog in the executor
 # enforces the TaskSpec's own memory/process caps.

@@ -73,22 +73,43 @@
    before the push. A PR is opened only for a branch the broker pushed after this check (amendment, delta review):
    GitHub and Bitbucket PR creation first require a SUCCEEDED push record of this run, repository, branch and exactly
    the run's head (`require_pushed_head`, reason `NOT_PUSHED`, before any grant, credential or request), and the head
-   the provider reports for the created PR must be that head (a prefix for Bitbucket's abbreviated hash); otherwise
-   the PR is not counted (`HEAD_MISMATCH`, outbox FAILED).
+   the provider reports for the created PR must be that head (for Bitbucket's abbreviated hash a prefix of at least
+   12 hex digits; an answer that names no head counts as a mismatch); otherwise the PR is not counted
+   (`HEAD_MISMATCH`, outbox FAILED).
    **What the reviewer saw (amendment, delta review).** A worker-written `.gitattributes` (`* -diff`, even nested
    inside its allowed paths) turned every file into "Binary files differ" in the verifier's diff, so the excerpt
    stayed small and complete while showing nothing. `GitReader.diff_run` now reads attributes from the empty tree
-   (`--attr-source=<empty tree>`) for the verifier's diff, numstat and changed-file reads: no attribute of the work
-   tree, index, candidate or base can shape what the reviewer sees, and only git's own content check marks a file
+   (`--attr-source=<empty tree>`) for the verifier's diff, numstat and changed-file reads: no in-tree
+   `.gitattributes` of the work tree, index, candidate or base can shape what the reviewer sees. `--attr-source`
+   does not cover the other sources (second delta review): the global and XDG attributes files are switched off on
+   every verifier git call (`core.attributesFile` = the null device, effective for both, measured with git 2.50), the
+   system file with `GIT_ATTR_NOSYSTEM=1`, and a non-empty `info/attributes` of the trusted git dir, which outranks
+   all of them, blocks the verification (`GIT_CONTROL_UNTRUSTED`). Only git's own content check then marks a file
    binary. The empty tree rather than the run's base: a base attribute (a `-diff` lockfile) hides content just the
-   same. `--attr-source` needs git 2.40 or newer and the minimum git version is not pinned; an older git refuses the
-   option and the verifier's diff fails closed with a message naming the version, never a silent fall-back (a
-   version-independent empty work tree and index did not stop git from applying the attributes, measured with git
-   2.50). `**/.gitattributes` is also a generic protected path (special review). The runtime's own patch evidence
-   (`workspace.collect_changes`) is not the reviewer's input and is unchanged.
+   same. `--attr-source` needs git 2.41 or newer (RelNotes 2.41.0) and the minimum git version is not pinned; an
+   older git refuses the option and the verifier's diff fails closed with a message naming the version, never a
+   silent fall-back (a version-independent empty work tree and index did not stop git from applying the attributes,
+   measured with git 2.50). `**/.gitattributes` is also a generic protected path (special review). The runtime's own
+   patch evidence (`workspace.collect_changes`) is not the reviewer's input and is unchanged.
+   **The git dir that is read (second delta review).** The verifier ran git with `-C <candidate>`, following the
+   work tree's `.git` pointer, which the worker can rewrite to a planted git dir (alternates to the trusted
+   objects, its own `info/attributes` or replace refs): a replace ref mapping the head tree to the base tree emptied
+   the diff while the broker pushed the real head. Every verifier read of the candidate (and delivery's branch-head
+   read) now uses the trusted git dir the runtime recorded (`--git-dir=<run.git_dir_ref> --work-tree=<candidate>`;
+   missing: BLOCKED `GIT_DIR_UNKNOWN`), every call ignores replace refs (`--no-replace-objects`,
+   `GIT_NO_REPLACE_OBJECTS=1`), and a trusted git dir with replace refs, grafts or a non-empty `info/attributes`
+   blocks the verification (`GIT_CONTROL_UNTRUSTED`). With no recorded head and no task branch the verifier no
+   longer falls back to a HEAD (BLOCKED `HEAD_UNKNOWN`). The broker's own push still falls back to the work tree when
+   no git dir is recorded; it fetches the exact head sha, so content cannot differ, and replace refs are not
+   fetched.
+   **Paths and listings (second delta review).** numstat records are split at the first two tabs only, so a path
+   with a tab keeps its name; a changed path that is not a deletion and has no numstat entry counts as binary (fail
+   closed); a changed path with a control character is refused (`CONTROL_CHARS`); a SCOPE_CHECK evidence that was
+   missing or failed its hash is recorded (`scope_available`) and refused (`SCOPE_UNAVAILABLE`), as the DIFF one is.
 4. **Refusal.** `PolicyDenied` code `REVIEW_REQUIRED`, message `no Claude review PASS for head <sha12>: <why>`, details
-   `reason` (NO_HEAD, NO_REVIEW, NOT_CLAUDE, NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, DIFF_UNAVAILABLE, TRUNCATED,
-   BINARY, NOT_PASS, FINDINGS, MODEL, REVIEW_GATE_UNAVAILABLE; HISTORY from the push; NOT_PUSHED from PR creation),
+   `reason` (NO_HEAD, NO_REVIEW, NOT_CLAUDE, NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, SCOPE_UNAVAILABLE,
+   CONTROL_CHARS, DIFF_UNAVAILABLE, TRUNCATED, BINARY, NOT_PASS, FINDINGS, MODEL, REVIEW_GATE_UNAVAILABLE; HISTORY
+   from the push; NOT_PUSHED from PR creation),
    `head_commit`, `review_id`, `reviewed_head`, `verdict`. An audit record `broker.<operation>` DENIED carries the
    same. For every reason but HISTORY nothing is pushed, no grant
    is consumed, no credential is read (HISTORY is decided in the mirror, after the grant and the remote read; nothing
@@ -105,9 +126,11 @@
    `prepare-pr` needs the owner's session. Amendment 2026-10-28 (blind review): the `worktree` strategy, the default
    for user projects, shares the owner's repository config with its remotes, and OpenSSH finds the OS account's
    `~/.ssh` whatever HOME says; so git in the worker environment (process sandbox and container,
-   `processes.GIT_NO_REMOTE_ENV`) now refuses every remote transport: `protocol.allow=never` with
-   `protocol.file.allow=user` (git's default for file: a local path the worker names works, a file clone git starts
-   on its own, such as a submodule, is refused; `always` or `GIT_ALLOW_PROTOCOL=file` would undo that hardening),
+   `processes.GIT_NO_REMOTE_ENV`) now refuses every remote transport: `protocol.allow=never` and, because a
+   repository's own `protocol.<name>.allow` would otherwise re-enable one, `protocol.ssh/https/http/git/ext.allow=never`
+   (second delta review), with `protocol.file.allow=user` (git's default for file: a local path the worker names
+   works, a file clone git starts on its own, such as a submodule, is refused; `always` or `GIT_ALLOW_PROTOCOL=file`
+   would undo that hardening),
    `GIT_SSH_COMMAND` and `core.sshCommand`, `GIT_ASKPASS`,
    `SSH_ASKPASS` and `core.askPass` set to a command that fails, `credential.helper` emptied, prompts off - as
    command-line config, which outranks the repository's. Tested with an ssh-style remote served by a fake ssh (never

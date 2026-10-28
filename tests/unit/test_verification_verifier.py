@@ -376,6 +376,7 @@ def test_baseline_on_the_base_commit_classifies_regressions_and_is_cached(db, se
     world2.project = world.project
     world2.run.project_id = world.project.id
     world2.run.workspace_ref, world2.run.base_commit, world2.run.head_commit = str(cand), base, head
+    world2.run.git_dir_ref = str(cand / ".git")  # the trusted git dir the runtime records (ADR-0132)
     db.commit()
     out2 = _verify(db, world2)
     assert out2.checks["baseline"].details["cached_evidence_id"] == base_reports[0].id
@@ -672,3 +673,45 @@ def test_dependency_set_pins_named_distributions_and_skips_nameless_ones(monkeyp
     monkeypatch.setattr(verifier.importlib.metadata, "distributions", lambda: dists)
     monkeypatch.setattr(verifier, "_dependency_set_cache", {})
     assert verifier.dependency_set() == {"hash": content_hash(["bar==2.1", "foo==1.0"]), "count": 2}
+
+
+# ----------------------------------------------------------------------------- the trusted git dir (ADR-0132, H1/M1)
+def test_a_candidate_without_a_trusted_git_dir_is_blocked(db, settings, controller, wf):
+    """The work tree's .git pointer is worker-editable: without the git dir the runtime recorded there is nothing
+    trustworthy to read."""
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    bind_candidate(db, world, cand, base, head)
+    world.run.git_dir_ref = None
+    db.commit()
+    out = _verify(db, world)
+    assert out.status == "BLOCKED" and out.blocked_code == "GIT_DIR_UNKNOWN", out.reasons
+
+
+@pytest.mark.parametrize("plant,needle", [
+    (lambda cand, base, head: git(cand, "replace", head, base), "replace refs are present"),
+    (lambda cand, base, head: (cand / ".git" / "info").mkdir(exist_ok=True)
+     or (cand / ".git" / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8"),
+     "info/attributes is not empty"),
+    (lambda cand, base, head: (cand / ".git" / "info").mkdir(exist_ok=True)
+     or (cand / ".git" / "info" / "grafts").write_text(f"{head}\n", encoding="utf-8"), "info/grafts is not empty"),
+])
+def test_a_trusted_git_dir_that_could_change_what_is_read_is_blocked(db, settings, controller, wf, plant, needle):
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    bind_candidate(db, world, cand, base, head)
+    plant(cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "BLOCKED" and out.blocked_code == "GIT_CONTROL_UNTRUSTED", out.reasons
+    assert any(needle in r for r in out.reasons), out.reasons
+
+
+def test_a_comment_only_info_attributes_file_is_not_blocked(db, settings, controller, wf):
+    """Near miss: git's own template comments in info/exclude-style files change nothing."""
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    bind_candidate(db, world, cand, base, head)
+    (cand / ".git" / "info").mkdir(exist_ok=True)
+    (cand / ".git" / "info" / "attributes").write_text("# no attributes\n\n", encoding="utf-8")
+    out = _verify(db, world)
+    assert out.blocked_code != "GIT_CONTROL_UNTRUSTED", out.reasons

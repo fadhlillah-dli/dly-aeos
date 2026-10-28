@@ -200,7 +200,8 @@ def test_create_pr_draft_and_token_never_returned(db, monkeypatch, secrets_memor
     _pr_env(db, monkeypatch, secrets_memory, repo_env)
     with respx.mock(assert_all_mocked=True) as mock:
         route = mock.post("https://api.github.com/repos/owner/repo/pulls").mock(
-            return_value=httpx.Response(201, json={"number": 7, "html_url": "https://github.com/owner/repo/pull/7"}))
+            return_value=httpx.Response(201, json={"number": 7, "html_url": "https://github.com/owner/repo/pull/7",
+                                                   "head": {"sha": repo_env["head"]}}))
         res = git_broker.create_pull_request(db, run_id=repo_env["run"].id, repo_full_name="owner/repo", head=BRANCH,
                                              base="main", title="Task A", body="evidence: NOT-PROVEN")
         sent = route.calls[0].request
@@ -221,7 +222,7 @@ def test_create_pr_reconciles_existing_and_timeouts(db, monkeypatch, secrets_mem
     with respx.mock(assert_all_mocked=True) as mock:
         mock.post("https://api.github.com/repos/owner/repo/pulls").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get("https://api.github.com/repos/owner/repo/pulls").mock(
-            return_value=httpx.Response(200, json=[{"number": 9, "html_url": "u"}]))
+            return_value=httpx.Response(200, json=[{"number": 9, "html_url": "u", "head": {"sha": repo_env["head"]}}]))
         res = git_broker.create_pull_request(db, run_id=repo_env["run"].id, repo_full_name="owner/repo", head=BRANCH,
                                              base="main", title="t", body="b")
     assert res["ok"] and res["number"] == "9"

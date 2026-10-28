@@ -376,29 +376,70 @@ def git_env() -> dict[str, str]:
         "GIT_NO_LAZY_FETCH": "1",  # partial clones must not fetch missing objects (git >= 2.44)
         "GIT_ASKPASS": "",
         "SSH_ASKPASS": "",
+        # owner rule R44 (ADR-0132): nothing in the repository or the host decides what a read shows - no replace
+        # refs (they swap one object for another) and no system attributes file
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_ATTR_NOSYSTEM": "1",
     })
     return env
 
 
-class GitReader:
-    """Read-only git plumbing against an untrusted candidate repository."""
+def _has_entries(path: Path) -> bool:
+    """A control file with at least one line that is neither blank nor a comment."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(line.strip() and not line.lstrip().startswith("#") for line in text.splitlines())
 
-    def __init__(self, repo: Path, *, timeout: float = 120.0):
+
+class GitReader:
+    """Read-only git plumbing against an untrusted candidate repository.
+
+    ``git_dir`` (owner rule R44, ADR-0132): the trusted git directory the runtime recorded for the candidate
+    (``WorkerRun.git_dir_ref``). With it git never follows the work tree's ``.git`` pointer, which the worker can
+    rewrite to a planted git dir (alternates to the trusted objects, its own attributes or replace refs) - the
+    verifier always passes it. Every call ignores replace refs (``--no-replace-objects``), the global and XDG
+    attributes files (``core.attributesFile`` = the null device) and the system attributes file; the repository's own
+    ``info/attributes``, ``info/grafts`` and ``refs/replace`` are refused by ``integrity_problem``."""
+
+    def __init__(self, repo: Path, *, timeout: float = 120.0, git_dir: Path | None = None):
         git = shutil.which("git")
         if not git:
             raise GitError("git executable not found on PATH")
         self.git = git
         self.repo = repo
+        self.git_dir = git_dir
         self.timeout = timeout
         self.env = git_env()
         self._empty_tree: str | None = None
 
     def _args(self, *args: str) -> list[str]:
+        location = ["-C", str(self.repo)]
+        if self.git_dir is not None:
+            location += [f"--git-dir={self.git_dir}", f"--work-tree={self.repo}"]
         return [
-            self.git, "-c", "core.fsmonitor=false", "-c", "core.quotepath=off", "-c", "diff.noprefix=false",
-            "-c", "diff.mnemonicPrefix=false", "-c", "color.ui=false", "-c", "protocol.allow=never",
-            "-c", "credential.helper=", "-C", str(self.repo), *args,
+            self.git, "--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.quotepath=off",
+            "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "-c", "color.ui=false",
+            "-c", "protocol.allow=never", "-c", "credential.helper=", "-c", f"core.attributesFile={os.devnull}",
+            *location, *args,
         ]
+
+    def integrity_problem(self) -> str | None:
+        """Why the repository's own control files could change what a read of it shows (None = none can): replace
+        refs (ignored by every call, refused all the same), grafts (they rewrite commit parents) and a non-empty
+        ``info/attributes`` (it outranks every other attributes source, ``--attr-source`` included)."""
+        refs = self.run("for-each-ref", "--format=%(refname)", "refs/replace/").stdout.decode().split()
+        if refs:
+            return f"replace refs are present ({', '.join(refs[:3])}): they swap one object for another"
+        dirs = {self.run("rev-parse", "--path-format=absolute", option).stdout.decode().strip()
+                for option in ("--absolute-git-dir", "--git-common-dir")}
+        for d in sorted(x for x in dirs if x):
+            for name, why in (("grafts", "grafts rewrite commit parents"),
+                              ("attributes", "repository attributes shape every diff")):
+                if _has_entries(Path(d) / "info" / name):
+                    return f"{Path(d) / 'info' / name} is not empty: {why}"
+        return None
 
     def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
         try:
@@ -440,19 +481,22 @@ class GitReader:
         return self._empty_tree
 
     def diff_run(self, *args: str) -> subprocess.CompletedProcess[bytes]:
-        """``git diff`` of two commits whose output no ``.gitattributes`` can shape (owner rule R44, ADR-0132).
+        """``git diff`` of two commits whose output no ``.gitattributes`` file can shape (owner rule R44, ADR-0132).
 
-        Attributes are read from the empty tree (``--attr-source``), not from the candidate's work tree, index or
-        commits: a worker-written ``* -diff`` (even nested, inside its allowed paths) would otherwise turn every file
-        into "Binary files differ" and hide the change from the reviewer, and a base attribute can hide a file just
-        as well. Git's own content check still marks real binary files (numstat ``-``). ``--attr-source`` needs
-        git 2.40 or newer; an older git refuses the option and the diff fails (fail closed), never silently falls
-        back to the candidate's attributes."""
+        In-tree attributes are read from the empty tree (``--attr-source``), not from the candidate's work tree,
+        index or commits: a worker-written ``* -diff`` (even nested, inside its allowed paths) would otherwise turn
+        every file into "Binary files differ" and hide the change from the reviewer, and a base attribute can hide a
+        file just as well. ``--attr-source`` does not cover the other sources: the global and XDG attributes files
+        and the system one are switched off on every call (``_args``, ``git_env``), and a non-empty
+        ``info/attributes`` is refused by ``integrity_problem`` (the verifier checks it first). Git's own content
+        check still marks real binary files (numstat ``-``). ``--attr-source`` needs git 2.41 or newer; an older git
+        refuses the option and the diff fails (fail closed), never silently falls back to the candidate's
+        attributes."""
         cp = self.run(f"--attr-source={self.empty_tree()}", *args, check=False)
         if cp.returncode != 0:
             err = redact_text(cp.stderr.decode("utf-8", "replace"))
             if "attr-source" in err:
-                raise GitError("this git cannot read attributes from a fixed tree (--attr-source, git >= 2.40): "
+                raise GitError("this git cannot read attributes from a fixed tree (--attr-source, git >= 2.41): "
                                "the diff could be shaped by the candidate's .gitattributes, so it is refused; "
                                "update git")
             raise GitError(f"git diff failed: {err[:500]}")
@@ -478,7 +522,7 @@ class GitReader:
         for rec in raw.decode("utf-8", "surrogateescape").split("\x00"):
             if not rec.strip():
                 continue
-            fields = rec.split("\t")
+            fields = rec.split("\t", 2)  # added, deleted, path - a path may itself contain tabs
             if len(fields) < 3:
                 continue
             add, delete, path = fields[0], fields[1], fields[2]

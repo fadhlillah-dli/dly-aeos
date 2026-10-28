@@ -13,11 +13,13 @@ package) is all of:
   the trusted collector for this run; evidence is append-only) carries the head the reviewer saw in
   ``environment.commit`` and in the stored package itself (read only while its bytes match the recorded hash), and
   the review's own package hash and artifact hash - a review of an older head never covers a newer one;
-* of a package that showed the reviewer the whole diff: the diff evidence was readable (``diff_available``; a missing
-  or tampered diff gave the reviewer nothing), the excerpt was not truncated (``diff_truncated``, more than
+* of a package that showed the reviewer the whole diff: the scope and diff evidence were readable
+  (``scope_available``, ``diff_available``; a missing or tampered one gave the reviewer nothing), no changed path holds
+  a control character (``changed_files``), the excerpt was not truncated (``diff_truncated``, more than
   ``DIFF_EXCERPT_CHARS``: the task is split instead), and no added or modified file is binary (``binary_paths``,
-  numstat ``-``: content a line diff cannot show; the verifier's diff reads no ``.gitattributes``, so only git's own
-  content check makes a file binary);
+  numstat ``-`` or no numstat entry at all: content a line diff cannot show; the verifier reads the candidate through
+  the trusted git dir with no replace refs and no attributes from the tree, the host or the system, so only git's
+  own content check makes a file binary);
 * a PASS verdict (``PASS_VERDICTS``) that its own HIGH/CRITICAL findings do not contradict (``clamp_verdict``, the
   rule a review is recorded with);
 * answered by an Opus model: the resolved model's family must be in ``PUBLICATION_REVIEWER_FAMILIES`` whatever was
@@ -64,8 +66,8 @@ PUBLICATION_REVIEWER_FAMILIES: frozenset[str] = frozenset({"opus"})
 @dataclass(frozen=True)
 class PublicationReview:
     """The gate's answer for one head. ``reason`` is PASS or why the write is refused: NO_HEAD, NO_REVIEW, NOT_CLAUDE,
-    NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, DIFF_UNAVAILABLE, TRUNCATED, BINARY, NOT_PASS, FINDINGS, MODEL (the
-    broker adds HISTORY, NOT_PUSHED and REVIEW_GATE_UNAVAILABLE)."""
+    NOT_COMPLETED, MOCK, UNBOUND, OTHER_HEAD, SCOPE_UNAVAILABLE, CONTROL_CHARS, DIFF_UNAVAILABLE, TRUNCATED, BINARY,
+    NOT_PASS, FINDINGS, MODEL (the broker adds HISTORY, NOT_PUSHED and REVIEW_GATE_UNAVAILABLE)."""
 
     allowed: bool
     reason: str
@@ -88,14 +90,17 @@ class ReviewBinding:
     diff_truncated: bool
     diff_available: bool = True
     binary_paths: tuple[str, ...] = ()
+    scope_available: bool = True
+    changed_files: tuple[str, ...] = ()
 
 
 def review_binding(session: Session, rec: ReviewRecord) -> ReviewBinding | None:
     """The head commit a checkpoint review is bound to, from its own checkpoint package evidence: the recorded
     environment and the stored package (verified against its content hash) must name the same head, and the
-    environment must carry this review's package and artifact hash; the package's ``diff_truncated`` and
-    ``diff_available`` must be booleans and ``binary_paths`` a list of paths (a package without them, from before these
-    fields, does not count). None = not provably bound (fail closed)."""
+    environment must carry this review's package and artifact hash; the package's ``diff_truncated``,
+    ``diff_available`` and ``scope_available`` must be booleans and ``binary_paths`` and ``changed_files`` lists of
+    paths (a package without them, from before these fields, does not count). None = not provably bound (fail
+    closed)."""
     if not rec.package_evidence_id:
         return None
     ev = session.get(EvidenceArtifact, rec.package_evidence_id)
@@ -113,12 +118,16 @@ def review_binding(session: Session, rec: ReviewRecord) -> ReviewBinding | None:
     run_part = package.get("run")
     if not valid_sha(commit) or not isinstance(run_part, dict) or run_part.get("head_commit") != commit:
         return None
-    truncated, available, binary = (package.get("diff_truncated"), package.get("diff_available"),
-                                    package.get("binary_paths"))
-    if not isinstance(truncated, bool) or not isinstance(available, bool) or not isinstance(binary, list) \
-            or not all(isinstance(b, str) for b in binary):
+    truncated, available, scope_ok = (package.get("diff_truncated"), package.get("diff_available"),
+                                      package.get("scope_available"))
+    binary, changed = package.get("binary_paths"), package.get("changed_files")
+    if not all(isinstance(v, bool) for v in (truncated, available, scope_ok)):
         return None
-    return ReviewBinding(head=commit, diff_truncated=truncated, diff_available=available, binary_paths=tuple(binary))
+    if not all(isinstance(v, list) and all(isinstance(x, str) for x in v) for v in (binary, changed)):
+        return None
+    return ReviewBinding(head=commit, diff_truncated=bool(truncated), diff_available=bool(available),
+                         binary_paths=tuple(binary or []), scope_available=bool(scope_ok),
+                         changed_files=tuple(changed or []))
 
 
 def reviewed_head(session: Session, rec: ReviewRecord) -> str | None:
@@ -159,6 +168,16 @@ def publication_review(session: Session, run: WorkerRun, head_commit: str | None
     if bound != head:
         return refuse("OTHER_HEAD", f"the latest Claude checkpoint review covers head {bound[:12]}, not this head; "
                                     "request a review of this head", rec, bound)
+    if not binding.scope_available:
+        return refuse("SCOPE_UNAVAILABLE", "the reviewer saw no verified file list (the verifier's scope evidence was "
+                                           "missing or failed its content hash when the package was built, so its "
+                                           "binary files were unknown); verify the run again and request a new review",
+                      rec, bound)
+    controlled = [p for p in binding.changed_files if any(ord(c) < 32 or ord(c) == 127 for c in p)]
+    if controlled:
+        return refuse("CONTROL_CHARS", f"{len(controlled)} changed path(s) contain control characters (a tab or a "
+                                       "line break in a file name can make listings disagree about what changed); "
+                                       "rename them and run the task again", rec, bound)
     if not binding.diff_available:
         return refuse("DIFF_UNAVAILABLE", "the reviewer saw no diff (the verifier's diff evidence was missing or "
                                           "failed its content hash when the package was built); verify the run again "

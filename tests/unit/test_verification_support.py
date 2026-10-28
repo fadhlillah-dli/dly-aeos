@@ -150,6 +150,7 @@ def make_candidate(settings, world: World, *, head_files: dict[str, str | None],
 
 def bind_candidate(db, world: World, cand: Path, base: str, head: str) -> None:
     world.run.workspace_ref = str(cand)
+    world.run.git_dir_ref = str(cand / ".git")  # what the runtime records: the trusted git dir (ADR-0132)
     world.run.base_commit = base
     world.run.head_commit = head
     db.commit()
@@ -251,7 +252,8 @@ def record_verification(db, world: World, *, status: str = "PASS", head: str = H
                   run_id=world.run.id, task_id=world.task.id, environment=env, mode=mode)
     sc = collector.collect_evidence(db, kind="SCOPE_CHECK", claim="scope", content={**scope.to_dict(),
                                     "name_status": [{"status": "A", "path": p} for p in changed],
-                                    "numstat": numstat or {}},
+                                    "numstat": numstat if numstat is not None
+                                    else {p: {"added": 1, "deleted": 0} for p in changed}},
                                     evidence_level="E1", **common)
     df = collector.collect_evidence(db, kind="DIFF", claim="diff", content="+++ b/backend/extra.py\n+X = 1\n",
                                     evidence_level="E1", **common)

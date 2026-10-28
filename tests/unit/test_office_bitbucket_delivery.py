@@ -732,7 +732,8 @@ def test_pr_retry_after_unknown_reads_first_and_never_posts_a_second_pr(db, offi
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         post = mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={"id": 77}))
         listed = mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": [
-            {"id": 9, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/9"}}}]}))
+            {"id": 9, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/9"}},
+             "source": {"commit": {"hash": run.head_commit[:12]}}}]}))
         done = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
                                           title="t", body="b")
         assert not post.called and set(listed.calls[0].request.url.params.get_list("state")) == {

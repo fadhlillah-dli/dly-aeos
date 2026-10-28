@@ -525,14 +525,22 @@ def require_pushed_head(session: Session, run: WorkerRun, *, repo: str, branch: 
     raise PolicyDenied(message, code=REVIEW_REQUIRED, details=details)
 
 
+PR_HEAD_MIN_PREFIX = 12
+
+
 def pr_head_mismatch(run: WorkerRun, observed: str | None) -> str | None:
-    """Why the head a provider reports for a just-created PR is not the run's reviewed head (None = it is, or the
-    provider named none). Bitbucket reports an abbreviated hash: a prefix of the head matches."""
-    head = run.head_commit or ""
-    if not observed or (head and head.startswith(str(observed))):
+    """Why the head a provider reports for a just-created PR is not the run's reviewed head (None = it is). Bitbucket
+    reports an abbreviated hash: a prefix of at least ``PR_HEAD_MIN_PREFIX`` hex digits matches. A provider answer that
+    names no head proves nothing and is a mismatch too (fail closed)."""
+    head = (run.head_commit or "").lower()
+    seen = str(observed or "").strip().lower()
+    if not seen:
+        return ("HEAD_MISMATCH: the provider's answer names no head commit, so the pull request is not proven to "
+                f"show the reviewed head {head[:12]}; the PR is not counted")
+    if head and len(seen) >= PR_HEAD_MIN_PREFIX and re.fullmatch(r"[0-9a-f]+", seen) and head.startswith(seen):
         return None
-    return (f"HEAD_MISMATCH: the pull request's head {str(observed)[:12]} is not the reviewed head {head[:12]} "
-            "(the branch moved after the broker's push); the PR is not counted")
+    return (f"HEAD_MISMATCH: the pull request's head {seen[:12]} is not the reviewed head {head[:12]} (the branch "
+            "moved after the broker's push, or the provider's hash is too short to compare); the PR is not counted")
 
 
 def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: str | None, work_root: Path,

@@ -38,7 +38,8 @@ def record_claude_review(db: Any, run: WorkerRun, *, head: str | None = None, ve
     package = {"package_version": "1", "purpose": "review.checkpoint",
                "run": {"id": run.id, "branch": run.branch, "head_commit": head},
                "artifact": {"artifact_hash": artifact_hash}, "diff_truncated": diff_truncated,
-               "diff_available": diff_available, "binary_paths": list(binary_paths or [])}
+               "diff_available": diff_available, "binary_paths": list(binary_paths or []), "scope_available": True,
+               "changed_files": ["feature.txt"]}
     for key, value in (package_overrides or {}).items():
         if value is MISSING:
             package.pop(key, None)

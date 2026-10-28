@@ -137,10 +137,21 @@ def test_git_in_the_worker_environment_refuses_every_remote_transport(tmp_path, 
     env = processes.build_sandbox_env(processes.SandboxDirs.create(tmp_path / "sbx"), run_id="run-no-remote")
     for args in (["push", "origin", "HEAD:refs/heads/aeos/worker"],
                  ["push", "fake-host:../remote.git", "HEAD:refs/heads/aeos/worker"],
+                 ["ls-remote", "https://127.0.0.1:9/repository.git"],
+                 ["ls-remote", "http://127.0.0.1:9/repository.git"],
+                 ["ls-remote", "git://127.0.0.1:9/repository.git"]):
+        refused = _git(args, cwd=src, env=env)
+        assert refused.returncode != 0 and "not allowed" in refused.stderr, (args, refused.stderr)
+    # a repository config that re-enables a transport by name (a worktree shares the owner's config) does not win
+    for name in ("ssh", "https"):
+        subprocess.run(["git", "config", f"protocol.{name}.allow", "always"], cwd=src, check=True,
+                       capture_output=True, timeout=60)
+    for args in (["push", "origin", "HEAD:refs/heads/aeos/worker"],
                  ["ls-remote", "https://127.0.0.1:9/repository.git"]):
         refused = _git(args, cwd=src, env=env)
         assert refused.returncode != 0 and "not allowed" in refused.stderr, (args, refused.stderr)
-    # a worker that re-allows ssh on its own command line still meets the failing ssh command, never the fake ssh
+    # a worker's own command-line -c outranks the environment (defence in depth only): ssh is then attempted, but the
+    # ssh command is the failing one, never the fake ssh
     refused = _git(["-c", "protocol.ssh.allow=always", "push", "origin", "HEAD:refs/heads/aeos/worker"], cwd=src,
                    env=env)
     assert refused.returncode != 0 and "Could not read from remote repository" in refused.stderr, refused.stderr

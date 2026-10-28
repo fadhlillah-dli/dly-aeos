@@ -417,6 +417,21 @@ def test_a_pr_whose_reported_head_is_not_the_reviewed_head_is_not_counted(db, en
     assert se.status == "FAILED" and se.kind == "CREATE_PR"
 
 
+def test_a_pr_answer_without_a_head_or_with_a_short_hash_is_not_counted(db, env, monkeypatch, secrets_memory):
+    _pr_env(db, monkeypatch, secrets_memory, env)
+    record_claude_review(db, env["run"])
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(f"https://api.github.com/repos/{REPO}/pulls").mock(return_value=httpx.Response(
+            201, json={"number": 6, "html_url": f"https://github.com/{REPO}/pull/6"}))
+        res = _create_pr(db, env)
+    assert not res["ok"] and res["error"].startswith("HEAD_MISMATCH: the provider's answer names no head commit")
+    run = env["run"]
+    assert git_broker.pr_head_mismatch(run, run.head_commit[:7]) is not None  # too short to compare
+    assert git_broker.pr_head_mismatch(run, run.head_commit[:12]) is None  # near miss: a 12-digit prefix
+    assert git_broker.pr_head_mismatch(run, run.head_commit.upper()) is None
+    assert git_broker.pr_head_mismatch(run, "") is not None and git_broker.pr_head_mismatch(run, None) is not None
+
+
 # ----------------------------------------------------------------------------- binding edge cases (L3)
 def test_a_merge_commit_head_is_never_published(db, env):
     """A merge whose first parent is the base still carries a second history the reviewer did not see."""
@@ -469,6 +484,20 @@ def test_a_review_whose_diff_was_unavailable_is_refused(db, env):
     _pushed(db, env)
 
 
+def test_a_review_without_a_verified_file_list_is_refused(db, env):
+    """L1: a SCOPE_CHECK that was missing or failed its hash left the binary list empty - recorded, refused."""
+    record_claude_review(db, env["run"], package_overrides={"scope_available": False})
+    _refused_push(db, env, "the reviewer saw no verified file list (the verifier's scope evidence was missing or "
+                           "failed its content hash", "SCOPE_UNAVAILABLE")
+
+
+def test_a_changed_path_with_a_control_character_is_refused(db, env):
+    record_claude_review(db, env["run"], package_overrides={"changed_files": ["src/app.py", "x\tA"]})
+    _refused_push(db, env, "1 changed path(s) contain control characters", "CONTROL_CHARS")
+    record_claude_review(db, env["run"], package_overrides={"changed_files": ["src/app.py", "x A"]})  # near miss
+    _pushed(db, env)
+
+
 def test_a_change_with_binary_files_is_refused(db, env):
     record_claude_review(db, env["run"], binary_paths=["assets/logo.png"])
     _refused_push(db, env, "the change adds or modifies binary file(s) the reviewer could not read "
@@ -500,7 +529,9 @@ def test_a_native_review_records_the_binding_the_gate_reads(db, reviewed_world, 
     out = review.review_run(db, w.run.id, actor="t")
     assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED", out.review.status_reason
     binding = gate.review_binding(db, out.review)
-    assert binding == gate.ReviewBinding(head=w.run.head_commit, diff_truncated=False)
+    assert binding is not None and binding.head == w.run.head_commit
+    assert (binding.diff_truncated, binding.diff_available, binding.scope_available) == (False, True, True)
+    assert binding.binary_paths == () and binding.changed_files == ("backend/extra.py",)
     ok = gate.publication_review(db, w.run, w.run.head_commit)
     assert ok.allowed and ok.reason == "PASS" and ok.review_id == out.review.id, ok
     moved = gate.publication_review(db, w.run, "e" * 40)  # a later worker commit is not covered
@@ -537,6 +568,24 @@ def test_the_package_lists_the_binary_files_and_the_gate_refuses_them(db, monkey
     assert binding is not None and binding.binary_paths == ("assets/logo.png", "assets/old.png")
     res = gate.publication_review(db, w.run, w.run.head_commit)
     assert not res.allowed and res.reason == "BINARY" and "(assets/logo.png, assets/old.png)" in res.message
+
+
+def test_a_package_built_without_the_scope_evidence_is_refused(db, reviewed_world, monkeypatch, settings):
+    """L1: a SCOPE_CHECK evidence that fails its content hash used to give an empty binary list; now it is recorded
+    and refused."""
+    from aeos.verification.verifier import latest_report, related_evidence
+
+    w = reviewed_world
+    scope_ev = related_evidence(db, latest_report(db, w.run.id), "SCOPE_CHECK")
+    stored = settings.layout.root / scope_ev.location
+    stored.write_bytes(stored.read_bytes() + b" ")
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload(), model=OPUS)).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    binding = gate.review_binding(db, out.review)
+    assert binding is not None and binding.scope_available is False and binding.binary_paths == ()
+    res = gate.publication_review(db, w.run, w.run.head_commit)
+    assert not res.allowed and res.reason == "SCOPE_UNAVAILABLE", res
 
 
 def test_a_package_built_without_the_diff_evidence_is_refused(db, reviewed_world, monkeypatch, settings):

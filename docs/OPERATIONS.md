@@ -867,20 +867,26 @@ right to commit, push, let alone merge, as the architecture says.
 * **Refusal.** `REVIEW_REQUIRED`: "no Claude review PASS for head <sha12>: <why>", audited as `broker.<operation>`
   DENIED with `details.reason`: `NO_REVIEW`, `OTHER_HEAD` (the review covers an older head: a worker commit came
   after it), `TRUNCATED` (the package cut the diff: split the task into smaller ones), `BINARY` (a binary file was
-  added or changed: add it yourself outside the worker run), `DIFF_UNAVAILABLE` (the diff evidence was missing or
-  tampered when the package was built: verify again), `NOT_PUSHED` (PR creation before the broker pushed exactly this
+  added or changed: add it yourself outside the worker run), `DIFF_UNAVAILABLE` / `SCOPE_UNAVAILABLE` (the diff or
+  scope evidence was missing or tampered when the package was built: verify again), `CONTROL_CHARS` (a changed file
+  name holds a tab, a line break or another control character: rename it), `NOT_PUSHED` (PR creation before the broker pushed exactly this
   head), `HISTORY` (worker-made
   commits between the base and the head, or no recorded base: run the task again), `NOT_PASS`, `FINDINGS`, `MODEL`
   (not Opus, or not the policy's identity), `NOT_COMPLETED` (waiting for quota or a manual result), `MOCK`,
   `NOT_CLAUDE`, `UNBOUND` (no intact checkpoint package binding), `NO_HEAD`, `REVIEW_GATE_UNAVAILABLE`. `prepare-pr`
   answers with the same code. Remedy: request the review of the current head and publish after its PASS; a FAIL
   verdict goes to a repair attempt, never to publication.
-* **Worker git.** Git in a worker's environment refuses every remote transport (only `file`, with git's `user`
-  default; ssh and askpass are a failing command; the credential helper is emptied), whatever the shared repository
-  config of a `worktree` candidate says.
-* **What the reviewer sees.** The verifier's diff ignores every `.gitattributes` (it needs git 2.40 or newer; an older
-  git fails the verification with a message), so a worker cannot hide a change as "binary"; a `.gitattributes`
-  change itself goes to special review.
+* **Worker git.** Git in a worker's environment refuses every remote transport (ssh, https, http, git and ext each
+  `never`; only `file`, with git's `user` default; ssh and askpass are a failing command; the credential helper is
+  emptied), whatever the shared repository config of a `worktree` candidate says. A worker's own command-line `-c`
+  outranks this (defence in depth); the container's network is the boundary.
+* **What the reviewer sees.** The verifier reads the candidate only through the git dir the runtime recorded (never
+  the work tree's `.git` pointer; missing: `GIT_DIR_UNKNOWN`), ignores replace refs, takes in-tree attributes from
+  the empty tree (git 2.41 or newer; an older git fails the verification with a message) and switches off the
+  global, XDG and system attributes files; a git dir with replace refs, grafts or a non-empty `info/attributes`
+  blocks the verification (`GIT_CONTROL_UNTRUSTED`: remove them, or re-run the task). So a worker cannot hide a
+  change as "binary"; a `.gitattributes` change itself goes to special review, and a file name with a control
+  character is refused (`CONTROL_CHARS`).
 
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 
