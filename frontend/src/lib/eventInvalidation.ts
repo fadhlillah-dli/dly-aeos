@@ -9,7 +9,8 @@ import { useEventStream, type AeosEvent } from "./events";
  *
  * The names are the backend's: `source` and `kind` as emitted by `aeos.events.service.emit` (see AeosEvent). Query
  * keys are the prefixes the pages use: ["inventory", ...] (components, map, blast, snapshots), ["routes"] and
- * ["route", key] (Models), ["decisions", ...], ["claude-status"]. High-frequency kinds (`run.heartbeat`,
+ * ["route", key] (Models), ["decisions", ...], ["claude-status"], ["doctor", ...] and ["doctor-capabilities", ...]
+ * (Readiness; secret events carry only a reference name or a store transition, never a value). High-frequency kinds (`run.heartbeat`,
  * `task.*`, `cost.usage.recorded`, ...) match nothing here, so a heartbeat never refetches a page.
  *
  * It refreshes on events and on window focus (the QueryClient default) with staleTime 15 s; there is no polling.
@@ -25,6 +26,11 @@ export function queryKeysForEvent(e: Pick<AeosEvent, "source" | "kind">): QueryK
   if (/^routes?\./.test(kind) || source === "routing") keys.push(["routes"], ["route"], ["inventory"]);
   if (kind.startsWith("inventory.")) keys.push(["inventory"]);
   if (source === "claude_bridge" || kind.startsWith("claude.")) keys.push(["claude-status"], ["routes"]);
+  if (source === "secrets" && (kind === "secret.presence_changed" || kind === "secret.store_changed")) {
+    // A key stored/deleted or the vault sealed/unsealed moves the routes' credential block (Models: "Aktif, tidak
+    // dapat dipakai"), route eligibility and the Readiness checks (["doctor", ...], ["doctor-capabilities", ...]).
+    keys.push(["routes"], ["route"], ["doctor"], ["doctor-capabilities"]);
+  }
   return keys;
 }
 

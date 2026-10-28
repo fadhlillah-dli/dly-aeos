@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { EXPIRY_REFETCH_MAX_MS, nextExpiryRefetchMs } from "./badges";
 import ModelsPage from "./index";
 
 // R28: the Models page must say how many routes are ACTIVE (TRIAL/APPROVED), put them first, show their expiry only
@@ -25,9 +26,11 @@ const FREE_TIER = {
   decision_c: { status: "ELIGIBLE_IF_ACTIVATED", problems: [], data_classes: ["PUBLIC"], domains: ["PERSONAL"], note: "Rute gratis di pool WORKER (keputusan C)" },
 };
 
+const ZEN_REF = "workers/opencode-zen";
+const KEYED = { state: "PRESENT", ref: ZEN_REF, reason: null, domain: "PERSONAL" };
 const TRIAL = route({
   route_key: "opencode-zen/trial", display_name: "Trial Model", status: "TRIAL", mode: "LIVE", priority: 99,
-  active_decision: { id: "d-1", kind: "TRIAL", expires_at: "2026-11-15T00:00:00Z" },
+  active_decision: { id: "d-1", kind: "TRIAL", expires_at: "2026-11-15T00:00:00Z" }, credential: KEYED,
 });
 const CAND1 = route({ route_key: "opencode-zen/c1", display_name: "Candidate One", priority: 1 });
 const FREE = route({ route_key: "openrouter/x:free", display_name: "Free Candidate", priority: 2, is_free: "YES", effectively_free: true, free_tier: FREE_TIER });
@@ -180,5 +183,115 @@ describe("Models & Routes: honest active status (R28)", () => {
     fireEvent.click(await screen.findByText("Free Candidate"));
     const block = await screen.findByTestId("free-tier-block");
     expect(within(block).getAllByText("Batas harian tercapai").length).toBeGreaterThan(0);
+  });
+});
+
+// Round 3 (incident 2026-10-28): a TRIAL route with an ACTIVE decision but no stored key is rejected by the router
+// (CAN_RUN_WORKER BLOCKED) while the page drew it green, counted it and sorted it first.
+describe("Models & Routes: a route the router cannot authenticate is not active (R28 round 3)", () => {
+  const keyless = route({
+    route_key: "opencode-zen/keyless", display_name: "Keyless Trial", status: "TRIAL", mode: "LIVE", priority: 0,
+    active_decision: { id: "d-k", kind: "TRIAL", expires_at: "2026-11-15T00:00:00Z" },
+    credential: { state: "MISSING", ref: ZEN_REF, reason: `credential ${ZEN_REF} not stored: aeos secrets set ${ZEN_REF}`, domain: "PERSONAL" },
+  });
+
+  it("bite: a keyless TRIAL route is not counted, warns 'kunci belum disimpan' and the drawer names the remedy", async () => {
+    mountWith([keyless, CAND1], { total: 2, approved: 0 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 2 rute");
+    expect(screen.queryByText("Aktif · TRIAL")).toBeNull();
+    const rows = screen.getAllByRole("row").slice(1);
+    const row = rows.find((r) => within(r).queryByText("Keyless Trial"))!;
+    expect(within(row).getByText("Aktif, tidak dapat dipakai: kunci belum disimpan")).toBeInTheDocument();
+    expect(within(row).queryByTestId("route-valid-until")).toBeNull();
+    fireEvent.click(within(row).getByText("Keyless Trial"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute opencode-zen\/keyless/ });
+    const remedy = await within(drawer).findByTestId("route-credential-remedy");
+    expect(remedy).toHaveTextContent(`aeos secrets set ${ZEN_REF}`);
+    expect(remedy).toHaveTextContent("kunci belum disimpan");
+  });
+
+  it("bite: a keyless TRIAL route is not sorted before an active one", async () => {
+    mountWith([keyless, CAND1, TRIAL], { total: 3, approved: 1 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 1 dari 3 rute");
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(within(rows[0]).getByText("Trial Model")).toBeInTheDocument();
+    expect(within(rows[1]).getByText("Keyless Trial")).toBeInTheDocument();
+  });
+
+  it("near miss: the same route with its key stored is active", async () => {
+    mountWith([{ ...keyless, credential: { ...KEYED } }, CAND1], { total: 2, approved: 1 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 1 dari 2 rute");
+    expect(screen.getByText("Aktif · TRIAL")).toBeInTheDocument();
+    expect(screen.queryByTestId("route-credential-blocked")).toBeNull();
+  });
+
+  it("a local route that needs no key (NOT_NEEDED) is active", async () => {
+    const local = { ...keyless, route_key: "local/q", pool: "LOCAL", provider: "local", display_name: "Local Trial",
+      credential: { state: "NOT_NEEDED", ref: null, reason: null, domain: "PERSONAL" } };
+    mountWith([local, CAND1], { total: 2, approved: 1 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 1 dari 2 rute");
+    expect(screen.getByText("Aktif · TRIAL")).toBeInTheDocument();
+  });
+
+  it("bite: a sealed store (UNAVAILABLE) warns 'vault terkunci' with the unseal remedy, never active", async () => {
+    const sealed = { ...keyless, display_name: "Sealed Trial", credential: { state: "UNAVAILABLE", ref: ZEN_REF,
+      reason: `credential ${ZEN_REF} cannot be checked: secret store unavailable (sealed, unreachable or unknown; fail closed)`, domain: "PERSONAL" } };
+    mountWith([sealed], { total: 1, approved: 0 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 1 rute");
+    expect(screen.getByText("Aktif, tidak dapat dipakai: vault terkunci")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Sealed Trial"));
+    const remedy = await screen.findByTestId("route-credential-remedy");
+    expect(remedy).toHaveTextContent("aeos vault unseal");
+  });
+
+  it("fails closed on an older server that sends no credential block", async () => {
+    const { credential: _drop, ...noBlock } = TRIAL as Record<string, unknown>;
+    void _drop;
+    mountWith([noBlock], { total: 1, approved: 1 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 1 rute");
+    expect(screen.queryByText("Aktif · TRIAL")).toBeNull();
+  });
+});
+
+describe("Models & Routes: header vs filters (R28 round 3)", () => {
+  it("bite: with Status=CANDIDATE the registry-wide counts stay and the label adds the rows shown", async () => {
+    mountWith([CAND1, FREE, TRIAL], { total: 3, approved: 1 });
+    const summary = await screen.findByTestId("routes-active-summary");
+    expect(summary).not.toHaveTextContent("ditampilkan"); // near miss: no filter, no suffix
+    fireEvent.change(screen.getByLabelText("Filter status"), { target: { value: "CANDIDATE" } });
+    expect(summary).toHaveTextContent("Aktif: 1 dari 3 rute (TRIAL/APPROVED) · sisanya katalog kandidat · ditampilkan: 2");
+    expect(summary.getAttribute("title")).toContain("mengabaikan filter");
+    expect(screen.getAllByRole("row").slice(1)).toHaveLength(2);
+  });
+});
+
+describe("Models & Routes: one refetch at the nearest decision expiry (R28 round 3)", () => {
+  it("nextExpiryRefetchMs picks the nearest future expiry and clamps to [1 s, 24 h]", () => {
+    const now = Date.parse("2026-10-28T00:00:00Z");
+    const at = (iso: string | null) => ({ active_decision: iso ? { id: "d", kind: "TRIAL", expires_at: iso } : null });
+    expect(nextExpiryRefetchMs([at(null), at("2026-10-28T00:00:30Z"), at("2026-10-28T00:10:00Z")], now)).toBe(31_000);
+    expect(nextExpiryRefetchMs([at("2026-10-27T23:00:00Z"), at(null)], now)).toBeNull(); // past or none: no timer
+    expect(nextExpiryRefetchMs([at("2026-10-28T00:00:00.100Z")], now)).toBe(1_100);
+    expect(nextExpiryRefetchMs([at("2026-12-01T00:00:00Z")], now)).toBe(EXPIRY_REFETCH_MAX_MS);
+  });
+
+  afterEach(() => vi.useRealTimers());
+
+  it("bite: the timer refetches the routes at the expiry, not before; unmount clears it", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-10-28T00:00:00Z"));
+    const soon = { ...TRIAL, active_decision: { id: "d-1", kind: "TRIAL", expires_at: "2026-10-28T00:00:30Z" } };
+    const view = mountWith([soon, CAND1], { total: 2, approved: 1 });
+    await screen.findByTestId("routes-active-summary");
+    const fetches = () => (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.filter((c) => c[0] === "/api/routes").length;
+    const before = fetches();
+    await act(async () => void (await vi.advanceTimersByTimeAsync(20_000)));
+    expect(fetches()).toBe(before); // not before the expiry
+    await act(async () => void (await vi.advanceTimersByTimeAsync(12_000)));
+    expect(fetches()).toBe(before + 1); // exactly one refetch at expires_at (+1 s margin)
+    view.unmount();
+    const after = fetches();
+    await act(async () => void (await vi.advanceTimersByTimeAsync(EXPIRY_REFETCH_MAX_MS)));
+    expect(fetches()).toBe(after);
   });
 });

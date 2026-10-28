@@ -417,6 +417,8 @@ Copy the route key and its config hash from the `routes list` output.
   `CAN_RUN_WORKER`; with no eligible route left it stays MISSING. Either store the key
   (`./aeos secrets set "<ref>"`) or disable the route
   (`./aeos routes disable "<route_key>" --reason "<why>"`).
+  *Model & Rute* shows such a route as "Aktif, tidak dapat dipakai: kunci belum disimpan" (or "... vault terkunci"
+  while the store is sealed), never green and not counted in "Aktif: N"; its drawer shows the command to run.
 * **Paid route:** first record a BUDGET decision on *Keputusan* → *Catat keputusan manusia* (Jenis keputusan:
   BUDGET), then add `--budget-decision <id>`.
 * **Free OpenCode Zen routes:** they need the client-terms decision in [2.12](#212-smaller-open-decisions) first.

@@ -1,12 +1,13 @@
 import { RefreshCw } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "../../auth/AuthContext";
 import { StatusBadge } from "../../components/StatusBadge";
 import { Button, Card, EmptyState, ErrorBox, Field, Freshness, Loading, Mono, Notice, PageHeader, Table, inputClass } from "../../components/ui";
 import { absoluteTime, relativeTime } from "../../lib/format";
 import { CopyCommand } from "../integrations/CopyCommand";
 import { useRefreshCatalog, useRoutes } from "./api";
-import { Badge, FreeTierBadge, RouteStatusBadge, isActiveRoute } from "./badges";
+import { Badge, FreeTierBadge, RouteStatusBadge, isActiveRoute, nextExpiryRefetchMs } from "./badges";
 import { RouteDrawer, freeLabel } from "./RouteDrawer";
 import { SupervisorSection } from "./SupervisorSection";
 import { POOL_LABELS, type RouteItem } from "./types";
@@ -16,6 +17,7 @@ const STATUSES = ["CANDIDATE", "UNTESTED", "TRIAL", "APPROVED", "DISABLED"];
 
 export default function ModelsPage() {
   const { isAdmin } = useAuth();
+  const qc = useQueryClient();
   const routes = useRoutes();
   const refresh = useRefreshCatalog();
   const [pool, setPool] = useState("");
@@ -27,13 +29,14 @@ export default function ModelsPage() {
 
   // The table never shows SUPERVISOR routes (they have their own section). The header counts exactly that population
   // with the same isActiveRoute rule the rows use, so "Aktif: N dari M" can never mix pools; the API `counts` include
-  // SUPERVISOR routes and are therefore not used here.
+  // SUPERVISOR routes and are therefore not used here. N and M are registry-wide (they answer "how many are active"),
+  // so with a Pool/Status/Domain filter the header also says how many rows the table shows.
   const registry = useMemo(() => (routes.data?.items ?? []).filter((r) => r.pool !== "SUPERVISOR"), [routes.data]);
   const total = registry.length;
   const active = registry.filter(isActiveRoute).length;
 
-  // Active routes (TRIAL/APPROVED) first, so what is switched on is not buried under 30+ catalogue rows; the API
-  // order (pool, priority) is kept inside each group.
+  // Active routes (TRIAL/APPROVED with a usable key) first, so what is switched on is not buried under 30+ catalogue
+  // rows; the API order (pool, priority) is kept inside each group.
   const items = useMemo(
     () =>
       registry
@@ -43,6 +46,20 @@ export default function ModelsPage() {
         .map(({ r }) => r),
     [registry, pool, status, domain],
   );
+
+  // No event fires at the moment a decision expires (the server marks it EXPIRED only when it next reconciles), so
+  // one refetch is scheduled at the nearest expiry among the displayed rows; cleared on unmount or when the rows change.
+  useEffect(() => {
+    const wait = nextExpiryRefetchMs(items, Date.now());
+    if (wait === null) return;
+    const timer = setTimeout(() => {
+      void qc.invalidateQueries({ queryKey: ["routes"] });
+      void qc.invalidateQueries({ queryKey: ["route"] });
+    }, wait);
+    return () => clearTimeout(timer);
+  }, [items, qc]);
+
+  const filtered = !!(pool || status || domain);
 
   const columns = [
     { header: "Pool", cell: (r: RouteItem) => <span className="text-xs">{POOL_LABELS[r.pool] ?? r.pool}</span> },
@@ -156,8 +173,17 @@ export default function ModelsPage() {
           selalu ditolak sampai otorisasi perusahaan tercatat; tidak ada fallback berbayar otomatis.
         </Notice>
         {routes.data && (
-          <p className="mt-3 text-sm font-medium" data-testid="routes-active-summary" title="Rute pekerja di tabel ini (pengawas Max dihitung di bagiannya sendiri)">
+          <p
+            className="mt-3 text-sm font-medium"
+            data-testid="routes-active-summary"
+            title={
+              "Semua rute pekerja di registry (pengawas Max dihitung di bagiannya sendiri); aktif = TRIAL/APPROVED dengan " +
+              "keputusan ACTIVE dan kunci tersimpan (atau tanpa kunci)" +
+              (filtered ? ". Angka ini mengabaikan filter; 'ditampilkan' = baris tabel untuk filter ini" : "")
+            }
+          >
             Aktif: {active} dari {total} rute (TRIAL/APPROVED) · sisanya katalog kandidat
+            {filtered && ` · ditampilkan: ${items.length}`}
           </p>
         )}
         {refresh.error && <div className="mt-3"><ErrorBox error={refresh.error} /></div>}

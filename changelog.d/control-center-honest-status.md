@@ -18,3 +18,16 @@
   proposal and policy events refresh inventory, routes and decisions; `route.*` routes and inventory; `inventory.*`
   inventory; a task heartbeat nothing. Inventory enablement is unchanged (master section 38: a TRIAL decision is not an
   enablement basis). E2 (unit and vitest on macOS arm64); the live Control Center on a real host is NOT-PROVEN.
+- **A route the router cannot authenticate is not shown as active (R28, incident 2026-10-28).** A TRIAL route with an
+  ACTIVE decision but no stored key was green "Aktif · TRIAL", counted and sorted first while Doctor
+  `CAN_RUN_WORKER` was BLOCKED. `/api/routes` items carry a `credential` block (`state` PRESENT, MISSING, UNAVAILABLE
+  or NOT_NEEDED, `ref`, `reason`, `domain`) from the routing service's own credential rules, one secret-store status
+  lookup per reference and list call (metadata only, never a value, never a provider call; an OFFICE session never
+  looks up a PERSONAL reference); `counts.approved` and the Models page count a route as active only with PRESENT or
+  NOT_NEEDED and otherwise show "Aktif, tidak dapat dipakai: kunci belum disimpan" (or "... vault terkunci"), not
+  sorted first, with `aeos secrets set <ref>` (or `aeos vault unseal`) in the drawer. `secret.presence_changed` and
+  `secret.store_changed` (source `secrets`) now refresh routes, route detail and Readiness; the Models page refetches
+  once at the nearest decision expiry (clamped to 1 s to 24 h; no event fires at the moment a decision expires, and a
+  test pins one `decision.expired` per decision when the server reconciles); with a Pool/Status/Domain filter the
+  registry-wide header adds " · ditampilkan: X". E2 (pytest and vitest on macOS arm64); the live Control Center on a
+  real host, Windows and macOS Intel are NOT-PROVEN.

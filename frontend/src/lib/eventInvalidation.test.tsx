@@ -4,7 +4,8 @@ import { afterEach, beforeEach, vi } from "vitest";
 import type { AeosEvent } from "./events";
 
 // The shared event -> query invalidation map (R28). A decision/proposal/policy event refreshes inventory, routes and
-// decisions; route.* refreshes routes and inventory; inventory.* refreshes inventory; a task heartbeat nothing.
+// decisions; route.* refreshes routes and inventory; inventory.* refreshes inventory; a secret presence/store change
+// refreshes routes and readiness; a task heartbeat nothing.
 let handler: ((e: AeosEvent) => void) | undefined;
 vi.mock("./events", () => ({
   useEventStream: (h: (e: AeosEvent) => void) => {
@@ -32,6 +33,14 @@ describe("queryKeysForEvent", () => {
     expect(flat("inventory", "inventory.reconcile.completed")).toEqual(["inventory"]);
     expect(flat("inventory", "inventory.observation")).toEqual(["inventory"]);
     expect(flat("claude_bridge", "claude.capability_tested")).toEqual(expect.arrayContaining(["claude-status"]));
+  });
+
+  it("secret presence/store events (source 'secrets') invalidate routes, route detail and readiness", () => {
+    for (const kind of ["secret.presence_changed", "secret.store_changed"]) {
+      expect(flat("secrets", kind)).toEqual(expect.arrayContaining(["routes", "route", "doctor", "doctor-capabilities"]));
+    }
+    expect(flat("secrets", "secret.read")).toEqual([]); // near miss: another secrets kind maps to nothing
+    expect(flat("runner", "secret.presence_changed")).toEqual([]); // near miss: the kind from another source
   });
 
   it("a task heartbeat or run event invalidates nothing", () => {
@@ -74,6 +83,17 @@ describe("useEventInvalidation", () => {
     act(() => void vi.advanceTimersByTime(1000));
     expect(keysOf(spy)).toEqual(expect.arrayContaining(["inventory", "routes", "decisions"]));
     expect(spy.mock.calls.some((c) => JSON.stringify((c[0] as { queryKey: unknown }).queryKey) === JSON.stringify(["inventory"]))).toBe(true);
+  });
+
+  it("a secret.presence_changed event invalidates ['routes']; a task heartbeat does not", () => {
+    const spy = mount();
+    act(() => handler?.(ev("runner", "run.heartbeat")));
+    act(() => void vi.advanceTimersByTime(1000));
+    expect(spy).not.toHaveBeenCalled();
+    act(() => handler?.(ev("secrets", "secret.presence_changed")));
+    act(() => void vi.advanceTimersByTime(1000));
+    expect(spy.mock.calls.some((c) => JSON.stringify((c[0] as { queryKey: unknown }).queryKey) === JSON.stringify(["routes"]))).toBe(true);
+    expect(keysOf(spy)).toEqual(expect.arrayContaining(["route", "doctor", "doctor-capabilities"]));
   });
 
   it("a burst is coalesced: each query is invalidated once", () => {

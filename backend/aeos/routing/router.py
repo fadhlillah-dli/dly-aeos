@@ -190,8 +190,36 @@ def _subscription_view(session: Session, r: ModelRoute, principal: Principal) ->
     return status if cross else cost.subscription_without_figures(status)
 
 
+def _credential_domain(r: ModelRoute, principal: Principal) -> str:
+    """The domain the credential block is evaluated for: the session's selected domain (the router only serves the
+    domain a task carries, and another domain's secret references are never looked up from this session); with no
+    selected domain, the first of the route's domains the principal may access (PERSONAL when none is listed)."""
+    active = getattr(principal, "active_domain", None)
+    if active is not None:
+        return Domain(active).value
+    can = getattr(principal, "can_access_domain", None)
+    for d in r.eligible_domains or []:
+        if d in {x.value for x in Domain} and (not callable(can) or can(d)):
+            return str(d)
+    return Domain.PERSONAL.value
+
+
+def _credential_block(r: ModelRoute, principal: Principal, states: dict[str, str] | None) -> dict[str, Any]:
+    return service.credential_view(r, domain=_credential_domain(r, principal), states=states)
+
+
+def _counts_as_active(item: dict[str, Any]) -> bool:
+    """The router can use the route: status TRIAL/APPROVED, an ACTIVE decision bound to the current config hash AND a
+    usable credential (stored key, or none needed). The status alone, or a decision without its key, would count a
+    route the router rejects (R28: CAN_RUN_WORKER BLOCKED while the UI said active)."""
+    return (item["status"] in {"APPROVED", "TRIAL"} and bool(item["active_decision"])
+            and item["credential"]["state"] in service.CREDENTIAL_USABLE)
+
+
 def route_view(session: Session, r: ModelRoute, principal: Principal,
-               runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+               runtime: dict[str, Any] | None = None,
+               credential_states: dict[str, str] | None = None) -> dict[str, Any]:
+    """*credential_states* memoizes the secret-store status lookups of one list call (one per reference)."""
     if r.config_hash is None:
         r.config_hash = service.compute_config_hash(r)
     runtime = runtime if runtime is not None else service.runtime_context()
@@ -213,6 +241,9 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "priority": r.priority, "config_hash": r.config_hash, "config_changed_at": _iso(r.config_changed_at),
         "eval_summary": _eval_summary(r), "last_used": _last_used(session, r.route_key, principal),
         "active_decision": _active_decision_view(session, r),
+        # metadata only (stored or not, never the value; no provider call): the router rejects a route whose key is
+        # not stored or whose store cannot answer, so the dashboard must not show it as usable
+        "credential": _credential_block(r, principal, credential_states),
         "quota": ({"state": "EXHAUSTED", "scope": q.scope, "resets_at": _iso(q.resets_at), "source": q.source}
                   if q else {"state": "UNKNOWN_OR_OK", "note": "tidak ada observasi kuota habis"}),
         "source_refs": r.source_refs, "notes": r.notes,
@@ -262,7 +293,8 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
     if domain:
         rows = [r for r in rows if domain in (r.eligible_domains or [])]
     runtime = service.runtime_context()
-    items = [route_view(db, r, principal, runtime) for r in rows]
+    credential_states: dict[str, str] = {}  # ONE secret-store status lookup per reference for this list call
+    items = [route_view(db, r, principal, runtime, credential_states) for r in rows]
     last = catalog.latest_refresh(db)
     checks = [r.pricing_checked_at for r in rows if r.pricing_checked_at is not None]
     return {
@@ -276,10 +308,10 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
         # relabel the registry as live runtime data (§37, §50 'Katalog blueprint ... belum diprobe')
         "mode": "LIVE" if rows and all(r.mode == "LIVE" for r in rows) else "DESIGN",
         # "approved" = routes the router can use: status TRIAL/APPROVED AND an ACTIVE decision bound to the current config
-        # hash (find_route_decision). Nothing resets ModelRoute.status when a decision expires or is invalidated, so the
-        # status alone would count a route the router rejects (R28: the UI must not claim more than the data supports).
-        "counts": {"total": len(items),
-                   "approved": sum(1 for i in items if i["status"] in {"APPROVED", "TRIAL"} and i["active_decision"])},
+        # hash (find_route_decision) AND a usable credential (stored key or none needed). Nothing resets ModelRoute.status
+        # when a decision expires or is invalidated or a key is missing, so the status alone would count a route the
+        # router rejects (R28: the UI must not claim more than the data supports).
+        "counts": {"total": len(items), "approved": sum(1 for i in items if _counts_as_active(i))},
     }
 
 

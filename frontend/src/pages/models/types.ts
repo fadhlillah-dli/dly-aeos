@@ -138,6 +138,11 @@ export interface RouteItem {
     rollback_target?: { action: string; decision_id: string | null; config_hash: string | null; note?: string } | null;
   } | null;
   quota: { state: string; scope?: string; resets_at?: string | null; source?: string; note?: string };
+  /** What the router's credential rules say for the session's domain (metadata only: stored or not, never the value).
+   * Only PRESENT (key stored) and NOT_NEEDED (local, loopback, native) let the router use the route; MISSING names the
+   * reference to store (`aeos secrets set <ref>`) or a path problem; UNAVAILABLE = the store is sealed/unreachable.
+   * Absent on older servers: then a route is never shown as active (fail closed). */
+  credential?: RouteCredential;
   source_refs: string[];
   notes: string;
   // §23 per-route assessment (absent on older servers)
@@ -167,6 +172,13 @@ export interface RouteItem {
   /** OpenRouter `:free` route only (null for every other route): account-wide free-model limits, this instance's count
    * and, for a WORKER route, the decision C eligibility. Absent on older servers. */
   free_tier?: FreeTierView | null;
+}
+
+export interface RouteCredential {
+  state: "PRESENT" | "MISSING" | "UNAVAILABLE" | "NOT_NEEDED" | string;
+  ref: string | null;
+  reason: string | null;
+  domain: string;
 }
 
 export interface FreeTierView {

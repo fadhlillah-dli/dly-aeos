@@ -20,7 +20,9 @@ from tests.unit.test_routing_fakes import OWNER_CLIENT_TERMS as CT
 from tests.unit.test_routing_fakes import install_fakes
 
 
-def test_routes_list_counts_the_active_route_and_carries_its_expiry(personal_client: AuthedClient, db, monkeypatch):
+def test_routes_list_counts_the_active_route_and_carries_its_expiry(personal_client: AuthedClient, db, monkeypatch,
+                                                                    worker_keys):
+    # worker_keys: the route's key is stored (a keyless route is not counted: test_routing_credential_view.py)
     install_fakes(monkeypatch)
     _seed(db)
     before = personal_client.get("/api/routes").json()
@@ -39,7 +41,8 @@ def test_routes_list_counts_the_active_route_and_carries_its_expiry(personal_cli
     assert candidates and all(i["status"] != "TRIAL" and i["active_decision"] is None for i in candidates)
 
 
-def test_route_whose_trial_decision_expired_is_not_counted_active(personal_client: AuthedClient, db, monkeypatch):
+def test_route_whose_trial_decision_expired_is_not_counted_active(personal_client: AuthedClient, db, monkeypatch,
+                                                                  worker_keys):
     """Review of dea380c: nothing resets ModelRoute.status when its decision stops being ACTIVE, so a TRIAL route can
     keep status TRIAL with active_decision null. It must not be counted as active (the router rejects it)."""
     from datetime import timedelta

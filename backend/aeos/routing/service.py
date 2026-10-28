@@ -539,6 +539,36 @@ def credential_presence_rejections(route: ModelRoute, *, domain: str,
     return [] if problems or not refs else _presence_rejections(refs, states)
 
 
+# Credential block of the route view (R28 round 3): what the router's credential rules say for one domain.
+VIEW_CREDENTIAL_PRESENT = "PRESENT"
+VIEW_CREDENTIAL_MISSING = "MISSING"
+VIEW_CREDENTIAL_UNAVAILABLE = "UNAVAILABLE"
+VIEW_CREDENTIAL_NOT_NEEDED = "NOT_NEEDED"
+CREDENTIAL_USABLE = frozenset({VIEW_CREDENTIAL_PRESENT, VIEW_CREDENTIAL_NOT_NEEDED})
+
+
+def credential_view(route: ModelRoute, *, domain: str, states: dict[str, str] | None = None) -> dict[str, Any]:
+    """{state, ref, reason, domain} for *route* in *domain*, built from the same rules as ``credential_rejections``
+    (the router rejects every state but PRESENT and NOT_NEEDED). Metadata only: a status lookup of the secret store
+    (memoized in *states*, one per reference and call), never the value, never a provider call. MISSING carries the
+    router's reason (``credential <ref> not stored: aeos secrets set <ref>`` or a path problem, then ref may be None);
+    UNAVAILABLE means the store is sealed, unreachable or unknown (fail closed)."""
+    problems, refs = _credential_paths(route, domain=domain)
+    if problems:
+        configured = (route.mode_params or {}).get("credential_ref")
+        return {"state": VIEW_CREDENTIAL_MISSING, "ref": str(configured) if configured else None,
+                "reason": problems[0], "domain": domain}
+    if not refs:
+        return {"state": VIEW_CREDENTIAL_NOT_NEEDED, "ref": None, "reason": None, "domain": domain}
+    states = {} if states is None else states
+    for ref in refs:
+        if credential_state(ref, states) == CREDENTIAL_PRESENT:
+            return {"state": VIEW_CREDENTIAL_PRESENT, "ref": ref, "reason": None, "domain": domain}
+    reason = _presence_rejections(refs, states)[0]  # every lookup is memoized: no second store call
+    state = VIEW_CREDENTIAL_UNAVAILABLE if store_unavailable_credential_ref(reason) else VIEW_CREDENTIAL_MISSING
+    return {"state": state, "ref": refs[0], "reason": reason, "domain": domain}
+
+
 # ------------------------------------------------------------------------------ runtime binding (§23)
 
 
