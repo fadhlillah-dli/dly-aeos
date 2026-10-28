@@ -11,6 +11,8 @@
 * A binary probe entry with ``version_args: []`` is presence only (serena, goose, promptfoo, toolhive): their
   version call writes state or reaches the network, so the binary is located and never run.
 * A candidate nobody admitted is never offered RUN_RECONCILE or REFRESH as its next action.
+* A component admitted only by a decision reconcile does not follow (OFFICE) is OUTSIDE_PROBE_DOMAIN, never the
+  unsatisfiable INSTALL_TRIAL, and its installation reason does not deny the admission.
 
 Every probe runs against the fake runner: no test starts a real binary on the host.
 """
@@ -528,3 +530,39 @@ def test_a_personal_trial_does_not_change_the_office_next_action(seeded, owner):
     seeded.commit()
     assert _next(seeded, "serena") == "RUN_RECONCILE"  # the PERSONAL view did change
     assert _next(seeded, "serena", "OFFICE") == before == "REVIEW_CANDIDATE"
+
+
+def test_an_office_admission_is_outside_the_probe_domain_not_an_install_request(seeded, owner):
+    """An OFFICE TRIAL admits serena in the OFFICE view, but reconcile admits on PERSONAL/platform decisions only, so
+    no run, Refresh or poll tick probes it: INSTALL_TRIAL ("pasang lalu probe") would be unsatisfiable, and the
+    installation reason must not say there is no TRIAL/PROMOTION decision while the admission is TRIAL_APPROVED."""
+    from aeos.inventory import views
+    from aeos.inventory.reconcile import admitted_targets
+
+    personal_before = _next(seeded, "serena")
+    _decide(seeded, owner, _proposal(seeded, candidates=["serena"], domain="OFFICE"), "TRIAL", domain="OFFICE")
+    seeded.commit()
+    comps = {c.component_id: c for c in seeded.scalars(select(ComponentReference))}
+    assert "serena" not in {c.component_id for c in admitted_targets(seeded, comps)}  # reconcile never probes it
+    detail = views.component_detail(seeded, "serena", domain="OFFICE")
+    dims = detail["lifecycle"]
+    assert dims["admission"]["value"] == "TRIAL_APPROVED"
+    reason = dims["installation"]["reason"]
+    assert "tanpa keputusan TRIAL/PROMOTION" not in reason, f"admitted row says it has no admission: {reason!r}"
+    assert "di luar domain probe" in reason, reason
+    for code in (detail["next_action"]["code"], _row_next(seeded, "serena", "OFFICE")):
+        assert code == "OUTSIDE_PROBE_DOMAIN", f"OFFICE-admitted serena is asked for {code}, which no reconcile covers"
+    # the PERSONAL view is unchanged by the OFFICE decision (§23)
+    assert _next(seeded, "serena") == personal_before == "REVIEW_CANDIDATE"
+
+
+def test_a_personal_admission_in_the_personal_view_still_asks_for_a_reconcile_not_outside_domain(seeded, owner):
+    """Near miss: an admission reconcile follows keeps RUN_RECONCILE and the plain 'belum diprobe' reason."""
+    from aeos.inventory import views
+
+    _decide(seeded, owner, _proposal(seeded, candidates=["serena"]), "TRIAL")
+    seeded.commit()
+    detail = views.component_detail(seeded, "serena", domain="PERSONAL")
+    dims = detail["lifecycle"]
+    assert detail["next_action"]["code"] == "RUN_RECONCILE"
+    assert "di luar domain probe" not in dims["installation"]["reason"]

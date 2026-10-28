@@ -41,7 +41,7 @@ from aeos.inventory.observations import (
     latest_observations,
 )
 from aeos.inventory.pins import select_digest
-from aeos.inventory.reconcile import is_probeable, latest_run, run_view, unadmitted_probeable
+from aeos.inventory.reconcile import ADMITTED_STATES, is_probeable, latest_run, run_view, unadmitted_probeable
 from aeos.models.inventory import CheckResult, ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.inventory_ext import DriftFinding
 
@@ -227,6 +227,10 @@ def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], Com
         out["installation"] = _dim("NOT_APPLICABLE", "layanan eksternal/rujukan; tidak dipasang lokal", "manifest")
     elif not is_probeable(comp):
         out["installation"] = _dim("UNKNOWN", str(probe.get("reason") or "tidak diprobe"), "manifest")
+    elif unadmitted and out["admission"]["value"] in ADMITTED_STATES:
+        # admitted in this view (e.g. an OFFICE decision), but reconcile admits on PERSONAL/platform decisions only
+        out["installation"] = _dim("UNKNOWN", "admission di luar domain probe: reconcile hanya mengikuti keputusan "
+                                   "PERSONAL/platform; tidak diprobe", "decision registry")
     elif unadmitted:
         out["installation"] = _dim("UNKNOWN", "kandidat belum di-admit (tanpa keputusan TRIAL/PROMOTION); tidak "
                                    "diprobe sebelum admission", "decision registry")
@@ -297,6 +301,12 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
     if "installed-but-disabled" in classes:
         return act("DECIDE_ENABLEMENT", "Terpasang tetapi tidak aktif: putuskan enable atau biarkan",
                    link=f"/proposals?component={comp.component_id}")
+    if unadmitted and dims["admission"]["value"] in ADMITTED_STATES \
+            and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):
+        # admitted in this view by a decision reconcile does not follow (e.g. OFFICE): no reconcile, Refresh or
+        # poll tick probes it, so "pasang lalu probe" would be unsatisfiable here
+        return act("OUTSIDE_PROBE_DOMAIN", "Admission di luar domain probe: reconcile tidak mengamati instalasi "
+                   "komponen ini; periksa instalasi secara manual", link="/decisions")
     if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and not is_probeable(comp) \
             and inst["value"] == "UNKNOWN":
         # admitted but the manifest probe is none: reconcile can never observe it, so "pasang lalu probe" would be an

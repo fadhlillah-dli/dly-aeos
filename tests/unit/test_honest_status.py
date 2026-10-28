@@ -125,3 +125,20 @@ def test_admitted_without_probe_is_asked_for_a_probe_not_an_install(admission):
     assert _code(admission, "UNKNOWN") == "INSTALL_TRIAL"
     assert views.next_action(_comp(probe={}), _dims("DISCOVERED", "UNKNOWN"), [], {"status": "NO_PIN"})["code"] \
         != "ADD_PROBE"
+
+
+@pytest.mark.parametrize("admission", ["TRIAL_APPROVED", "APPROVED"])
+def test_admitted_outside_the_probe_domain_is_not_asked_to_install_and_probe(admission):
+    """An admission reconcile does not follow (an OFFICE decision, ``unadmitted``) can never be probed, so the
+    satisfiable step is a manual check, not INSTALL_TRIAL "pasang lalu probe"."""
+    dims = _dims(admission, "UNKNOWN")
+    dims["installation"] = {"value": "UNKNOWN", "observation_id": None, "stale": False}  # never probed
+    action = views.next_action(_comp(), dims, [], {"status": "NO_PIN"}, unadmitted=True)
+    assert action["code"] == "OUTSIDE_PROBE_DOMAIN", f"unprobeable admission is asked for {action['code']}"
+    assert action["command"] is None
+    # near misses: the same admission that reconcile follows still asks to install; an unadmitted candidate under
+    # review is still a review, not an outside-domain notice
+    assert views.next_action(_comp(), dims, [], {"status": "NO_PIN"})["code"] == "RUN_RECONCILE"
+    assert _code(admission, "UNKNOWN") == "INSTALL_TRIAL"
+    assert views.next_action(_comp("CANDIDATE"), _dims("UNDER_REVIEW", "UNKNOWN"), [], {"status": "NO_PIN"},
+                             unadmitted=True)["code"] == "REVIEW_CANDIDATE"
