@@ -34,7 +34,8 @@ _NAMED_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     # Vault/OpenBao service, batch, recovery tokens
     ("vault_token", re.compile(r"(?<![A-Za-z0-9])hv[sbr]\.[A-Za-z0-9_\-]{24,}")),
     # Vault/OpenBao tokens (older and short forms). Not glued to a preceding letter or digit, so code such as
-    # ``this.handleSubmitButtonClickedEvent`` or ``lib.someLongFunctionNameHere`` is not a token (2026-10-28).
+    # ``this.handleSubmitButtonClickedEvent`` or ``lib.someLongFunctionNameHere`` is not a token (2026-10-28); a body
+    # that reads as an identifier (``s.registerServiceWithHealthCheck``) is skipped by the high-confidence scan.
     ("vault_token_short", re.compile(r"(?<![A-Za-z0-9])(?:hvs|s|b)\.[A-Za-z0-9]{24,}")),
     ("openbao_recovery_token", re.compile(r"(?<![A-Za-z0-9.])r\.[A-Za-z0-9]{24,}")),  # OpenBao recovery token (short)
     # Vault/OpenBao `operator init` output. The label is required, so a bare base64 string (a lockfile
@@ -153,6 +154,43 @@ _PREFILTER: dict[str, tuple[str, ...]] = {
 }
 
 
+# Matches of these kinds that are ordinary code or encoded data, not a credential (ADR-0127, 2026-10-28). Only the
+# high-confidence scan (the broker's outgoing guard, contains_high_confidence_secret) skips them: redaction of logs and
+# errors keeps masking the wider shape, and the binary scan keeps the unbounded form.
+_CODE_OR_DATA_LOOKALIKES = frozenset({"vault_token_short", "openbao_recovery_token", "google_refresh_token",
+                                      "google_api_key"})
+# Characters of standard and URL-safe base64. A Google key or refresh token glued to one of them sits inside a base64
+# run (an image data URI, a lockfile ``sha512-`` integrity hash), where ``AIza`` or ``1//`` occur by chance.
+_BASE64_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/_-")
+_IDENTIFIER_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+_IDENTIFIER_MEAN_WORD_LENGTH = 3.4
+
+
+def _reads_as_identifier(body: str) -> bool:
+    """True when *body* splits into camelCase or snake_case words of mean length 3.4 or more, as a member or variable
+    name does (registerServiceWithHealthCheck 6.0, isInCurrentRuleReSyncSet 3.4; the shortest of 3,909 long member
+    names measured in the frontend and Python dependencies). A random token body falls apart into one- and
+    two-character pieces: about 0.5% of random 24-character bodies, 0.06% of 40-character ones and none of 100
+    reach 3.4 (the ADR-0127 residual). Linear in the length of *body*."""
+    words = _IDENTIFIER_WORD.findall(body)
+    return bool(words) and sum(map(len, words)) >= _IDENTIFIER_MEAN_WORD_LENGTH * len(words)
+
+
+def _glued_to_base64(text: str, start: int, end: int) -> bool:
+    return (start > 0 and text[start - 1] in _BASE64_CHARS) or (end < len(text) and text[end] in _BASE64_CHARS)
+
+
+def _is_code_or_data(kind: str, text: str, start: int, end: int) -> bool:
+    """A match of a _CODE_OR_DATA_LOOKALIKES kind that is not a credential: ``s.registerServiceWithHealthCheck`` (a Go
+    receiver ``s``, ``b``, ``r``), ``total1//itemsPerPage`` (floor division), ``AIza``/``1//`` inside base64."""
+    if kind == "google_api_key":
+        return _glued_to_base64(text, start, end)
+    if kind == "google_refresh_token":
+        return _glued_to_base64(text, start, end) or _reads_as_identifier(text[start + 3:end])
+    dot = text.index(".", start, end)  # vault_token_short, openbao_recovery_token: <prefix>.<body>
+    return text[start:dot] != "hvs" and _reads_as_identifier(text[dot + 1:end])
+
+
 @dataclass(frozen=True)
 class SecretFinding:
     """One high-confidence match: its detector kind and its span in the scanned text (never the text itself)."""
@@ -187,6 +225,8 @@ def _iter_high_confidence(text: str) -> Iterator[SecretFinding]:
             if not endpos:
                 continue
         for m in pat.finditer(text, 0, endpos):
+            if kind in _CODE_OR_DATA_LOOKALIKES and _is_code_or_data(kind, text, m.start(), m.end()):
+                continue
             yield SecretFinding(kind, m.start(), m.end())
 
 

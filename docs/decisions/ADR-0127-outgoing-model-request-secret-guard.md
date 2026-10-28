@@ -58,7 +58,19 @@
 7. **Fewer false positives in the owner module.** The short Vault token form (`s.` / `b.` / `hvs.` followed by 24+
    letters and digits) now needs a non-alphanumeric character before it, so code such as
    `this.handleSubmitButtonClickedEvent` or `models.CustomerSubscriptionHistoryRecord` is not a token. The binary scan
-   (`UNBOUNDED_TOKEN_PATTERNS`) keeps the unbounded form.
+   (`UNBOUNDED_TOKEN_PATTERNS`) keeps the unbounded form. The high-confidence scan (this guard) also skips, after
+   review of the first build:
+   * a short Vault/OpenBao form `s.` / `b.` / `r.` whose body reads as an identifier, i.e. splits into camelCase or
+     snake_case words of mean length 3.4 or more (Go receivers and single-letter variables: `s.`,
+     `b.` or `r.` followed by `registerServiceWithHealthCheck`, `ReportAllocsAndResetTimerNow`,
+     `findAllByOrganizationIdentifier`). All
+     3,909 long member names measured in the frontend and Python dependencies read as identifiers; a random token body
+     falls apart into one- and two-character pieces. `hvs.` keeps matching whatever follows;
+   * a Google refresh token `1//...` with an identifier body (`total1//itemsPerPage...`, floor division);
+   * a Google API key or refresh token glued to a base64 character before or after it: inside an image data URI or a
+     lockfile `sha512-` integrity hash, `AIza` and `1//` occur by chance (a 1 MB image gave several findings).
+
+   Redaction of logs and errors keeps masking the wider shapes; only the decision to refuse a request is narrowed.
 
 ## What is not blocked (residual risk, stated)
 
@@ -69,6 +81,10 @@
 * **Shapes the owner module does not define yet**: for example an `ASIA` temporary AWS key id or a PEM header without
   its END marker. Adding a shape to `aeos.core.redaction` extends this guard automatically.
 * **Encoded or split secrets** (base64, hex, a key spread over two messages, text inside an image): not decoded.
+* **Token lookalike rules** (decision 7): about 0.5% of random 24-character `s.`/`b.`/`r.` token bodies (0.06% at 40
+  characters, none at 100) read as an identifier and pass, and a Google key or refresh token written directly against
+  a base64 character (for example inside a URL path after `/`) passes. A token AEOS loaded itself is still caught as a
+  registered value whatever its shape.
 * **The span hash** of a low-entropy registered value could confirm a guess by someone who can read the local audit
   trail; token shapes are high entropy. The hash never leaves the host.
 * **Prompt data that is not a secret but is still private** (business data in a PUBLIC task): the task's data class

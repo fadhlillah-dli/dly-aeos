@@ -4,16 +4,19 @@ route, a feasibility probe. Detection is aeos.core.redaction (the one owner of s
 
 Bite tests: a GitHub token, an OpenRouter key, an AWS access key id and a PEM private key are refused with
 SENSITIVE_CONTENT_BLOCKED and never reach the (mocked) upstream; near misses (an ordinary code diff, a sha256 hex
-digest, a UUID, an e-mail address in code, a long JavaScript member name) are forwarded unchanged.
+digest, a UUID, an e-mail address in code, a long JavaScript member name, Go receivers ``s.``/``b.``/``r.``
+with long member names, Python floor division, an image data URI) are forwarded unchanged.
 
 Every credential sample is assembled from parts at run time so the repository secret scan does not flag this file."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import inspect
 import json
 import os
+import random
 import re
 import time
 import uuid
@@ -71,6 +74,12 @@ NEAR_MISSES = {
     "uuid": str(uuid.UUID("6f1c2a9e-4b7d-4e3a-9c1f-2d8e5b7a0c34")),
     "email_in_code": 'AUTHOR = "Jane Doe <jane.doe@example.com>"  # maintainer',
     "js_member": "this.handleSubmitButtonClickedEventNow(); lib.someLongFunctionNameForTheParser();",
+    # Go receivers and single-letter variables: s, b and r followed by a long member name (review of 7b2ff87).
+    # Built from parts: the raw canonical pattern matches these, and the repository scan of tracked files flags it.
+    "go_receivers": ("func (s *Server) Start(ctx context.Context) error {\n\treturn s" + ".registerServiceWithHealthCheck"
+                     "(ctx)\n}\nfunc BenchmarkX(b *testing.B) { b" + ".ReportAllocsAndResetTimerNow() }\n"
+                     "rows, err := r" + ".findAllByOrganizationIdentifier(id)\nconst d = s" + ".getOwnPropertyDescriptors\n"),
+    "python_floor_division": "pages = total1/" + "/itemsPerPageForThisListing + (n - 1/" + "/items_per_page_for_listing)",
 }
 
 
@@ -133,6 +142,35 @@ def test_a_real_short_vault_token_is_still_found_after_a_separator():
     token = "s" + "." + "a1B2c3D4e5F6g7H8i9J0k1L2"
     assert [f.kind for f in find_high_confidence_secrets(f"VAULT_TOKEN={token}")] == ["vault_token_short"]
     assert find_high_confidence_secrets(f"this{token[1:]}") == []  # glued to a word: a member access, not a token
+
+
+def _image_data_uri() -> str:
+    return "data:image/png;base64," + base64.b64encode(random.Random(2).randbytes(750_000)).decode()  # 4 x 1// before
+
+
+def _lockfile(entries: int) -> str:
+    lines = (f'    "node_modules/p{i}": {{"integrity": "sha512-'
+             + base64.b64encode(hashlib.sha512(str(i).encode()).digest()).decode() + '"},' for i in range(entries))
+    return "{\n" + "\n".join(lines) + "\n}"
+
+
+def test_base64_data_is_not_a_google_key_or_refresh_token():
+    """``AIza`` and ``1//`` occur by chance inside base64: a 1 MB image data URI and a 20,000-entry lockfile gave
+    google_api_key and google_refresh_token findings before (review of 7b2ff87)."""
+    image = {"type": "image_url", "image_url": {"url": _image_data_uri()}}
+    assert sensitive_content_findings({"messages": [{"role": "user", "content": [image]}]}) == []
+    assert find_high_confidence_secrets(_lockfile(20_000)) == []
+
+
+def test_real_google_and_short_token_shapes_are_still_found():
+    """The near miss on the other side: random-bodied tokens after a separator are still credentials."""
+    api_key = "AI" + "za" + "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+    refresh = "1/" + "/0g" + "Xk2Lm9Qp_7Rt-4Vw8Yz1Bc3De5Fg6Hj8Kl0Nm2Pq4St6Uv8Wx0Za" * 2
+    recovery = "r" + "." + "Zx9Qw2Er4Ty6Ui8Op0As3Df5"
+    text = f'key={api_key}\n"refresh_token": "{refresh}"\nOPENBAO_RECOVERY={recovery}\n'
+    assert sorted(f.kind for f in find_high_confidence_secrets(text)) == [
+        "google_api_key", "google_refresh_token", "openbao_recovery_token"]
+    assert find_high_confidence_secrets("x" + api_key + "y") == []  # glued into a base64-like run
 
 
 def test_no_setting_can_turn_the_guard_off():
@@ -218,6 +256,16 @@ def test_near_misses_are_forwarded_unchanged_to_a_free_route(env, db, name):  # 
         assert json.loads(up.calls[0].request.content)["messages"][0]["content"] == content
     db.expire_all()
     assert db.scalar(select(BrokerRequest).where(BrokerRequest.outcome == "SENSITIVE_BLOCKED")) is None
+
+
+def test_an_image_content_part_is_forwarded_unchanged_to_a_free_route(env, db):  # noqa: F811 (fixture)
+    content = [{"type": "text", "text": "match this screenshot"},
+               {"type": "image_url", "image_url": {"url": _image_data_uri()}}]
+    with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
+        up = mock.post(UPSTREAM).mock(return_value=httpx.Response(200, json=_ok_json()))
+        r = _post(env, body={"model": "model-a", "messages": [{"role": "user", "content": content}]})
+        assert r.status_code == 200, r.text
+        assert json.loads(up.calls[0].request.content)["messages"][0]["content"] == content
 
 
 # ------------------------------------------------------------------------------------- an OpenCode Go route
