@@ -154,7 +154,7 @@ def signal_store_changed(reason: str, *, trigger: str = "cli") -> None:
         return
     from aeos.secrets.readiness import store_state_changed
 
-    store_state_changed(reason)
+    store_state_changed(reason, transition="unsealed")
 
 
 def unseal_at_start(settings: Settings) -> str | None:

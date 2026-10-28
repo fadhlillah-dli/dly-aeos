@@ -113,3 +113,12 @@ def check_catalog() -> dict[str, Any]:
     load_all()
     used = {s.group for s in REGISTRY.values()}
     return {"count": len(REGISTRY), "groups": [label for g, label in GROUPS if g in used]}
+
+
+def secret_ref_scope(ref: str) -> tuple[bool, str | None]:
+    """Additive (2026-10-28): (domain-private?, owning domain or None) of a secret reference name, by the rule the
+    Doctor applies to its own STALE rows: ``office/...`` is private to OFFICE, ``projects/...`` is private to a domain
+    that the name does not say (None); every other namespace is platform-level and may be quoted to any session."""
+    from aeos.doctor.capabilities import _private_owner
+
+    return _private_owner(f"secret:{ref}")

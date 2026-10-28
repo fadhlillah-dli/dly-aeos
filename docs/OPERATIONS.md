@@ -545,9 +545,15 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   `route.worker_key` lists them as a non-blocking note while another route is eligible (both remedies: store the
   key, or `aeos routes disable <key> --reason "..."`) and stays MISSING when no route is left. With no route left,
   `route.registry` names the cause: a sealed or unreachable store gives UNKNOWN `SECRET_STORE_UNAVAILABLE` (restore
-  the store; no route needs activating), keyless active routes give the store-the-key remedy. Storing or deleting a
-  `workers/*` or `personal/openrouter` key marks both checks STALE. Route activation and disable emit
-  `route.activated` / `route.disabled` once from the routing service, so the CLI and the API record the same event.
+  the store; no route needs activating), keyless active routes give the store-the-key remedy. What marks both
+  checks STALE (a result is never kept until its one-hour TTL): `secret:store`, sent by `aeos vault start`,
+  `aeos vault stop`, an unseal (OS keyring, the auto-unseal of `aeos serve`, or the prompt) and `aeos vault init`;
+  and storing or deleting a `workers/*` or `personal/openrouter` key (`secret:workers/*`,
+  `secret:personal/openrouter`). Each of these also emits one dashboard event, source `secrets`:
+  `secret.store_changed` (payload: the transition `started`, `stopped`, `unsealed` or `initialised`) or
+  `secret.presence_changed` (payload: the reference name only, never a value; an `office/` name only into the
+  OFFICE domain, a `projects/` name withheld). `route.activated`, `route.disabled`, `route.pool_set` and
+  `route.endpoint_set` are emitted once from the routing service, so the CLI and the API record the same event.
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111; WORKER too):** activate the free (or local, or flat-fee
   subscription) route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic
