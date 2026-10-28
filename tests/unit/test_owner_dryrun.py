@@ -9,6 +9,9 @@ tiny fakes written into tmp. Bite tests: a script that disables the only keyed W
 fails); the same with --accept-degrade exits 0 and prints the reason; a script that changes nothing relevant is
 green (OWNER_DRYRUN: OK); a script without run(), a prompt without an answer and an unavailable real secret store
 fail (exit 2) with their message. The live file is byte-identical afterwards and the temporary dir is gone.
+Host endpoints: the 'live' fixture pins AEOS_PORT and AEOS_OPENBAO_ADDR to closed loopback ports and installs a fake
+probe runner, so no test here reaches the owner's running Control Center (default port 8787) or OpenBao; the
+SecretGuard refuses those ports as well, and a guard test records every connect of a dry run to prove it.
 """
 
 from __future__ import annotations
@@ -38,6 +41,18 @@ from tests.unit.test_doctor_seams import (  # noqa: F401 - fixtures used through
 
 ROOT = repo_root()
 KEY_REF = "workers/dryrun-test"
+
+
+def _closed_loopback_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+# One closed port per module for the 'live' Control Center (stable, so the memoised HTTP guard probe is reused) and
+# one for its OpenBao: never the owner's real ones.
+PINNED_CC_PORT = _closed_loopback_port()
+PINNED_BAO_PORT = _closed_loopback_port()
 
 
 def _load():
@@ -134,9 +149,16 @@ def _digest(path: Path) -> str:
 
 
 @pytest.fixture
-def live(settings, db, tmp_path, monkeypatch):
-    """A synthetic 'live' database in tmp where CAN_RUN_WORKER is READY while KEY_REF is present."""
+def live(settings, db, tmp_path, monkeypatch, request):
+    """A synthetic 'live' database in tmp where CAN_RUN_WORKER is READY while KEY_REF is present.
+
+    Hermetic host endpoints for every test: the 'live' Control Center and OpenBao are closed loopback ports (the
+    harness opens the Control Center port to the Doctor, so the default 8787 would reach the owner's running server)
+    and the Doctor's probe runner is a fake (no real binary, no HTTP beyond its canned answers)."""
+    from aeos.core import config as config_mod
     from aeos.core.db import get_engine
+    from aeos.inventory.probes import set_runner_override
+    from tests.unit.test_inventory_fakes import base_runner
 
     admin = _admin(db)
     _route(db)
@@ -146,6 +168,11 @@ def live(settings, db, tmp_path, monkeypatch):
     db.commit()
     db.close()
     get_engine().dispose()  # no open connection: the WAL is checkpointed and the file is stable
+    monkeypatch.setenv("AEOS_PORT", str(PINNED_CC_PORT))
+    monkeypatch.setenv("AEOS_OPENBAO_ADDR", f"http://127.0.0.1:{PINNED_BAO_PORT}")
+    config_mod.reset_settings_cache()
+    set_runner_override(base_runner())
+    request.addfinalizer(lambda: set_runner_override(None))
     path = settings.layout.db_path
     temp_root = tmp_path / "tmpdirs"
     temp_root.mkdir()
@@ -382,13 +409,37 @@ def run(client, username, password, ask):
 '''
 
 
+@pytest.fixture
+def built_frontend(tmp_path, monkeypatch):
+    """The Control Center build the dashboard needs: runtime.frontend_dist reads ``ctx.repo/frontend/dist``. Only that
+    check sees a temporary repo holding ``frontend/dist/index.html`` (every other check keeps the real checkout)."""
+    import dataclasses
+
+    from aeos.doctor.checks import REGISTRY, load_all
+
+    load_all()
+    repo = tmp_path / "built-repo"
+    (repo / "frontend" / "dist").mkdir(parents=True)
+    (repo / "frontend" / "dist" / "index.html").write_text("<!doctype html><title>t</title>\n", encoding="utf-8")
+    spec = REGISTRY["runtime.frontend_dist"]
+
+    def with_repo(fn):
+        return lambda ctx: fn(dataclasses.replace(ctx, repo=repo))
+
+    monkeypatch.setitem(REGISTRY, "runtime.frontend_dist", dataclasses.replace(
+        spec, fn=with_repo(spec.fn), fingerprint=with_repo(spec.fingerprint) if spec.fingerprint else None))
+    return repo
+
+
 @pytest.mark.parametrize("window", [True, False], ids=["doctor-sees-the-real-port", "bite-without-the-window"])
-@pytest.mark.usefixtures("no_docker", "opencode_installed")
+@pytest.mark.usefixtures("no_docker", "opencode_installed", "built_frontend")
 def test_a_running_control_center_on_aeos_port_is_no_false_blocked(live, tmp_path, capsys, monkeypatch, window):
     """Review finding: with the real Control Center running, the guard refused its port, host.port could not bind it
     and reported FAILED PORT_BIND_DENIED, so CAN_OPEN_DASHBOARD was BLOCKED before and after. The Doctor now sees the
-    port as `aeos doctor` does (CONNECTED through /api/health); the script stays refused. Without the window (the
-    old harness) the same setup is red with the bind failure: the test bites."""
+    port as `aeos doctor` does (CONNECTED through /api/health); the script stays refused. A test-owned listener on
+    the pinned AEOS_PORT stands in for the running server, and the frontend build is present, so every other critical
+    check of the dashboard passes: CAN_OPEN_DASHBOARD is READY before and after. Without the window (the old harness)
+    the same setup is red with the bind failure and CAN_OPEN_DASHBOARD BLOCKED: the test bites."""
     import contextlib
 
     from aeos.core import config as config_mod
@@ -417,13 +468,16 @@ def test_a_running_control_center_on_aeos_port_is_no_false_blocked(live, tmp_pat
     assert "refused control center ConnectionRefusedError" in out and "connected to" not in out
     for snap in snaps:
         status, summary = snap.checks["host.port"]
+        assert snap.checks["runtime.frontend_dist"][0] == "VERIFIED", snap.checks["runtime.frontend_dist"]
         if window:
             assert status == "CONNECTED", summary
-            assert "host.port" not in snap.gating["CAN_OPEN_DASHBOARD"]
+            assert snap.gating["CAN_OPEN_DASHBOARD"] == {}, snap.gating["CAN_OPEN_DASHBOARD"]
+            assert snap.capabilities["CAN_OPEN_DASHBOARD"][0] == "READY", snap.capabilities["CAN_OPEN_DASHBOARD"]
         else:
             assert status == "FAILED" and "tidak dapat di-bind" in summary, summary
-            assert snap.gating["CAN_OPEN_DASHBOARD"]["host.port"] == "FAILED"
+            assert snap.gating["CAN_OPEN_DASHBOARD"] == {"host.port": "FAILED"}, snap.gating["CAN_OPEN_DASHBOARD"]
             assert snap.capabilities["CAN_OPEN_DASHBOARD"][0] == "BLOCKED"
+    assert _cap_row(out, "CAN_OPEN_DASHBOARD")[1:3] == (["READY", "READY"] if window else ["BLOCKED", "BLOCKED"]), out
     assert code == 0, out
     _untouched(live)
 
@@ -503,3 +557,54 @@ def test_an_unknown_office_row_does_not_fail_a_personal_dry_run(monkeypatch):
     personal_unknown = STATUS_OFFICE_UNKNOWN.replace("personal/github              PRESENT  backend=openbao",
                                                      "personal/github              UNKNOWN  backend=none   ")
     assert not od.parse_presence(personal_unknown).available
+
+
+# ------------------------------------------------------------------ round 4: hermetic host endpoints (LESSONS L20)
+
+
+@pytest.mark.parametrize("pinned", [True, False], ids=["pinned-port", "bite-default-port"])
+@pytest.mark.usefixtures("no_docker", "opencode_installed")
+def test_a_dry_run_test_never_contacts_the_default_control_center_port(live, tmp_path, capsys, monkeypatch, pinned):
+    """Review finding: the 'live' fixture did not pin AEOS_PORT, so every dry run here probed and sent GET /api/health
+    to whatever listened on 8787, the owner's running Control Center included. Every connect of a full dry run (real
+    host.port probe) is recorded: with the fixture's pinned port none goes to the default port or the real OpenBao,
+    and the Doctor probes the pinned port. Bite: without the pin the harness opens 8787 to the Doctor, the recorder
+    sees the connect, and the SecretGuard refuses it (so even the bite never reaches the owner's server)."""
+    from aeos.core import config as config_mod
+
+    default = int(config_mod.Settings.model_fields["port"].default)
+    default_bao = od._port(str(config_mod.Settings.model_fields["openbao_addr"].default), 8200)
+    if not pinned:
+        monkeypatch.delenv("AEOS_PORT")
+        config_mod.reset_settings_cache()
+    seen: list[tuple[int, str]] = []
+    connect = socket.socket.connect
+
+    def recorder(sock, address):
+        if isinstance(address, tuple) and len(address) >= 2:
+            try:
+                connect(sock, address)
+            except OSError as exc:
+                seen.append((int(address[1]), str(exc)))
+                raise
+            seen.append((int(address[1]), "connected"))
+            return
+        connect(sock, address)
+
+    monkeypatch.setattr(socket.socket, "connect", recorder)
+    ports: list[int] = []
+    real_snapshot = od.doctor_snapshot
+    monkeypatch.setattr(od, "doctor_snapshot", lambda settings: ports.append(settings.port) or real_snapshot(settings))
+    code = od.main([_script(tmp_path, "noop", NOOP)])
+    out = capsys.readouterr().out
+    assert code == 0, out
+    at_default = [why for port, why in seen if port == default]
+    assert not [p for p, _ in seen if p == default_bao], seen
+    if pinned:
+        assert ports == [PINNED_CC_PORT, PINNED_CC_PORT], ports
+        assert at_default == [], seen
+        assert [why for port, why in seen if port == PINNED_CC_PORT], "the recorder did not see the host.port probe"
+    else:
+        assert ports == [default, default], ports
+        assert at_default and all("tests never reach the owner's real Control Center" in why for why in at_default), seen
+    _untouched(live)

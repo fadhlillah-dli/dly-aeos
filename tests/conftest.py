@@ -325,6 +325,26 @@ def real_vault_ports() -> frozenset[int]:
     return frozenset(ports)
 
 
+def real_control_center_ports() -> frozenset[int]:
+    """Loopback ports the owner's running Control Center (``aeos serve``) can listen on: the default ``port``, the
+    ``AEOS_PORT`` variable and the host's aeos.yaml, read when the session starts (before the ``settings`` fixture
+    isolates them). It is not a secret store, but a test that reaches it reads (or changes) the owner's real system."""
+    candidates: list[object] = [config_mod.Settings.model_fields["port"].default, os.environ.get("AEOS_PORT", "")]
+    try:
+        candidates.append(config_mod.Settings().port)
+    except Exception:  # noqa: BLE001 - an unreadable host config adds no port; the default stays blocked
+        pass
+    ports: set[int] = set()
+    for value in candidates:
+        try:
+            port = int(str(value).strip())
+        except ValueError:
+            continue
+        if 0 < port < 65536:
+            ports.add(port)
+    return frozenset(ports)
+
+
 def exe_key(path: str | os.PathLike[str]) -> str:
     """One spelling per executable file: symlinks, ``~`` and case (Windows) resolved."""
     return os.path.normcase(os.path.realpath(os.path.expanduser(os.fspath(path))))
@@ -369,7 +389,11 @@ class SecretGuard:
     containment probe and worker children never query the macOS Keychain or Windows Credential Manager; (e) the
     owner's real Claude Code (``claude_binaries``), whose ``auth status`` reads its login from the OS credential
     store: starting it raises ``FileNotFoundError`` before any process exists, as if the binary had vanished, so
-    every caller takes its "cannot run" path (a fake ``claude`` elsewhere still runs). Default result:
+    every caller takes its "cannot run" path (a fake ``claude`` elsewhere still runs); (f) the owner's running
+    Control Center: a socket connect to a loopback address on one of ``control_center_ports`` (default 8787, see
+    ``real_control_center_ports``) is refused as on CI, where nothing listens there (incident 2026-10-28: the owner
+    dry-run tests sent ``GET /api/health`` to the owner's real server). A test that needs a server there pins
+    ``AEOS_PORT`` to a free port with its own listener. Default result:
     ``get_secret`` raises ``Blocked(SECRET_STORE_UNAVAILABLE)``, the CI behaviour.
 
     Out of scope, with the reason: GITHUB_TOKEN/GH_TOKEN, the gh CLI and netrc (the product never reads a credential
@@ -389,9 +413,11 @@ class SecretGuard:
     ``DLY_AEOS_REAL_CLAUDE=1`` (or ``DLY_AEOS_LIVE_CLAUDE=1``); a test that must read the owner's real secret stores
     requests ``real_secret_stores``, which skips unless the owner set ``DLY_AEOS_REAL_SECRETS=1``."""
 
-    def __init__(self, vault_ports: frozenset[int], claude_binaries: frozenset[str] = frozenset()) -> None:
+    def __init__(self, vault_ports: frozenset[int], claude_binaries: frozenset[str] = frozenset(),
+                 control_center_ports: frozenset[int] = frozenset()) -> None:
         self.vault_ports = vault_ports
         self.claude_binaries = claude_binaries
+        self.control_center_ports = control_center_ports
         self.allow_real_claude = False
         self.keyring = HermeticKeyring()
         self._saved: tuple[Any, ...] | None = None
@@ -403,7 +429,13 @@ class SecretGuard:
             port = int(address[1])
         except (TypeError, ValueError):
             return False
-        return port in self.vault_ports and _is_loopback(address[0])
+        return port in (self.vault_ports | self.control_center_ports) and _is_loopback(address[0])
+
+    def refusal(self, address: Any) -> str:
+        if int(address[1]) in self.vault_ports:
+            return f"tests never reach a real OpenBao (port {address[1]})"
+        return (f"tests never reach the owner's real Control Center (port {address[1]}); pin AEOS_PORT to a free "
+                "port with a test-owned listener")
 
     def refuses_exec(self, args: Any, executable: Any = None, env: Mapping[str, str] | None = None,
                      shell: bool = False) -> bool:
@@ -431,7 +463,7 @@ class SecretGuard:
 
         def guarded_connect(sock: socket.socket, address: Any) -> None:
             if guard.refuses(address):
-                raise ConnectionRefusedError(errno.ECONNREFUSED, f"tests never reach a real OpenBao (port {address[1]})")
+                raise ConnectionRefusedError(errno.ECONNREFUSED, guard.refusal(address))
             connect(sock, address)
 
         def guarded_connect_ex(sock: socket.socket, address: Any) -> int:
@@ -486,7 +518,7 @@ def _reset_secret_provider_cache() -> None:
 @pytest.fixture(scope="session", autouse=True)
 def _hermetic_secret_stores() -> Iterator[SecretGuard]:
     """The SecretGuard is active for the whole session, before any module- or test-scoped fixture runs."""
-    guard = SecretGuard(real_vault_ports(), real_claude_binaries())
+    guard = SecretGuard(real_vault_ports(), real_claude_binaries(), real_control_center_ports())
     guard.install()
     try:
         yield guard

@@ -183,6 +183,38 @@ def test_session_guard_blocks_the_real_vault_address(_hermetic_secret_stores: Se
     assert not guard.refuses("/tmp/some.sock")
 
 
+def test_session_guard_blocks_the_owner_control_center_port(_hermetic_secret_stores: SecretGuard):
+    """Incident 2026-10-28: dry-run tests sent GET /api/health to the owner's running Control Center on 8787. The
+    session guard refuses its default port (and AEOS_PORT / the host's aeos.yaml at session start) on loopback;
+    a neighbouring port and a non-loopback host are not its business (near misses)."""
+    guard = _hermetic_secret_stores
+    port = int(config_mod.Settings.model_fields["port"].default)
+    assert port in guard.control_center_ports
+    for host in ("127.0.0.1", "localhost", "::1", "::ffff:127.0.0.1"):
+        assert guard.refuses((host, port)), host
+    if port + 1 not in guard.control_center_ports | guard.vault_ports:  # the host's own config may name it
+        assert not guard.refuses(("127.0.0.1", port + 1))
+    assert not guard.refuses(("192.0.2.10", port))
+    assert "the owner's real Control Center" in guard.refusal(("127.0.0.1", port))
+
+
+def test_guard_refuses_a_control_center_port_and_only_the_guard_makes_the_difference():
+    """A listener on a free loopback port stands in for the owner's running Control Center: with the port guarded
+    the connect is refused with its own message; uninstalled, the same listener accepts (near miss)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        port = int(srv.getsockname()[1])
+        guard = SecretGuard(frozenset(), frozenset(), frozenset({port}))
+        guard.install()
+        try:
+            with pytest.raises(ConnectionRefusedError, match="tests never reach the owner's real Control Center"):
+                socket.create_connection(("127.0.0.1", port), timeout=2)
+        finally:
+            guard.uninstall()
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
+
+
 def test_near_miss_secrets_memory_still_supplies_a_value(settings, secrets_memory):
     secrets_memory.put("personal/github", "fake-test-github-value-01", actor="test")
     assert github_token("PERSONAL") == ("fake-test-github-value-01", "AVAILABLE")
