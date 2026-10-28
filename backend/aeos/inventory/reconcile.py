@@ -1,7 +1,10 @@
 """Auditable inventory reconciliation (§38 "Rekonsiliasi yang dapat diaudit").
 
-1. Take the desired manifest (loading it first if the DB has none) for the selected scope.
-2. Run the allowed, non-LLM, read-only probes: version commands with timeouts, loopback health URLs,
+1. Take the desired manifest (loading it first if the DB has none) for the selected scope. The full scope is
+   every REQUIRED/OPTIONAL component with a probe plus every component a human admitted (TRIAL_APPROVED/APPROVED,
+   PERSONAL or platform decisions only) that has a probe; DISCOVERED/UNDER_REVIEW candidates are never probed.
+2. Run the allowed, non-LLM, read-only probes: version commands with timeouts (or a lookup only, never a run, for
+   a binary whose version call writes state or reaches the network), loopback health URLs,
    scoped repository/lockfile/config reads. No machine-wide scans; no functional write tests.
 3. Store observations with source identity, timestamp, scope, resolved version, a redacted
    operation reference and an expiry.
@@ -75,8 +78,14 @@ DATA_BIN_BINARIES = frozenset({"bao"})
 NTSTATUS_ERROR_MIN = 0xC0000000
 NTSTATUS_ERROR_MAX = 0xCFFFFFFF
 CORE_REQUIREMENTS = frozenset({"REQUIRED", "OPTIONAL"})
+# Admitted catalog components (human TRIAL/PROMOTION decision) are probed beside the core set when they have a real
+# probe; DISCOVERED/UNDER_REVIEW candidates stay unprobed. Only PERSONAL/platform decisions count (§23).
+ADMITTED_STATES = frozenset({"TRIAL_APPROVED", "APPROVED"})
+ADMISSION_DOMAIN = "PERSONAL"
 DEFAULT_TTL = 3600
 DECLARATION_TTL = 86400
+# A binary probe entry with ``version_args: []`` is presence only: located, never run, version UNKNOWN.
+PRESENCE_ONLY_REASON = "versi tidak dicek: perintah versinya menulis state atau mengakses jaringan"
 
 # Managed-scope sources and the registered component that owns what they declare.
 SOURCE_OWNERS = {
@@ -167,7 +176,14 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             if rejected_path:
                 rejected[name] = ctx.logical(rejected_path) or rejected_path
             continue
-        argv = [path, *b.get("version_args", [])]
+        if not b.get("version_args"):
+            # presence only (``version_args: []``): the tool's version call writes state or reaches the network,
+            # so the binary is never run; it is located on PATH/settings only and its version stays UNKNOWN
+            found.append({"name": name, "lookup": lookup, "location": ctx.logical(path), "version": None,
+                          "exit_code": None, "error": None, "output": None, "operation_ref": f"which {name}",
+                          "presence_only": True, "digest": file_digest(path)})
+            continue
+        argv = [path, *b["version_args"]]
         rr = ctx.runner.run(argv, timeout=timeout, env=env, cwd=ctx.probe_cwd)
         did_not_run = _did_not_run(rr)
         if did_not_run:
@@ -179,7 +195,7 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             "name": name, "lookup": lookup, "location": ctx.logical(path), "version": version,
             "exit_code": rr.returncode, "error": rr.error,
             "output": clean_output(rr.stdout or rr.stderr, 160) if version is None else None,
-            "operation_ref": " ".join([name, *b.get("version_args", [])]),
+            "operation_ref": " ".join([name, *b["version_args"]]),
             # §37: the installed executable is its own identity (distinct from source repo / release asset):
             # a replaced binary that prints the same --version is visible as a changed digest.
             # (also for a located binary that did not run: the file's hash is a fact, but it is no identity of a
@@ -202,7 +218,8 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
                               f"{f['name']} ({f['error'] or 'exit ' + str(f['exit_code'])})"
                               for f in found if f["name"] in failed)))
     elif found:
-        versions = [f"{f['name']} {f['version']}" if len(found) > 1 else f["version"] for f in found]
+        # a binary without a version (presence only, or unparsed) adds nothing, never the text "None"
+        versions = [f"{f['name']} {f['version']}" if len(found) > 1 and f["version"] else f["version"] for f in found]
         version = "; ".join(v for v in versions if v) or None
         digests = [f["digest"] for f in found if f.get("digest") and f["digest"] != "TOO_LARGE"]
         identity = (digests[0] if len(found) == 1 else "; ".join(f"{f['name']} {f['digest']}" for f in found)) \
@@ -213,6 +230,7 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             version_status="RESOLVED" if all(f["version"] for f in found) else "UNKNOWN",
             digest_status="OBSERVED" if identity else "UNKNOWN",
             distribution_verified=False,
+            reason=PRESENCE_ONLY_REASON if any(f.get("presence_only") for f in found) else None,
         ))
     health = probe.get("health")
     if health:
@@ -485,6 +503,51 @@ def is_probeable(comp: ComponentReference) -> bool:
 def core_targets(components: Iterable[ComponentReference]) -> list[ComponentReference]:
     return [c for c in components
             if c.tombstoned_at is None and c.requirement in CORE_REQUIREMENTS and is_probeable(c)]
+
+
+def _admission_visible(comp: ComponentReference) -> bool:
+    """Platform and PERSONAL-only components; an OFFICE-only component never enters the admitted set (§23)."""
+    domains = set((comp.scope or {}).get("domains") or ["PLATFORM"])
+    return "PLATFORM" in domains or ADMISSION_DOMAIN in domains
+
+
+def admitted_components(session: Session, comps: dict[str, ComponentReference]) -> dict[str, ComponentReference]:
+    """Components a human admitted (TRIAL_APPROVED/APPROVED), derived exactly as the inventory views derive
+    admission (``aeos.inventory.decisions.decision_states``) for the PERSONAL domain: PERSONAL and domain-less
+    decisions count, OFFICE decisions and OFFICE-only components never do. DISCOVERED/UNDER_REVIEW candidates are
+    not admitted. Probeable or not; the caller filters."""
+    from aeos.inventory.decisions import decision_states
+
+    live = {cid: c for cid, c in comps.items() if c.tombstoned_at is None and _admission_visible(c)}
+    if not live:
+        return {}
+    states = decision_states(session, live, domain=ADMISSION_DOMAIN)
+    return {cid: live[cid] for cid, st in sorted(states.items()) if st.admission in ADMITTED_STATES}
+
+
+def admitted_targets(session: Session, comps: dict[str, ComponentReference]) -> list[ComponentReference]:
+    """Admitted components with a real probe that the core set does not already cover."""
+    core = {c.component_id for c in core_targets(comps.values())}
+    return [c for cid, c in admitted_components(session, comps).items() if cid not in core and is_probeable(c)]
+
+
+def unadmitted_probeable(session: Session, comps: dict[str, ComponentReference], *, domain: str | None) -> set[str]:
+    """Live catalog components that have a real probe but that reconcile never probes, as seen from *domain*:
+    no human admitted them (no TRIAL/PROMOTION, or a later REJECTION/revocation). The views use it so a coverage
+    gap or an installation reason never asks for a reconcile that cannot cover the component. A component counts
+    as admitted only when reconcile admits it (PERSONAL decisions) AND the viewing domain sees that admission, so
+    a PERSONAL decision never changes an OFFICE or domain-less view (§23)."""
+    from aeos.inventory.decisions import decision_states
+
+    cands = {cid: c for cid, c in comps.items()
+             if c.tombstoned_at is None and c.requirement not in CORE_REQUIREMENTS and is_probeable(c)}
+    if not cands:
+        return set()
+    admitted = admitted_components(session, cands)
+    if admitted and domain != ADMISSION_DOMAIN:
+        seen = decision_states(session, admitted, domain=domain)
+        admitted = {cid: c for cid, c in admitted.items() if seen[cid].admission in ADMITTED_STATES}
+    return set(cands) - set(admitted)
 
 
 # ---------------------------------------------------------------- managed-scope sources
@@ -798,9 +861,15 @@ def _reconcile(
             raise Conflict(f"component {component_id} is tombstoned; history only", code="COMPONENT_TOMBSTONED")
         targets = [comp]
         scope: dict[str, Any] = {"component_id": component_id}
+        # a scoped refresh never probes a catalog candidate that no human admitted (DISCOVERED/UNDER_REVIEW)
+        unadmitted = comp.requirement not in CORE_REQUIREMENTS and component_id not in admitted_components(
+            session, comps)
     else:
-        targets = core_targets(comps.values())
-        scope = {"set": "core", "requirements": sorted(CORE_REQUIREMENTS)}
+        admitted = admitted_targets(session, comps)
+        targets = [*core_targets(comps.values()), *admitted]
+        unadmitted = False
+        scope = {"set": "core", "requirements": sorted(CORE_REQUIREMENTS),
+                 "admitted": [c.component_id for c in admitted]}
     ctx = ReconcileContext(settings=settings, runner=runner or get_runner(), repo=repo or repo_root(), session=session)
     run = ReconciliationRun(trigger=trigger, actor=actor, scope=scope, status="RUNNING", manifest_hash=manifest_hash,
                             started_at=ctx.now)
@@ -816,6 +885,10 @@ def _reconcile(
         if not is_probeable(comp):
             component_status[cid] = {"status": "SKIPPED", "at": at,
                                      "reason": str((comp.probe or {}).get("reason") or "tanpa probe")}
+            continue
+        if unadmitted:
+            component_status[cid] = {"status": "SKIPPED", "at": at,
+                                     "reason": "kandidat belum di-admit (tanpa keputusan TRIAL/PROMOTION); tidak diprobe"}
             continue
         try:
             specs = probe_component(ctx, comp)

@@ -17,7 +17,21 @@ edges, and immutable ArchitectureSnapshots for render/diff/audit.
    and process-tree kill (psutil), loopback-only HTTP unless a caller explicitly opts into a remote
    read-only request, child environments scrubbed of `ANTHROPIC_*`/alternative-provider variables, and
    paths reduced to logical names (`<repo>`, `<data>`, `<home>/.../x`). Only binaries named by the
-   manifest are looked up; candidates/references are not probed before an admission decision.
+   manifest are looked up; candidates/references are not probed before an admission decision. A full
+   reconciliation probes the REQUIRED/OPTIONAL components with a probe plus every component a human admitted
+   (TRIAL_APPROVED/APPROVED, derived from the Decision registry as the views derive it, PERSONAL or platform
+   decisions only, never an OFFICE-only component) that has a probe; it lists them as `scope.admitted`. A scoped
+   refresh of a DISCOVERED/UNDER_REVIEW candidate is SKIPPED. Coverage and the installation dimension use the
+   same scope: a candidate with a probe that no human admitted (as seen from the viewing domain) is a not-probed
+   candidate, never a NEVER_PROBED or STALE_OBSERVATIONS gap, and its next action is never RUN_RECONCILE or
+   REFRESH. A version command that writes state or calls the network is never run: such a binary probe entry
+   has `version_args: []` (presence only), so the binary is located by the shared lookup rule
+   (`aeos.core.binaries`) without starting a process and is INSTALLED with its version UNKNOWN and the reason, or NOT_INSTALLED when absent
+   (`serena`, `goose`, `promptfoo`, `thv`). The Doctor check `inventory.admitted_unprobed` lists admitted
+   components without a probe (CONFIGURED, informational, in no capability). A binary probe already takes a
+   host-specific location from `aeos.yaml`: `settings_override` names a Settings field (as for `claude_binary`,
+   `opencode_binary`, `openbao_binary`) that `_locate_binary` resolves before PATH. The gap for user-space
+   tools outside PATH (a venv, for example `litellm`) is that no Settings field exists for them yet.
 2. **Managed scope** reads are limited to named repository files: `pyproject.toml`,
    `requirements.lock`, `frontend/package-lock.json`, `.github/workflows/*`, `.vscode/extensions.json`
    and MCP/agent configs a non-bare session would load (`.mcp.json`, `.claude/settings.json`,
@@ -51,6 +65,11 @@ edges, and immutable ArchitectureSnapshots for render/diff/audit.
    probes, `repo:head` / `repo:origin` for the platform repository (a new commit does not stale the
    origin check), otherwise `component:<id>`. A new InstallManifest content hash invalidates
    `manifest`. Changes are announced with `inventory.component.changed` and listed in the run summary.
+   A TRIAL/PROMOTION decision on a change_proposal (recorded or no longer ACTIVE) invalidates `component:<id>`
+   for each linked component and `inventory:admission`, and no route invalidator (`config:routes`,
+   `model:route`); a TRIAL on a model_route keeps those. An OFFICE proposal decision invalidates none of them.
+   No reconciliation starts from the decision: the next full run, a Refresh of the component or the poll
+   loop (when enabled) probes a newly admitted component.
 9. **OBSERVED lens precedence.** The most significant fresh fact wins by dimension (usage >
    connectivity > installation > declaration > discovery), not by timestamp, and a fresh
    NOT_INSTALLED/REMOVED/INSTALL_FAILED is never hidden by a later lockfile declaration (§50 "Tool

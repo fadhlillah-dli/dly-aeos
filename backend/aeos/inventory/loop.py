@@ -2,8 +2,8 @@
 
 Off by default. When the owner enables it (``aeos inventory poll --enable``, audited system setting
 ``inventory.poll_enabled``), the server lifecycle hook refreshes — read-only, scoped, one component at a
-time — only the core components whose latest reconciler observation has expired according to that
-component's own probe TTL. Each tick is bounded (``MAX_PER_TICK`` components) and every refresh goes
+time — only the core and admitted components (the reconcile scope) whose latest reconciler observation has
+expired according to that component's own probe TTL. Each tick is bounded (``MAX_PER_TICK`` components) and every refresh goes
 through the same per-scope concurrency guard as the API. Nothing is installed, enabled or adopted.
 """
 
@@ -57,13 +57,15 @@ def set_poll_enabled(session: Session, enabled: bool, *, actor: str, reason: str
 
 
 def due_components(session: Session, *, now: Any = None, limit: int = MAX_PER_TICK) -> list[str]:
-    """Core components whose latest reconciler observation expired (per-component probe TTL), oldest first."""
+    """Core and admitted components (the full reconcile scope) whose latest reconciler observation expired
+    (per-component probe TTL), oldest first."""
     from aeos.inventory.observations import latest_observations
-    from aeos.inventory.reconcile import OBSERVER, core_targets
+    from aeos.inventory.reconcile import OBSERVER, admitted_targets, core_targets
     from aeos.models.inventory import ComponentReference
 
     now = now or utcnow()
-    comps = core_targets(session.scalars(select(ComponentReference)))
+    every = {c.component_id: c for c in session.scalars(select(ComponentReference))}
+    comps = [*core_targets(every.values()), *admitted_targets(session, every)]
     latest = latest_observations(session, [c.component_id for c in comps], ("installation",))
     due: list[tuple[Any, str]] = []
     for c in comps:

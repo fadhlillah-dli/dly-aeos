@@ -276,3 +276,15 @@ def snapshot_delta(session: Session, before_id: str, after_id: str, *, domain: s
             "nodes": ids(d["nodes"], lambda n: n.get("id")),
             "edges": ids(d["edges"], lambda e: f"{e.get('source')}->{e.get('target')}:{e.get('relation')}"),
             "refs_changed": sorted(d["refs_changed"])}
+
+
+def admitted_unprobed(session: Session) -> tuple[int, list[dict[str, str]]]:
+    """(admitted count, admitted components whose manifest probe is none) for the Doctor (additive, 2026-10-28)."""
+    from sqlalchemy import select
+
+    from aeos.inventory.reconcile import admitted_components, is_probeable
+
+    comps = {c.component_id: c for c in session.scalars(select(ComponentReference))}
+    admitted = admitted_components(session, comps)
+    return len(admitted), [{"component_id": cid, "reason": str((c.probe or {}).get("reason") or "tanpa probe")}
+                           for cid, c in admitted.items() if not is_probeable(c)]

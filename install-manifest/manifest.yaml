@@ -1473,7 +1473,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat dengan identitas belum diverifikasi; tidak diprobe.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: goose, settings_override: null, version_args: []}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1504,7 +1509,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat dengan identitas belum diverifikasi; tidak diprobe.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: pi, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1535,7 +1545,7 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum keputusan admission.", local_install: true}
+    probe: {type: none, reason: "Tidak diprobe: flag versinya belum dapat diperiksa read-only (belum terpasang saat review).", local_install: true}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1597,7 +1607,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat dengan identitas belum diverifikasi; tidak diprobe.", local_install: true}
+    probe: {type: none, reason: "Tidak diprobe: tidak ada probe portabel; dipasang di ruang pengguna (pustaka Python di venv terpisah, bukan interpreter AEOS).", local_install: true}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1629,7 +1639,7 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 6
     approved_pin: null
-    probe: {type: none, reason: "Belum dipilih untuk dijalankan; dipasang hanya bila route API membutuhkannya.", local_install: true}
+    probe: {type: none, reason: "Tidak diprobe: dipasang di ruang pengguna (venv di luar PATH); probe binary dapat memakai lokasi dari aeos.yaml (settings_override), tetapi belum ada field Settings untuk litellm.", local_install: true}
     capability_tests:
       - {id: gateway.routing_caps, description: "Routing, caps, outage behavior dan fallback diuji; connectivity saja belum cukup (§07 urutan 6).", functional: true, requires_authorization: true, evidence: "hasil uji gateway"}
     access: {paths: [], egress: ["provider API yang disetujui"], data_classes: [INTERNAL], operations: [CALL], identity_ref: "workers/* (virtual keys)", tenant_target: null}
@@ -1812,7 +1822,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: thv, settings_override: null, version_args: []}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1873,7 +1888,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: serena, settings_override: null, version_args: []}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1904,7 +1924,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: context7-mcp, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1935,7 +1960,12 @@ components:
     design_label: UNVERIFIED
     bootstrap_order: null
     approved_pin: null
-    probe: {type: none, reason: "Canonical upstream UNVERIFIED; admission diblokir.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: codebase-memory-mcp, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -1965,7 +1995,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: rtk, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: "Tidak menjamin penghematan.", source: "S31"}
@@ -1996,7 +2031,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat eksperimen; tidak diprobe sebelum admission.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: ccusage, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: "Angka bukan tagihan resmi.", source: "S31"}
@@ -2028,7 +2068,7 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Opsional; source/version diperiksa saat admission.", local_install: true}
+    probe: {type: none, reason: "Tidak diprobe: tidak ada probe portabel; dipasang di ruang pengguna (hanya file compose, belum dijalankan; probe tidak menarik image atau menjalankan container).", local_install: true}
     capability_tests: []
     access: {paths: [], egress: ["trace destination (harus disetujui; Office tidak ke personal)"], data_classes: [INTERNAL], operations: [WRITE], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -2059,7 +2099,7 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Opsional; source/version diperiksa saat admission.", local_install: true}
+    probe: {type: none, reason: "Tidak diprobe: tidak ada probe portabel; dipasang di ruang pengguna (pustaka Python di venv terpisah; salinan di interpreter AEOS bukan instalasi trial).", local_install: true}
     capability_tests: []
     access: {paths: [], egress: ["collector yang disetujui"], data_classes: [INTERNAL], operations: [WRITE], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -2090,7 +2130,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: promptfoo, settings_override: null, version_args: []}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -2122,7 +2167,13 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; belum dibutuhkan pada V1.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: temporal-server, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+        - {name: tdbg, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -2153,7 +2204,7 @@ components:
     design_label: OPTIONAL_CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Opsional; belum dipilih.", local_install: true}
+    probe: {type: none, reason: "Tidak diprobe: belum terpasang; memasangnya mengubah requirements AEOS (di luar trial ini).", local_install: true}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -2184,7 +2235,12 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat; tidak diprobe sebelum admission.", local_install: true}
+    probe:
+      type: binary
+      binaries:
+        - {name: copier, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+      timeout_seconds: 10
+      ttl_seconds: 86400
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: UNKNOWN, amount: null, note: null, source: null}
@@ -2641,7 +2697,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat pustaka; impor selektif setelah review.", local_install: false}
+    probe: {type: none, reason: "Tidak diprobe: tidak ada probe portabel; dipasang di ruang pengguna (arsip teks read-only, bukan executable).", local_install: false}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: NONE, amount: null, note: null, source: null}
@@ -2672,7 +2728,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat pustaka; impor selektif setelah review.", local_install: false}
+    probe: {type: none, reason: "Tidak diprobe: tidak ada probe portabel; dipasang di ruang pengguna (arsip teks read-only, bukan executable).", local_install: false}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: NONE, amount: null, note: null, source: null}
@@ -2702,7 +2758,7 @@ components:
     design_label: CANDIDATE
     bootstrap_order: 11
     approved_pin: null
-    probe: {type: none, reason: "Kandidat pustaka; impor selektif setelah review.", local_install: false}
+    probe: {type: none, reason: "Tidak diprobe: tidak ada probe portabel; dipasang di ruang pengguna (arsip teks read-only, bukan executable).", local_install: false}
     capability_tests: []
     access: {paths: [], egress: [], data_classes: [], operations: [], identity_ref: null, tenant_target: null}
     cost: {model: NONE, amount: null, note: null, source: null}
@@ -2866,7 +2922,7 @@ components:
     probe:
       type: binary
       binaries:
-        - {name: sops, settings_override: null, version_args: ["--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
+        - {name: sops, settings_override: null, version_args: ["--disable-version-check", "--version"], version_regex: "(\\d+\\.\\d+\\.\\d+)"}
         - {name: age, settings_override: null, version_args: ["--version"], version_regex: "v?(\\d+\\.\\d+\\.\\d+)"}
       timeout_seconds: 10
       ttl_seconds: 86400

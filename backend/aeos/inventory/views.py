@@ -41,7 +41,7 @@ from aeos.inventory.observations import (
     latest_observations,
 )
 from aeos.inventory.pins import select_digest
-from aeos.inventory.reconcile import is_probeable, latest_run, run_view
+from aeos.inventory.reconcile import ADMITTED_STATES, is_probeable, latest_run, run_view, unadmitted_probeable
 from aeos.models.inventory import CheckResult, ComponentObservation, ComponentReference, ComponentRelation
 from aeos.models.inventory_ext import DriftFinding
 
@@ -202,7 +202,10 @@ def _usage_dim(obs: ComponentObservation | None, fact: rt.UsageFact | None, now:
 
 def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], ComponentObservation],
                      now: datetime, *, state: DecisionState | None = None, basis: list[str] | None = None,
-                     usage_fact: rt.UsageFact | None = None, write_enabled: bool = False) -> dict[str, dict[str, Any]]:
+                     usage_fact: rt.UsageFact | None = None, write_enabled: bool = False,
+                     unadmitted: bool = False) -> dict[str, dict[str, Any]]:
+    """*unadmitted*: the component has a probe but reconcile never probes it in this view (no human admission,
+    ``reconcile.unadmitted_probeable``), so its installation is not 'belum diprobe; jalankan reconcile'."""
     cid = comp.component_id
     probe = comp.probe or {}
     out: dict[str, dict[str, Any]] = {}
@@ -224,6 +227,13 @@ def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], Com
         out["installation"] = _dim("NOT_APPLICABLE", "layanan eksternal/rujukan; tidak dipasang lokal", "manifest")
     elif not is_probeable(comp):
         out["installation"] = _dim("UNKNOWN", str(probe.get("reason") or "tidak diprobe"), "manifest")
+    elif unadmitted and out["admission"]["value"] in ADMITTED_STATES:
+        # admitted in this view (e.g. an OFFICE decision), but reconcile admits on PERSONAL/platform decisions only
+        out["installation"] = _dim("UNKNOWN", "admission di luar domain probe: reconcile hanya mengikuti keputusan "
+                                   "PERSONAL/platform; tidak diprobe", "decision registry")
+    elif unadmitted:
+        out["installation"] = _dim("UNKNOWN", "kandidat belum di-admit (tanpa keputusan TRIAL/PROMOTION); tidak "
+                                   "diprobe sebelum admission", "decision registry")
     else:
         out["installation"] = _dim("UNKNOWN", "belum diprobe; jalankan aeos inventory reconcile", "belum ada observasi")
     for dim, missing, reason in (
@@ -254,9 +264,10 @@ def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], Com
 
 
 def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift: list[dict[str, Any]],
-                version: dict[str, Any]) -> dict[str, Any]:
+                version: dict[str, Any], *, unadmitted: bool = False) -> dict[str, Any]:
     """The one next step a human can take (§35 "tindakan berikutnya"), derived deterministically from the
-    separate dimensions, drift and coverage; it never runs anything itself."""
+    separate dimensions, drift and coverage; it never runs anything itself. *unadmitted* (see
+    ``dimension_values``): reconcile and Refresh skip the component, so neither is offered for it."""
     classes = {d["drift_class"] for d in drift}
     inst = dims["installation"]
     life = dims["lifecycle_final"]["value"]
@@ -273,9 +284,9 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
                    f"/proposals?component={comp.component_id}")
     if "planned-but-missing" in classes:
         return act("INSTALL_MANUALLY", "Pasang sesuai remedy Readiness (manual, tanpa auto-install)", link="/readiness")
-    if is_probeable(comp) and inst["observation_id"] is None:
+    if not unadmitted and is_probeable(comp) and inst["observation_id"] is None:
         return act("RUN_RECONCILE", "Jalankan aeos inventory reconcile", "aeos inventory reconcile")
-    if inst.get("stale"):
+    if not unadmitted and inst.get("stale"):
         return act("REFRESH", "Segarkan observasi (kedaluwarsa)", "aeos inventory reconcile")
     if "enabled-but-unverified" in classes:
         return act("RUN_FUNCTIONAL_DOCTOR", "Jalankan aeos doctor --functional", "aeos doctor --functional",
@@ -290,6 +301,19 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
     if "installed-but-disabled" in classes:
         return act("DECIDE_ENABLEMENT", "Terpasang tetapi tidak aktif: putuskan enable atau biarkan",
                    link=f"/proposals?component={comp.component_id}")
+    if unadmitted and dims["admission"]["value"] in ADMITTED_STATES \
+            and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):
+        # admitted in this view by a decision reconcile does not follow (e.g. OFFICE): no reconcile, Refresh or
+        # poll tick probes it, so "pasang lalu probe" would be unsatisfiable here
+        return act("OUTSIDE_PROBE_DOMAIN", "Admission di luar domain probe: reconcile tidak mengamati instalasi "
+                   "komponen ini; periksa instalasi secara manual", link="/decisions")
+    if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and not is_probeable(comp) \
+            and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):
+        # admitted but the manifest probe is none: reconcile can never observe it, so "pasang lalu probe" would be an
+        # unsatisfiable next action (Doctor inventory.admitted_unprobed lists these); also when an older observation
+        # still says NOT_INSTALLED (the probe was set to none after it)
+        return act("ADD_PROBE", "Admitted tanpa probe: instalasi tidak dapat diamati; tambahkan probe manifest (PR)",
+                   link="/readiness")
     if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):
         # Approved (trial) on paper but nothing installed: "pantau observasi" would hide the one thing left to do.
         # Master §38: this stays a manual step; the decision is not an enablement basis and nothing installs itself.
@@ -342,9 +366,9 @@ def component_row(comp: ComponentReference, latest: dict[tuple[str, str], Compon
                   drift: dict[str, list[dict[str, Any]]], now: datetime, *, advanced: bool = False,
                   relation_counts: dict[str, int] | None = None, basis: list[str] | None = None,
                   state: DecisionState | None = None, usage_fact: rt.UsageFact | None = None,
-                  write_enabled: bool = False) -> dict[str, Any]:
+                  write_enabled: bool = False, unadmitted: bool = False) -> dict[str, Any]:
     dims = dimension_values(comp, latest, now, state=state, basis=basis, usage_fact=usage_fact,
-                            write_enabled=write_enabled)
+                            write_enabled=write_enabled, unadmitted=unadmitted)
     version = version_status(comp, latest)
     comp_drift = drift.get(comp.component_id, [])
     row: dict[str, Any] = {
@@ -360,7 +384,7 @@ def component_row(comp: ComponentReference, latest: dict[tuple[str, str], Compon
         "dimensions": dims,
         "drift": [{"drift_class": d["drift_class"], "label": d["label"], "severity": d["severity"]}
                   for d in comp_drift],
-        "next_action": next_action(comp, dims, comp_drift, version),
+        "next_action": next_action(comp, dims, comp_drift, version, unadmitted=unadmitted),
         "tombstoned_at": _iso(comp.tombstoned_at), "mode": comp.mode,
     }
     if advanced:
@@ -429,6 +453,7 @@ def list_components(
     window_comps = {c.component_id: c for c in window}
     basis = config_basis(session, window_comps, latest, now, domain=domain) if ids else {}
     states = decision_states(session, window_comps, domain=domain) if ids else {}
+    unadmitted = unadmitted_probeable(session, window_comps, domain=domain) if ids else set()
     usage, _edges, _runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
     writable = write_enabled_components(session, domain)
     rec = current_manifest(session)
@@ -439,7 +464,8 @@ def list_components(
     return {
         "items": [component_row(c, latest, drift, now, advanced=advanced, relation_counts=rel_counts,
                                 basis=basis.get(c.component_id), state=states.get(c.component_id),
-                                usage_fact=usage.get(c.component_id), write_enabled=c.component_id in writable)
+                                usage_fact=usage.get(c.component_id), write_enabled=c.component_id in writable,
+                                unadmitted=c.component_id in unadmitted)
                   for c in window],
         "total": len(filtered), "page": page, "page_size": page_size, "view": view, "facets": facets,
         "coverage": cov,
@@ -485,9 +511,13 @@ def coverage(session: Session, *, domain: str | None, compact: bool = False,
         usage = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)[0]
     observed_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and not is_stale(o, now)}
     stale_ids = {cid for (cid, dim), o in latest.items() if dim in OBSERVED_DIMENSIONS and is_stale(o, now)}
-    probeable = [c for c in comps.values() if is_probeable(c)]
+    # a candidate with a probe that no human admitted is never probed by reconcile: it is a candidate gap (INFO),
+    # never a NEVER_PROBED/STALE gap that asks for a reconcile that cannot cover it
+    unadmitted = unadmitted_probeable(session, comps, domain=domain)
+    stale_ids -= unadmitted
+    probeable = [c for c in comps.values() if is_probeable(c) and c.component_id not in unadmitted]
     never = [c.component_id for c in probeable if not any((c.component_id, d) in latest for d in OBSERVED_DIMENSIONS)]
-    not_probed = [c for c in comps.values() if not is_probeable(c)]
+    not_probed = [c for c in comps.values() if not is_probeable(c) or c.component_id in unadmitted]
     external = [c for c in not_probed if (c.probe or {}).get("local_install") is False]
     candidates = [c for c in not_probed if c not in external]
     usage_seen = any(dim == "usage" for (_cid, dim) in latest) or any(cid in comps for cid in usage)
@@ -691,7 +721,8 @@ def _check_level(check_id: str, functional: bool) -> str:
 
 def _observation_level(session: Session, comp: ComponentReference, obs: ComponentObservation | None) -> str | None:
     """Level of one observation: its evidence artifact's level when linked, else by observer and probe kind
-    (file/lockfile/manifest/config reads E1; executed/imported/health probes E3)."""
+    (file/lockfile/manifest/config reads and a located, never-run presence-only binary E1; executed/imported/health
+    probes E3)."""
     if obs is None:
         return None
     if obs.evidence_id:
@@ -711,6 +742,10 @@ def _observation_level(session: Session, comp: ComponentReference, obs: Componen
         return "E3"
     if obs.dimension == "functional":
         return "E3" if obs.observer == "claude_bridge" else "E2"
+    if obs.dimension == "installation" and any(
+            isinstance(b, dict) and b.get("presence_only") for b in detail.get("binaries") or []):
+        # a presence-only binary was located (PATH lookup + file digest) and never run: a static fact, never E3
+        return "E1"
     return PROBE_LEVELS.get(str((comp.probe or {}).get("type")), "E1")
 
 
@@ -982,8 +1017,10 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
     basis = config_basis(session, {component_id: comp}, latest, now, domain=domain).get(component_id, [])
     state = decision_states(session, {component_id: comp}, domain=domain)[component_id]
     usage, _edges, _runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
+    unadmitted = component_id in unadmitted_probeable(session, {component_id: comp}, domain=domain)
     dims = dimension_values(comp, latest, now, state=state, basis=basis, usage_fact=usage.get(component_id),
-                            write_enabled=component_id in write_enabled_components(session, domain))
+                            write_enabled=component_id in write_enabled_components(session, domain),
+                            unadmitted=unadmitted)
     rels = component_relations(session, component_id, domain=domain, page_size=500,
                                allowed_project_ids=allowed_project_ids)
     checks = latest_checks_for(session, component_id, domain)
@@ -1078,7 +1115,7 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
         "lifecycle": dims,
         "admission": {"status": dims["admission"]["value"], "decision_refs": state.decision_refs,
                       "scope": state.scope, "capability_tests": _admission_tests(session, comp, latest, now)},
-        "next_action": next_action(comp, dims, drift, version),
+        "next_action": next_action(comp, dims, drift, version, unadmitted=unadmitted),
         "config_lens": {"present": bool(basis), "basis": basis,
                         "note": "Konfigurasi berlaku hanya dengan dasar eksplisit; nilai default bukan enablement."},
         "access": {**(comp.access or {}), "expiry": _access_expiry(comp, domain),

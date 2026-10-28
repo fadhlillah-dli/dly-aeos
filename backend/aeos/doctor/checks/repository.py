@@ -304,3 +304,28 @@ def repo_install_manifest(ctx: CheckContext) -> Outcome:
                                      evidence_to_collect="hash termuat = hash file"))
     return Outcome("VERIFIED", f"Manifest valid dan termuat ({evidence['components']} komponen).", evidence=evidence,
                    component_version=load.content_hash[:19])
+
+
+@check("inventory.admitted_unprobed", "REPOSITORY", "Komponen admitted tanpa probe (informasi)",
+       component_id="install-manifest", needs_db=True, ttl_seconds=3600, ok={"VERIFIED", "CONFIGURED"},
+       invalidators=("manifest", "inventory:admission"), severity_fail="LOW", scope={"domain": "PERSONAL"},
+       description="Komponen yang di-admit manusia (TRIAL_APPROVED/APPROVED, keputusan PERSONAL atau platform) "
+                   "tetapi probe manifest-nya none: rekonsiliasi tidak dapat mengamatinya, jadi instalasinya tetap "
+                   "UNKNOWN. Hanya informasi (CONFIGURED); tidak memblokir capability mana pun.")
+def inventory_admitted_unprobed(ctx: CheckContext) -> Outcome:
+    from aeos.inventory.facade import admitted_unprobed
+
+    if ctx.session is None:  # needs_db: the runner answers UNKNOWN before calling this
+        return Outcome("UNKNOWN", "Database belum tersedia.", error_code="DB_NOT_INITIALISED")
+    admitted_count, unprobed = admitted_unprobed(ctx.session)
+    evidence: dict[str, Any] = {"admitted": admitted_count, "admitted_unprobed": unprobed}
+    if not unprobed:
+        return Outcome("VERIFIED", f"Semua {admitted_count} komponen admitted punya probe (atau belum ada yang "
+                       "di-admit).", evidence=evidence)
+    ids = ", ".join(u["component_id"] for u in unprobed)
+    return Outcome("CONFIGURED", f"{len(unprobed)} komponen admitted tanpa probe; instalasinya tetap UNKNOWN: {ids}.",
+                   evidence=evidence, severity="INFO", remedy=Remedy(
+                       operation="Tambahkan probe portabel yang read-only lewat PR yang direview (protected path), "
+                                 "atau biarkan none dengan alasan yang jujur",
+                       target="install-manifest/manifest.yaml", privilege="reviewer manusia",
+                       evidence_to_collect="komponen muncul sebagai target rekonsiliasi dengan observasi instalasi"))
