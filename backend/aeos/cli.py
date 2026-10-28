@@ -134,6 +134,10 @@ def serve(
     dev_with_real_credentials: bool = typer.Option(
         False, "--dev-with-real-credentials",
         help="Allow --dev/--reload with the default data dir and keyring service (real credentials)"),
+    no_ui_build: bool = typer.Option(
+        False, "--no-ui-build",
+        help="Checkout mode: do not rebuild a stale Control Center bundle at start (the old bundle is served and "
+             "/api/health reports ui_build STALE)"),
 ) -> None:
     """Start the control plane on 127.0.0.1 (loopback only)."""
     import os
@@ -211,6 +215,17 @@ def serve(
                       "'aeos serve --release active' for the trusted controller (§09).[/yellow]")
     import uvicorn
 
+    from aeos.core.paths import repo_root as _repo_root
+    from aeos.doctor.model import frontend_build_command
+    from aeos.operations import freshness
+
+    # R28: a git pull changes frontend/ but not frontend/dist; rebuild a stale bundle once when that is safe, never
+    # install anything and never block the start (the old bundle is served and /api/health says ui_build STALE).
+    ui_build = freshness.ensure_ui_fresh(
+        settings, _repo_root(), enabled=not no_ui_build,
+        remedy=f"restart aeos serve, or rebuild: {frontend_build_command()}",
+        echo=lambda line: console.print(line, markup=False, highlight=False))
+    freshness.record_serve_start(settings, _repo_root(), ui_build=ui_build, reload=reload)
     ensure_database()
     console.print(f"DLY AEOS listening on [bold]{settings.base_url}[/bold] (login required)")
     extra: dict[str, Any] = {}

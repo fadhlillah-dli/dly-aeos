@@ -225,6 +225,50 @@ prefix `dly-aeos-X.Y.Z/` and the local one has none, and they are made by differ
 their file hashes differ, and a byte-for-byte match of their contents is NOT-PROVEN. Tie them by the commit, which the
 attestation and the local provenance both record, not by the file hash.
 
+## After git pull: restart serve (UI bundle and backend freshness)
+
+`git pull` updates the source, but not `frontend/dist` (a build output) and not the code a running `aeos serve`
+imported at start (incident 2026-10-28, LESSONS L23: a bundle built on 2026-10-26 was served for two days while five
+frontend commits were missing). After a pull that changed `frontend/` or `backend/`, stop `aeos serve` (Ctrl+C) and
+start it again. The `post-merge` hook in `scripts/git-hooks` prints `frontend/backend changed: restart ./aeos serve`
+after a `git pull` or `git merge` that changed them (installed with `git config core.hooksPath scripts/git-hooks`; it
+only prints and never fails; `git pull --rebase` does not run it).
+
+On start, `aeos serve` (checkout mode, not `--release active`) compares the bundle with HEAD and rebuilds a stale one
+once (`npm run build`, 300 s timeout, one log line, output in `<data>/logs/ui-build.log`) only when
+`frontend/node_modules` matches `frontend/package-lock.json` (the hidden lockfile `node_modules/.package-lock.json`
+lists the same versions) and `git status --porcelain -- frontend` is empty. It never runs `npm ci` or `npm install`.
+Otherwise, or when the build fails or times out, it starts with the old bundle, prints the remedy and reports
+`ui_build` STALE with the reason in `GET /api/health`. `--no-ui-build` skips the rebuild (`ui_build` then says STALE
+with `--no-ui-build` when the bundle is stale). `ui_build.status` is FRESH, REBUILT, STALE, UNVERIFIED, MISSING or
+NOT_RECORDED (the server was not started by `aeos serve` from a checkout). The manual rebuild, from the repository
+root:
+
+```bash
+cd frontend && npm ci --no-audit --no-fund && npm run build
+```
+
+What the Doctor says:
+
+| Check | Status | Meaning |
+|---|---|---|
+| `runtime.frontend_dist` | VERIFIED | the build record `frontend/dist/aeos-build.json` names a clean build of `git rev-parse HEAD:frontend` (a release install: the correspondence its provenance recorded) |
+| `runtime.frontend_dist` | CONFIGURED `FRONTEND_STALE` | "bundle built from frontend tree <a>, HEAD has <b>": restart `aeos serve` or rebuild |
+| `runtime.frontend_dist` | UNKNOWN `FRONTEND_BUILD_UNVERIFIED` | no build record, a build of uncommitted changes or no git checkout: UNVERIFIED, never shown as a pass |
+| `runtime.code_drift` | CONFIGURED `CODE_DRIFT` | the running server loaded an older commit and HEAD changed `backend/`, `requirements.lock` or `pyproject.toml`: "restart aeos serve to load <sha>" |
+| `runtime.code_drift` | VERIFIED | the server runs HEAD, or HEAD changed only other paths (docs, frontend source) |
+| `runtime.code_drift` | NOT_APPLICABLE | no `aeos serve` from a checkout is running (the start record `<data>/run/serve.json` names a process that is gone), or `--reload` |
+
+The fingerprint of `runtime.frontend_dist` includes the HEAD frontend tree and that of `runtime.backend_deps` the
+hash of `requirements.lock`, so a pull that changes them marks the previous result STALE. A backend-only commit keeps
+`runtime.frontend_dist` VERIFIED. Caching: `index.html`, the SPA fallback and `aeos-build.json` are sent with
+`Cache-Control: no-cache`, the content-hashed `/assets/*` with `public, max-age=31536000, immutable`, `/api/*` keeps
+`no-store`, and a missing `/assets/*` file is a 404 (not `index.html`). A tab still on an older build reloads once on
+the `vite:preloadError` event (a time marker in `sessionStorage` stops a reload loop).
+
+NOT-PROVEN: the rebuild and the hook on Windows and macOS Intel (unit and git-subprocess tests ran on macOS arm64
+only); uncommitted backend edits are not code drift (only commits are compared).
+
 ## SLIs and alerts
 
 `aeos ops sli --domain PERSONAL|OFFICE [--raise-alerts] [--json]` · `GET /api/ops/sli` ·

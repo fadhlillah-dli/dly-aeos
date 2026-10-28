@@ -2,6 +2,7 @@
 
 ``controller`` says which code this process runs (§09 zones): ``release`` = an extracted, verified release
 under the data dir; ``checkout`` = the editable source tree. Release id and commit are not sensitive.
+``ui_build`` says whether ``aeos serve`` found the Control Center bundle fresh, rebuilt it or serves a STALE one.
 """
 
 from __future__ import annotations
@@ -40,8 +41,18 @@ def controller_status(settings: Settings) -> dict[str, Any]:
                                      "matches_active", "status")}
 
 
+def ui_build_status(settings: Settings) -> dict[str, Any]:
+    """Whether the Control Center bundle this server serves matched HEAD at start (R28); never raises."""
+    try:
+        from aeos.operations.freshness import health_ui_build
+
+        return health_ui_build(settings)
+    except Exception:
+        return {"status": "UNKNOWN", "reason": "the freshness record could not be read"}
+
+
 @router.get("/api/health")
 def health() -> dict[str, Any]:
     s = get_settings()
     return {"status": "ok", "version": __version__, "schema_version": SCHEMA_VERSION, "environment": s.environment,
-            "controller": controller_status(s)}
+            "controller": controller_status(s), "ui_build": ui_build_status(s)}

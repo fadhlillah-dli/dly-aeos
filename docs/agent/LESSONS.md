@@ -30,7 +30,7 @@ observe -> record with incident -> count strikes -> threshold -> tool -> bite te
 
 `level` is the strongest control that exists today: written-rule, memory, process, test, ci-gate,
 git-hook, harness-hook or tool-refusal. A `PENDING:` tool raises it once merged.
-Evidence: rows describe incidents of 2026-10-26 and 2026-10-27; E1 = static reading, E2 = unit run on macOS arm64.
+Evidence: rows describe incidents of 2026-10-26 to 2026-10-28; E1 = static reading, E2 = unit run on macOS arm64.
 Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PROVEN).
 
 ## Table 1 - Rules with incidents
@@ -59,6 +59,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 | L20 | 2026-10-27 | A test resolved the owner's real GitHub token through the real OpenBao (AppRole login from the macOS Keychain) and called the live GitHub API; CI has no vault, so it stayed green | secret | 1 | test | tests/conftest.py + tests/unit/test_test_isolation.py | yes | Tests run only in a sandbox that has no route to a real keyring or vault |
 | L21 | 2026-10-27 | A runbook told the owner to copy the only offline recovery copy of the vault unseal key to a USB volume and then delete it on a separate line, so the delete ran even when the copy failed (caught in review) | data-loss | 1 | test | scripts/paste_safe.py + tests/unit/test_owner_commands_paste_safe.py | no | Owner documents move files only through a command that verifies the copy itself |
 | L22 | 2026-10-27 | Twice in one day a step whose failure had to stop the next one was chained with ';': a scripted conflict resolution failed and the commit still ran and committed conflict markers; a scripted rename failed and a merge still ran; a third time that day a gate piped into 'tail' (mypy piped into 'tail -1') hid its exit code and a commit with a type error ran (caught before the push) | process | 3 | git-hook | scripts/gates.py | yes | Agents run multi-step scripts only through a runner that stops at the first failing step |
+| L23 | 2026-10-28 | After git pull the server kept serving a Control Center bundle built two days earlier (five frontend commits missing); the Doctor only checked that frontend/dist/index.html existed and stayed VERIFIED | correctness | 1 | test | backend/aeos/operations/freshness.py + tests/unit/test_ui_freshness.py | no | Pulling and serving go through one command that rebuilds and restarts by itself |
 
 ## Rules (one line each; the incident is in table 1)
 
@@ -84,6 +85,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 * L20 Tests never reach the owner's real secret stores: the SecretGuard in tests/conftest.py hides the OS keyring (also from sandboxed child processes), a real OpenBao and the owner's real Claude Code login from every test; a test that needs a secret installs a fake (secrets_memory, its own keyring, a vault on a free port, a fake claude), and only the real_claude_cli fixture with the owner's DLY_AEOS_REAL_CLAUDE=1 runs the real Claude Code. Never query the real vault or keyring to check anything.
 * L21 An owner command that copies and then deletes runs the delete only in one chain after a compare: `cp SRC DST && cmp SRC DST && rm SRC`, paths quoted; never a separate `rm` line.
 * L22 Chain a step whose failure must stop the next one with `&&` or a checked `if`, never `;` or a separate line, and run chains with `set -o pipefail` (a gate piped into `tail` or `grep` otherwise reports the pipe's status, not its own); check the result before a commit, merge or push. Tool: the pre-push hook (scripts/gates.py --hook) runs the static gates and the conflict-markers gate on the pushed tree, so a commit that slipped through never reaches the remote.
+* L23 After a `git pull` that changed `frontend/` or `backend/`, restart `aeos serve`; it rebuilds a stale UI bundle once when that is safe. The Doctor (`runtime.frontend_dist`, `runtime.code_drift`) and `/api/health` `ui_build` report what is still stale.
 
 ## Table 2 - Proven methods
 

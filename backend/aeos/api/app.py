@@ -24,6 +24,10 @@ from aeos.core.redaction import redact_text
 
 log = logging.getLogger("aeos.api")
 
+# R28: after a rebuild the browser must fetch the new index.html; hashed assets never change under one name.
+NO_CACHE = {"Cache-Control": "no-cache"}
+IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
 
 def _frontend_dist() -> Path | None:
     for candidate in (repo_root() / "frontend" / "dist", Path(__file__).resolve().parent.parent / "static"):
@@ -104,14 +108,21 @@ def create_app(
             return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": "unknown API route", "details": {}}})
         if dist is None:
             return JSONResponse(
-                status_code=503,
+                status_code=503, headers=NO_CACHE,
                 content={"error": {"code": "FRONTEND_NOT_BUILT",
                                    "message": "frontend not built; run the bootstrap script or `npm run build` in frontend/",
                                    "details": {}}},
             )
         target = (dist / full_path).resolve()
-        if full_path and target.is_file() and dist.resolve() in target.parents:
-            return FileResponse(target)
-        return FileResponse(dist / "index.html")
+        found = bool(full_path) and target.is_file() and dist.resolve() in target.parents
+        if full_path.startswith("assets/"):
+            # content-hashed build output: cached for good; a missing chunk (old index.html after a rebuild) is a 404,
+            # never index.html served as JavaScript (the UI then reloads once on vite:preloadError)
+            if found:
+                return FileResponse(target, headers=IMMUTABLE)
+            return JSONResponse(status_code=404, headers=NO_CACHE,
+                                content={"error": {"code": "NOT_FOUND", "message": "unknown asset", "details": {}}})
+        # index.html, the SPA fallback, aeos-build.json and other unhashed files: revalidate on every load
+        return FileResponse(target if found else dist / "index.html", headers=NO_CACHE)
 
     return app

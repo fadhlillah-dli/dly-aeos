@@ -5,11 +5,14 @@ import { BrowserRouter } from "react-router-dom";
 import { ApiError } from "./api/client";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthContext";
+import { installPreloadRecovery } from "./lib/preloadRecovery";
 import { applyTheme } from "./lib/theme";
 import "./index.css";
 
 // Apply the stored light/dark choice before the first paint (CSP forbids an inline <head> script).
 applyTheme();
+// A tab still on an older build reloads once when one of its chunks is gone after a rebuild (R28).
+installPreloadRecovery();
 
 const queryClient = new QueryClient({
   defaultOptions: {
