@@ -57,9 +57,10 @@ def acceptance_is_valid(
 def publication_review(session: Session, run: Any, head_commit: str | None) -> Any:
     """Whether worker run *run* may publish *head_commit* (additive, owner rule R44, ADR-0132): a
     ``publication_review.PublicationReview`` that allows it only when the run's latest Claude checkpoint review is
-    COMPLETED, non-MOCK, bound to exactly that head through its checkpoint package evidence, a PASS not contradicted
-    by its own HIGH/CRITICAL findings, and answered by a proven Claude model of the review policy's family. The broker
-    refuses every push/PR of the run otherwise (``REVIEW_REQUIRED``)."""
+    COMPLETED, non-MOCK, bound to exactly that head through its checkpoint package evidence, of a package whose diff
+    excerpt was not truncated, a PASS not contradicted by its own HIGH/CRITICAL findings, and answered by an Opus model
+    (``PUBLICATION_REVIEWER_FAMILIES``, owner rule 2026-10-28) that also satisfies the review policy. The broker refuses
+    every push/PR of the run otherwise (``REVIEW_REQUIRED``)."""
     from aeos.verification.publication_review import publication_review as impl
 
     return impl(session, run, head_commit)

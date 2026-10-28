@@ -206,7 +206,7 @@ class FakeClaude:
                 return self._result(req, None, ok=False, model_resolved=None, error_code="QUOTA_EXHAUSTED",
                                     error="weekly limit reached", quota_exhausted=True)
             return self._result(req, review_payload(self.review_verdict, copy.deepcopy(self.review_findings)),
-                                model_resolved="claude-fable-5-1")
+                                model_resolved=RESOLVED.get(req.model, "claude-fable-5-1"))
         raise AssertionError(f"unexpected bridge purpose {req.purpose}")
 
 

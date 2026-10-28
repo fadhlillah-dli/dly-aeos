@@ -48,6 +48,11 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is requ
 
 @pytest.fixture
 def chain(settings, monkeypatch, tmp_path):
+    from aeos.verification import review as review_mod
+
+    # The broker publishes only a head with an Opus checkpoint review PASS (owner rule R44 and the owner rule of
+    # 2026-10-28: the checkpoint review is Opus, never Fable; ADR-0132): the review is requested from Opus.
+    monkeypatch.setattr(review_mod, "DEFAULT_REVIEW_MODEL", "opus")
     with respx.mock(assert_all_called=False, assert_all_mocked=True) as rmock:
         yield from build_chain(settings, monkeypatch, tmp_path, rmock)
 
@@ -139,7 +144,7 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
         assert s.scalar(select(AcceptanceRecord).where(AcceptanceRecord.task_id == chain.task_id)) is None
         q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native"))
         # recorded per model family — the scope the bridge clears after a later successful call
-        assert q.state == "EXHAUSTED" and q.source == "observed-limit" and q.scope == "fable"
+        assert q.state == "EXHAUSTED" and q.source == "observed-limit" and q.scope == "opus"
     run_view = chain.ok(chain.client.get(f"/api/runs/{run_id}"))
     assert run_view["ui_state"] == "WAITING_QUOTA"
 
@@ -156,7 +161,7 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
     # the limit lifted: the run no longer waits and Max goes back to UNKNOWN (never "OK", never forever EXHAUSTED)
     assert run.quota_status is None
     with session_factory()() as s:
-        q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+        q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "opus"))
         assert q.state == "UNKNOWN" and q.source == "observed-successful-call"
         assert s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native",
                                                  QuotaState.state == "EXHAUSTED")) is None

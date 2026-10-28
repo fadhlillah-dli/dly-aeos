@@ -44,7 +44,7 @@ def _git(cwd: Path, *args: str) -> str:
 @pytest.fixture
 def env(db, tmp_path):
     src = tmp_path / "candidate"
-    init_git_repo(src)
+    base = init_git_repo(src)
     _git(src, "checkout", "-q", "-b", BRANCH)
     (src / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(src, "add", "-A")
@@ -54,7 +54,7 @@ def env(db, tmp_path):
     subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
     p = make_project(db)
     run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="REVIEW", workspace_ref=str(src),
-                    branch=BRANCH, head_commit=head, git_dir_ref=str(src / ".git"))
+                    branch=BRANCH, head_commit=head, base_commit=base, git_dir_ref=str(src / ".git"))
     db.add(run)
     db.flush()
     record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)

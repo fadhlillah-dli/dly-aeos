@@ -1,4 +1,4 @@
-"""A worker cannot commit to the real repository, push or open a pull request itself (owner rule R44, 2026-10-29,
+"""A worker cannot commit to the real repository, push or open a pull request itself (owner rule R44, 2026-10-28,
 ADR-0132; master §25/§26: workers hold no remote credential, only the trusted broker writes ``aeos/*`` branches and
 opens PRs).
 
@@ -7,6 +7,10 @@ What enforces it, seam by seam (each test has a near miss that shows the same op
 * git in the worker's environment obtains no code-host credential, even when the owner's own home holds one: the
   sandbox environment redirects HOME, empties the global git config, ignores the system config (where a credential
   helper such as the OS keychain lives) and disables prompts;
+* git in the worker's environment refuses every remote transport (``processes.GIT_NO_REMOTE_ENV``): only the file
+  transport is allowed, ssh and askpass are a command that fails, and command-line config outranks the repository's
+  own (the ``worktree`` strategy shares the owner's repository config with its remotes and any ``core.sshCommand``;
+  OpenSSH would find the OS account's ~/.ssh whatever HOME says);
 * the isolated candidate (self-build) has no remote at all, so ``git push`` has no destination;
 * the broker's only worker-facing HTTP surface is the model proxy (``/broker/v1/models`` and ``/chat/completions``):
   a capability token of the push/PR kinds is refused there, and delivery's publication route needs the owner's
@@ -22,6 +26,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,6 +86,64 @@ def test_git_in_the_worker_environment_gets_no_credential_even_when_the_owner_ha
     assert PLACEHOLDER not in worker.stdout + worker.stderr and "password=" not in worker.stdout
     helpers = _git(["config", "--get-all", "credential.helper"], cwd=tmp_path, env=env)
     assert helpers.stdout.strip() == "", "no credential helper is visible to the worker"
+
+
+FAKE_SSH = """import subprocess
+import sys
+from pathlib import Path
+
+with Path(sys.argv[1]).open("a", encoding="utf-8") as log:  # every invocation is recorded
+    log.write(" ".join(sys.argv[2:]) + "\\n")
+program, _, path = sys.argv[-1].partition(" ")  # git-receive-pack '<path>'
+sys.exit(subprocess.call(["git", program.replace("git-", "", 1), path.strip("'")]))
+"""
+
+
+def _fake_ssh(tmp_path: Path) -> tuple[str, Path]:
+    """A stand-in for ssh that serves the repository locally (never the owner's ssh or key): the command for
+    ``core.sshCommand`` and the log of its invocations. On POSIX also an ``ssh`` on PATH running the same."""
+    script = tmp_path / "fake_ssh.py"
+    script.write_text(FAKE_SSH, encoding="utf-8")
+    log = tmp_path / "fake-ssh.log"
+    log.write_text("", encoding="utf-8")
+    command = f'"{Path(sys.executable).as_posix()}" "{script.as_posix()}" "{log.as_posix()}"'
+    if sys.platform != "win32":
+        bin_dir = tmp_path / "fake-bin"
+        bin_dir.mkdir()
+        shim = bin_dir / "ssh"
+        shim.write_text(f"#!/bin/sh\nexec {command} \"$@\"\n", encoding="utf-8")
+        shim.chmod(0o755)
+    return command, log
+
+
+def test_git_in_the_worker_environment_refuses_every_remote_transport(tmp_path, monkeypatch):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True, capture_output=True, timeout=60)
+    src = tmp_path / "source"
+    init_git_repo(src)
+    command, log = _fake_ssh(tmp_path)
+    # what a worktree candidate shares: the owner's repository config, with an ssh remote and its ssh command
+    for key, value in (("remote.origin.url", "fake-host:../remote.git"), ("core.sshCommand", command),
+                       ("ssh.variant", "simple")):
+        subprocess.run(["git", "config", key, value], cwd=src, check=True, capture_output=True, timeout=60)
+    owner = _owner_env(tmp_path / "owner-home-empty")
+    if sys.platform != "win32":
+        owner["PATH"] = str(tmp_path / "fake-bin") + os.pathsep + owner["PATH"]
+    near_miss = _git(["push", "origin", "HEAD:refs/heads/aeos/owner"], cwd=src, env=owner)
+    assert near_miss.returncode == 0, near_miss.stderr  # the owner's own push over ssh works (so the refusal below
+    assert log.read_text(encoding="utf-8").count("git-receive-pack") == 1  # is for the right reason)
+    monkeypatch.setenv("PATH", owner["PATH"])  # the fake ssh is on the worker's PATH too
+    env = processes.build_sandbox_env(processes.SandboxDirs.create(tmp_path / "sbx"), run_id="run-no-remote")
+    for args in (["push", "origin", "HEAD:refs/heads/aeos/worker"],
+                 ["push", "fake-host:../remote.git", "HEAD:refs/heads/aeos/worker"],
+                 ["-c", "protocol.ssh.allow=always", "push", "origin", "HEAD:refs/heads/aeos/worker"],
+                 ["ls-remote", "https://127.0.0.1:9/repository.git"]):
+        refused = _git(args, cwd=src, env=env)
+        assert refused.returncode != 0 and "not allowed" in refused.stderr, (args, refused.stderr)
+    assert log.read_text(encoding="utf-8").count("git-receive-pack") == 1, "ssh never ran for the worker"
+    assert _git(["for-each-ref", "--format=%(refname)"], cwd=remote, env=owner).stdout.split() == [
+        "refs/heads/aeos/owner"]
+    assert _git(["status", "--porcelain"], cwd=src, env=env).returncode == 0  # local git still works
 
 
 def test_the_isolated_candidate_has_no_remote_so_a_worker_push_has_no_destination(tmp_path, monkeypatch):

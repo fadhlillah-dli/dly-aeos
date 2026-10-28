@@ -171,10 +171,18 @@ def review(client: AuthedClient, run_id: str) -> dict[str, Any]:
     return r.json()
 
 
-def claude_code_envelope(structured: dict[str, Any], model: str = "claude-fable-5-1") -> dict[str, Any]:
+RESOLVED_REVIEW_MODELS = {"opus": "claude-opus-5-5", "fable": "claude-fable-5-1"}
+
+
+def claude_code_envelope(structured: dict[str, Any], model: str | None = None) -> dict[str, Any]:
     """What `claude -p --output-format json` prints for the manual package: the result envelope whose
-    ``modelUsage`` proves which Claude model answered (§15 — a bare JSON object proves nothing)."""
+    ``modelUsage`` proves which Claude model answered (§15 — a bare JSON object proves nothing). By default the
+    model the checkpoint review requests (``review.DEFAULT_REVIEW_MODEL``) answers."""
     import json
+
+    from aeos.verification import review as review_mod
+
+    model = model or RESOLVED_REVIEW_MODELS.get(review_mod.DEFAULT_REVIEW_MODEL, "claude-fable-5-1")
 
     return {"type": "result", "subtype": "success", "is_error": False, "result": json.dumps(structured),
             "structured_output": structured, "session_id": "manual-package-session", "duration_ms": 1200,

@@ -1,4 +1,4 @@
-"""Owner rule R44 (2026-10-29, ADR-0132): a worker candidate is published only after a Claude review PASS of its exact
+"""Owner rule R44 (2026-10-28, ADR-0132): a worker candidate is published only after a Claude review PASS of its exact
 head (paraphrased: all OpenCode and OpenRouter work must pass a Claude review; a worker has no right to commit, push,
 let alone merge).
 
@@ -159,20 +159,88 @@ def test_a_pass_contradicted_by_its_own_high_findings_is_refused(db, env):
     _pushed(db, env)
 
 
-@pytest.mark.parametrize("resolved,needle", [
-    ("claude-sonnet-5-5", "(family sonnet) is not the requested family fable"),
-    (None, "resolved reviewer model is UNKNOWN"),
-    ("gpt-5", "(family UNKNOWN) is not the requested family fable"),
-])
-def test_a_review_by_a_model_outside_the_policy_family_is_refused(db, env, resolved, needle):
-    record_claude_review(db, env["run"], model_resolved=resolved)
-    _refused_push(db, env, needle, "MODEL")
+OPUS_ONLY = "only an Opus review opens publication (owner rule 2026-10-28: the checkpoint review is Opus, never Fable)"
 
 
-def test_a_review_from_the_allowed_family_of_another_generation_passes(db, env):
-    """Near miss of the model rule: the family is the policy, not one exact id."""
-    record_claude_review(db, env["run"], model_requested="opus", model_resolved="claude-opus-5-5")
+def test_a_fable_pass_bound_to_the_head_is_refused(db, env):
+    """Owner rule 2026-10-28: never Fable. A Fable request validates nothing - the resolved model must be Opus."""
+    record_claude_review(db, env["run"], model_requested="fable", model_resolved="claude-fable-5-1")
+    _refused_push(db, env, f"answered by claude-fable-5-1 (family fable); {OPUS_ONLY}", "MODEL")
+    record_claude_review(db, env["run"])  # near miss: an Opus PASS of the same head publishes
     _pushed(db, env)
+
+
+@pytest.mark.parametrize("resolved,family", [("claude-sonnet-5-5", "sonnet"), ("claude-haiku-4-5", "haiku"),
+                                             (None, "UNKNOWN"), ("gpt-5", "UNKNOWN")])
+def test_a_review_by_any_other_model_is_refused(db, env, resolved, family):
+    record_claude_review(db, env["run"], model_requested="opus", model_resolved=resolved)
+    _refused_push(db, env, f"(family {family}); {OPUS_ONLY}", "MODEL")
+
+
+def test_an_opus_review_also_satisfies_the_review_policy(db, env):
+    """An Opus answer to a request of another family is still not a proven policy identity (acceptance's rule)."""
+    record_claude_review(db, env["run"], model_requested="fable", model_resolved="claude-opus-5-5")
+    _refused_push(db, env, "does not satisfy the Claude review policy", "MODEL")
+    record_claude_review(db, env["run"], model_requested="opus", model_resolved="claude-opus-6-0")  # another Opus
+    _pushed(db, env)
+
+
+def test_a_review_of_a_truncated_package_is_refused(db, env):
+    """The reviewer sees at most DIFF_EXCERPT_CHARS of the diff; a cut package never opens publication."""
+    record_claude_review(db, env["run"], diff_truncated=True)
+    _refused_push(db, env, "the reviewer saw only part of the diff (the checkpoint package excerpt was truncated); "
+                           "split the task into smaller changes and review each one", "TRUNCATED")
+    record_claude_review(db, env["run"])  # near miss: the whole diff was in the package
+    _pushed(db, env)
+
+
+# ----------------------------------------------------------------------------- push: the history that leaves
+def _commit_all(src: Path, message: str) -> str:
+    _git(src, "add", "-A")
+    _git(src, "commit", "-q", "-m", message)
+    return _git(src, "rev-parse", "HEAD")
+
+
+def _history_refused(db, env, message: str) -> PolicyDenied:
+    with pytest.raises(PolicyDenied) as e:
+        _push(db, env)
+    assert e.value.code == "REVIEW_REQUIRED" and e.value.details["reason"] == "HISTORY", e.value.details
+    assert message in e.value.message and "worker-made commits are never published" in e.value.message
+    assert e.value.message.startswith(f"no Claude review PASS for head {env['run'].head_commit[:12]}: HISTORY - ")
+    assert _remote_refs(env) == "", "nothing reached the remote"
+    row = db.scalar(select(AuditEvent).where(AuditEvent.action == "broker.git.push_branch",
+                                             AuditEvent.result == "DENIED").order_by(AuditEvent.seq.desc()))
+    assert row is not None and row.details["code"] == "REVIEW_REQUIRED" and row.details["reason"] == "HISTORY"
+    return e.value
+
+
+def test_worker_commits_that_add_then_delete_a_file_are_never_published(db, env):
+    """The reviewer saw the net diff base..head. Two worker commits that add a file and delete it again leave no
+    trace in that diff, but the history would carry the file to the remote: refused, although Claude passed the
+    head."""
+    src, run = env["src"], env["run"]
+    _git(src, "reset", "-q", "--hard", env["base"])
+    (src / "notes.txt").write_text("not for the remote\n", encoding="utf-8")
+    _commit_all(src, "wip: notes")
+    (src / "notes.txt").unlink()
+    (src / "feature.txt").write_text("work\n", encoding="utf-8")
+    run.head_commit = _commit_all(src, "aeos: candidate")
+    record_claude_review(db, run)  # an Opus PASS of exactly this head (its net diff has no notes.txt)
+    _history_refused(db, env, f"base {env['base'][:12]}..head is 2 commit(s)")
+    # near miss: the runtime's single candidate commit of the same tree on the base is published
+    _git(src, "reset", "-q", "--soft", env["base"])
+    run.head_commit = _commit_all(src, "aeos: candidate")
+    record_claude_review(db, run)
+    res = _push(db, env)
+    assert res["ok"] and res["head_sha"] == run.head_commit
+    assert _git(env["bare"], "rev-list", f"refs/heads/{BRANCH}", "--not", env["base"]) == run.head_commit
+    assert _git(env["bare"], "cat-file", "-t", f"refs/heads/{BRANCH}:feature.txt") == "blob"
+
+
+def test_a_run_without_a_recorded_base_is_never_published(db, env):
+    env["run"].base_commit = None
+    record_claude_review(db, env["run"])
+    _history_refused(db, env, "the run has no runtime-recorded base commit")
 
 
 @pytest.mark.parametrize("status", ["WAITING_QUOTA", "NEEDS_DECISION", "FAILED"])
@@ -195,7 +263,7 @@ def test_a_review_without_its_package_binding_is_refused(db, env):
     """A PASS whose head cannot be proven (no package evidence, or package evidence of another review) never counts."""
     db.add(ReviewRecord(target_type="worker_run", target_id=env["run"].id, target_hash="sha256:" + "a" * 64,
                         project_id=env["run"].project_id, domain="PERSONAL", run_id=env["run"].id,
-                        reviewer_kind="CLAUDE", model_requested="fable", model_resolved="claude-fable-5-1",
+                        reviewer_kind="CLAUDE", model_requested="opus", model_resolved="claude-opus-5-5",
                         verdict="PASS-CONTROLLED", status="COMPLETED"))
     db.flush()
     _refused_push(db, env, "is not bound to a recorded head commit", "UNBOUND")
@@ -308,24 +376,46 @@ def test_pr_is_allowed_with_a_pass_bound_to_the_head(db, env, monkeypatch, secre
 # ----------------------------------------------------------------------------- the real review paths bind the head
 @pytest.fixture
 def reviewed_world(db, monkeypatch):
+    """A verified run whose checkpoint review is requested from Opus (owner rule 2026-10-28; TaskSpecs are
+    append-only, so the default the review uses is set, as the Opus switch of the stage models does)."""
     FakeWorkforce().install(monkeypatch)
+    monkeypatch.setattr(review, "DEFAULT_REVIEW_MODEL", "opus")
     w = make_world(db)
     record_verification(db, w)  # the verifier's head for this run
     return w
+
+
+OPUS = "claude-opus-5-5"
 
 
 def test_a_native_review_records_the_binding_the_gate_reads(db, reviewed_world, monkeypatch):
     """What ``review_run`` writes through the bridge is what the broker checks (not only the test helper)."""
     w = reviewed_world
     install_doctor(monkeypatch)
-    FakeBridge(result=claude_result(review_payload("PASS-CONTROLLED"))).install(monkeypatch)
+    FakeBridge(result=claude_result(review_payload("PASS-CONTROLLED"), model=OPUS)).install(monkeypatch)
     out = review.review_run(db, w.run.id, actor="t")
-    assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED"
-    assert gate.reviewed_head(db, out.review) == w.run.head_commit
+    assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED", out.review.status_reason
+    binding = gate.review_binding(db, out.review)
+    assert binding == gate.ReviewBinding(head=w.run.head_commit, diff_truncated=False)
     ok = gate.publication_review(db, w.run, w.run.head_commit)
     assert ok.allowed and ok.reason == "PASS" and ok.review_id == out.review.id, ok
     moved = gate.publication_review(db, w.run, "e" * 40)  # a later worker commit is not covered
     assert not moved.allowed and moved.reason == "OTHER_HEAD"
+
+
+def test_a_native_fable_review_never_opens_publication(db, monkeypatch):
+    """A review requested from Fable (the default before the Opus switch of the stage models) is recorded as a
+    PASS, but it never publishes (owner rule 2026-10-28)."""
+    FakeWorkforce().install(monkeypatch)
+    monkeypatch.setattr(review, "DEFAULT_REVIEW_MODEL", "fable")
+    w = make_world(db)
+    record_verification(db, w)
+    install_doctor(monkeypatch)
+    FakeBridge(result=claude_result(review_payload(), model="claude-fable-5-1")).install(monkeypatch)
+    out = review.review_run(db, w.run.id, actor="t")
+    assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED"
+    res = gate.publication_review(db, w.run, w.run.head_commit)
+    assert not res.allowed and res.reason == "MODEL" and OPUS_ONLY in res.message
 
 
 def test_a_manual_package_review_keeps_the_binding(db, reviewed_world, monkeypatch):
@@ -335,8 +425,8 @@ def test_a_manual_package_review_keeps_the_binding(db, reviewed_world, monkeypat
     waiting = review.review_run(db, w.run.id, actor="t").review
     assert not gate.publication_review(db, w.run, w.run.head_commit).allowed  # waiting for the manual result
     out = review.collect_manual_review(db, waiting.id, actor="owner",
-                                       structured=claude_envelope(review_payload()))
-    assert out.review.status == "COMPLETED" and out.review.mode == "MANUAL_FALLBACK"
+                                       structured=claude_envelope(review_payload(), model=OPUS))
+    assert out.review.status == "COMPLETED" and out.review.mode == "MANUAL_FALLBACK", out.review.status_reason
     assert gate.publication_review(db, w.run, w.run.head_commit).allowed
 
 
@@ -344,7 +434,7 @@ def test_a_native_fail_review_refuses(db, reviewed_world, monkeypatch):
     w = reviewed_world
     install_doctor(monkeypatch)
     FakeBridge(result=claude_result(review_payload("FAIL", [{"severity": "HIGH", "title": "bug", "detail": "d",
-                                                              "required_action": "fix"}]))).install(monkeypatch)
+                                                              "required_action": "fix"}]), model=OPUS)).install(monkeypatch)
     out = review.review_run(db, w.run.id, actor="t")
     assert out.review.verdict == "FAIL"
     res = gate.publication_review(db, w.run, w.run.head_commit)

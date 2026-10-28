@@ -352,7 +352,7 @@ def office_run(db, owner, ready_office, tmp_path):
                              auth_scope={"provider": "bitbucket"}, rationale="enable", details={"enabled": True})
     enablement.set_flag(db, "bitbucket", True)
     src = tmp_path / "candidate"
-    init_git_repo(src)
+    base = init_git_repo(src)
     _git(src, "checkout", "-q", "-b", BRANCH)
     (src / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(src, "add", "-A")
@@ -365,7 +365,8 @@ def office_run(db, owner, ready_office, tmp_path):
         db.add(task)
         db.flush()
     run = WorkerRun(task_id=task.id, project_id=ready_office.id, domain="OFFICE", execution_status="REVIEW",
-                    workspace_ref=str(src), branch=BRANCH, head_commit=head, requested_by=owner.id)
+                    workspace_ref=str(src), branch=BRANCH, head_commit=head, base_commit=base,
+                    requested_by=owner.id)
     db.add(run)
     db.flush()
     record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
@@ -853,17 +854,18 @@ def test_the_attribution_samples_of_this_file_are_attribution_for_the_canonical_
 
 
 # ------------------------------------------------------------------------------------------- owner rule R44
-# (2026-10-29, ADR-0132; paraphrased: all OpenCode and OpenRouter work must pass a Claude review): the Bitbucket
+# (2026-10-28, ADR-0132; paraphrased: all OpenCode and OpenRouter work must pass a Claude review): the Bitbucket
 # push and PR of a worker run need the run's latest Claude checkpoint review to be a PASS of exactly the head being
 # published, before any grant, credential or request (the GitHub path: tests/unit/test_broker_publication_review.py).
 def _new_head(office_run) -> str:
     from tests.conftest import TEST_GIT_EMAIL, TEST_GIT_NAME
 
     src = office_run["src"]
-    (src / "later.txt").write_text("one more worker commit\n", encoding="utf-8")
+    (src / "later.txt").write_text("a later candidate of the same run\n", encoding="utf-8")
     _git(src, "add", "-A")
+    # amended: the new head is again the single candidate commit on the base (only the reviewed head differs)
     subprocess.run(["git", "-c", f"user.name={TEST_GIT_NAME}", "-c", f"user.email={TEST_GIT_EMAIL}", "-c",
-                    "commit.gpgsign=false", "commit", "-q", "-m", "aeos: candidate"], cwd=src, check=True,
+                    "commit.gpgsign=false", "commit", "-q", "--amend", "-m", "aeos: candidate"], cwd=src, check=True,
                    capture_output=True)
     return _git(src, "rev-parse", "HEAD")
 

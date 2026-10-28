@@ -342,13 +342,13 @@ def prepare_launch(settings: Any, *, domain: str) -> dict[str, Any]:
 # ----------------------------------------------------------------------------- worker launch
 def worker_env(run_id: str, extra: dict[str, str]) -> dict[str, str]:
     """The ONLY environment a worker container receives (paths/flags; no secret ever)."""
-    from aeos.worker_runtime.processes import RUN_MARKER, is_secret_like
+    from aeos.worker_runtime.processes import GIT_NO_REMOTE_ENV, RUN_MARKER, is_secret_like
 
     env = {
         "HOME": CONTAINER_HOME, "XDG_CONFIG_HOME": f"{CONTAINER_HOME}/.config",
         "XDG_DATA_HOME": f"{CONTAINER_HOME}/.local/share", "XDG_CACHE_HOME": f"{CONTAINER_HOME}/.cache",
         "XDG_STATE_HOME": f"{CONTAINER_HOME}/.local/state", "TMPDIR": "/tmp",  # noqa: S108 - container tmpfs
-        "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_NOSYSTEM": "1", "NO_UPDATE_NOTIFIER": "1", RUN_MARKER: run_id,
+        "GIT_CONFIG_NOSYSTEM": "1", **GIT_NO_REMOTE_ENV, "NO_UPDATE_NOTIFIER": "1", RUN_MARKER: run_id,
         **extra,
     }
     return {k: v for k, v in env.items() if not is_secret_like(k, v)}

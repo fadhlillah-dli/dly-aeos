@@ -346,7 +346,7 @@ def test_refspec_accepts_only_full_sha_pinned_sources():
 def test_push_is_sha_pinned_returns_head_sha_and_notifies_delivery(db, fakes, tmp_path):
     branch = "aeos/task-a-1234abcd"
     src = tmp_path / "candidate"
-    init_git_repo(src)
+    base = init_git_repo(src)
     _git(src, "checkout", "-q", "-b", branch)
     (src / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(src, "add", "-A")
@@ -356,7 +356,7 @@ def test_push_is_sha_pinned_returns_head_sha_and_notifies_delivery(db, fakes, tm
     subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True, timeout=60)
     p = make_project(db)
     run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="REVIEW", workspace_ref=str(src),
-                    branch=branch, head_commit=head)
+                    branch=branch, head_commit=head, base_commit=base)
     db.add(run)
     db.flush()
     record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)

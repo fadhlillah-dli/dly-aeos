@@ -844,7 +844,7 @@ task run again. A fixture that only looks like a key is assembled from parts at 
 
 ## Publication needs a Claude review of the exact head (owner rule R44, ADR-0132)
 
-Owner rule R44 (2026-10-29), paraphrased: all OpenCode and OpenRouter work must pass a Claude review; a worker has no
+Owner rule R44 (2026-10-28), paraphrased: all OpenCode and OpenRouter work must pass a Claude review; a worker has no
 right to commit, push, let alone merge, as the architecture says.
 
 * **Who publishes.** Only the trusted broker pushes a worker run's `aeos/*` branch and opens its draft PR (GitHub
@@ -855,16 +855,24 @@ right to commit, push, let alone merge, as the architecture says.
   maintainer's) with your own credential.
 * **The gate.** Before every push and every PR of a run, the broker checks the run's latest Claude checkpoint review
   (`aeos verify review <run id>`, or the manual package collected with `aeos verify collect-review <review id>`): it
-  must be COMPLETED, not MOCK, a PASS that its own HIGH/CRITICAL findings do not contradict, answered by a proven
-  Claude model of the review policy's family, and bound to exactly the head being published (the head named by the
-  review's checkpoint package). This comes after the run-state, runtime-head and quarantine checks (a quarantined
-  patch still needs your release decision too) and before any grant, credential or request.
+  must be COMPLETED, not MOCK, a PASS that its own HIGH/CRITICAL findings do not contradict, answered by an **Opus**
+  model (owner rule 2026-10-28: never Fable; a Fable review is recorded but never publishes) that also satisfies the
+  review policy, of a package that showed the whole diff (the reviewer sees at most 60,000 characters), and bound to
+  exactly the head being published (the head named by the review's checkpoint package). This comes after the
+  run-state, runtime-head and quarantine checks (a quarantined patch still needs your release decision too) and before
+  any grant, credential or request. At the push the broker also checks, in its private mirror, that the head is the
+  runtime's single candidate commit on the run's base: the history that leaves is the diff the reviewer saw.
 * **Refusal.** `REVIEW_REQUIRED`: "no Claude review PASS for head <sha12>: <why>", audited as `broker.<operation>`
   DENIED with `details.reason`: `NO_REVIEW`, `OTHER_HEAD` (the review covers an older head: a worker commit came
-  after it), `NOT_PASS`, `FINDINGS`, `MODEL`, `NOT_COMPLETED` (waiting for quota or a manual result), `MOCK`,
-  `NOT_CLAUDE`, `UNBOUND` (no checkpoint package binding), `NO_HEAD`, `REVIEW_GATE_UNAVAILABLE`. `prepare-pr`
+  after it), `TRUNCATED` (the package cut the diff: split the task into smaller ones), `HISTORY` (worker-made
+  commits between the base and the head, or no recorded base: run the task again), `NOT_PASS`, `FINDINGS`, `MODEL`
+  (not Opus, or not the policy's identity), `NOT_COMPLETED` (waiting for quota or a manual result), `MOCK`,
+  `NOT_CLAUDE`, `UNBOUND` (no intact checkpoint package binding), `NO_HEAD`, `REVIEW_GATE_UNAVAILABLE`. `prepare-pr`
   answers with the same code. Remedy: request the review of the current head and publish after its PASS; a FAIL
   verdict goes to a repair attempt, never to publication.
+* **Worker git.** Git in a worker's environment refuses every remote transport (only `file` is allowed; ssh and
+  askpass are a failing command; the credential helper is emptied), whatever the shared repository config of a
+  `worktree` candidate says.
 
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 

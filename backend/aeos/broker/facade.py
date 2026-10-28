@@ -96,7 +96,7 @@ def push_task_branch(
     credential), ``COMMIT_IDENTITY_MISMATCH``, ``AI_ATTRIBUTION_IN_COMMIT`` or ``COMMIT_RANGE_UNBOUNDED``; the
     refusal is audited and the outbox row FAILED (nothing reached the remote).
 
-    Owner rule R44 (additive, 2026-10-29, ADR-0132): the run's latest Claude checkpoint review must be a PASS bound to
+    Owner rule R44 (additive, 2026-10-28, ADR-0132): the run's latest Claude checkpoint review must be a PASS bound to
     exactly the runtime head being pushed (``aeos.verification.facade.publication_review``), else
     ``PolicyDenied(REVIEW_REQUIRED)`` (audited) before any grant is consumed or credential read."""
     from aeos.broker.git_broker import push_task_branch as impl
