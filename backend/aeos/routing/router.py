@@ -53,8 +53,13 @@ def _eval_summary(r: ModelRoute) -> dict[str, Any]:
     return service.eval_summary(r)
 
 
+# The decision kind the router requires per active status (service._route_rejections): a stale decision of the other
+# kind must never make a route look active.
+_ACTIVE_KIND = {"APPROVED": ("ROUTE_ACTIVATION",), "TRIAL": ("TRIAL",)}
+
+
 def _active_decision_view(session: Session, r: ModelRoute) -> dict[str, Any] | None:
-    for kind in ("ROUTE_ACTIVATION", "TRIAL"):
+    for kind in _ACTIVE_KIND.get(r.status, ("ROUTE_ACTIVATION", "TRIAL")):
         d = service.find_route_decision(session, kind=kind, route=r)
         if d is not None:
             details = d.details or {}
@@ -270,7 +275,11 @@ def list_routes(db: DB, principal: CurrentPrincipal, pool: str | None = None, st
         # DESIGN as long as any seeded design row is listed: a few catalog-discovered LIVE rows never
         # relabel the registry as live runtime data (§37, §50 'Katalog blueprint ... belum diprobe')
         "mode": "LIVE" if rows and all(r.mode == "LIVE" for r in rows) else "DESIGN",
-        "counts": {"total": len(items), "approved": sum(1 for r in rows if r.status in {"APPROVED", "TRIAL"})},
+        # "approved" = routes the router can use: status TRIAL/APPROVED AND an ACTIVE decision bound to the current config
+        # hash (find_route_decision). Nothing resets ModelRoute.status when a decision expires or is invalidated, so the
+        # status alone would count a route the router rejects (R28: the UI must not claim more than the data supports).
+        "counts": {"total": len(items),
+                   "approved": sum(1 for i in items if i["status"] in {"APPROVED", "TRIAL"} and i["active_decision"])},
     }
 
 

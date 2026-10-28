@@ -6,16 +6,13 @@ import { Button, Card, EmptyState, ErrorBox, Field, Freshness, Loading, Mono, No
 import { absoluteTime, relativeTime } from "../../lib/format";
 import { CopyCommand } from "../integrations/CopyCommand";
 import { useRefreshCatalog, useRoutes } from "./api";
-import { Badge, FreeTierBadge, RouteStatusBadge } from "./badges";
+import { Badge, FreeTierBadge, RouteStatusBadge, isActiveRoute } from "./badges";
 import { RouteDrawer, freeLabel } from "./RouteDrawer";
 import { SupervisorSection } from "./SupervisorSection";
 import { POOL_LABELS, type RouteItem } from "./types";
 
 const POOLS = ["WORKER", "COMPARATOR", "ARENA", "WATCHLIST", "LOCAL"];
 const STATUSES = ["CANDIDATE", "UNTESTED", "TRIAL", "APPROVED", "DISABLED"];
-
-/** TRIAL and APPROVED are the two active states (a human decision bound to the current config hash). */
-const isActiveRoute = (r: RouteItem) => r.status === "TRIAL" || r.status === "APPROVED";
 
 export default function ModelsPage() {
   const { isAdmin } = useAuth();
@@ -94,7 +91,7 @@ export default function ModelsPage() {
       header: "Status",
       cell: (r: RouteItem) => (
         <div className="flex flex-col gap-1">
-          <RouteStatusBadge status={r.status} />
+          <RouteStatusBadge route={r} />
           {isActiveRoute(r) && r.active_decision?.expires_at && (
             <span className="text-xs text-ink-2" data-testid="route-valid-until">s/d {absoluteTime(r.active_decision.expires_at)}</span>
           )}

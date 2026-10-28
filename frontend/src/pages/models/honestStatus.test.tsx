@@ -100,6 +100,37 @@ describe("Models & Routes: honest active status (R28)", () => {
     expect(screen.queryByTestId("route-valid-until")).toBeNull();
   });
 
+  // Review of dea380c: nothing resets route.status when a decision expires or is invalidated, so status TRIAL with
+  // active_decision null is a route the router rejects. It must neither be counted nor drawn as active.
+  it("does not show or count a TRIAL route whose decision expired (active_decision null) as Aktif", async () => {
+    const lapsed = { ...TRIAL, route_key: "opencode-zen/lapsed", display_name: "Lapsed Trial", active_decision: null };
+    // counts as the fixed server sends them: the lapsed route is not in approved
+    mountWith([CAND1, lapsed], { total: 2, approved: 0 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 2 rute");
+    expect(screen.queryByText("Aktif · TRIAL")).toBeNull();
+    expect(screen.queryByTestId("route-valid-until")).toBeNull();
+    const rows = screen.getAllByRole("row").slice(1);
+    const row = rows.find((r) => within(r).queryByText("Lapsed Trial"))!;
+    expect(within(row).getByText("TRIAL · keputusan kedaluwarsa/tidak berlaku")).toBeInTheDocument();
+    expect(rows[0]).toBe(rows.find((r) => within(r).queryByText("Candidate One"))); // not sorted first
+  });
+
+  it("without counts (older server) the fallback also requires the decision", async () => {
+    const lapsed = { ...TRIAL, display_name: "Lapsed Trial", active_decision: null };
+    mountWith([CAND1, lapsed]);
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 2 rute");
+    expect(screen.queryByText("Aktif · TRIAL")).toBeNull();
+  });
+
+  it("flags an APPROVED route without an active decision in the drawer and shows no date", async () => {
+    const lapsed = route({ route_key: "opencode-zen/ap", display_name: "Lapsed Approved", status: "APPROVED", mode: "LIVE", active_decision: null });
+    mountWith([lapsed], { total: 1, approved: 0 });
+    fireEvent.click(await screen.findByText("Lapsed Approved"));
+    const drawer = await screen.findByRole("dialog", { name: /Detail rute opencode-zen\/ap/ });
+    expect(await within(drawer).findByText("APPROVED · keputusan kedaluwarsa/tidak berlaku")).toBeInTheDocument();
+    expect(within(drawer).queryByTestId("route-valid-until")).toBeNull();
+  });
+
   it("shows a compact free-tier badge for a :free route only", async () => {
     mountWith([CAND1, FREE], { total: 2, approved: 0 });
     await screen.findByTestId("routes-active-summary");

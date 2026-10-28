@@ -1,5 +1,5 @@
 import { StatusBadge } from "../../components/StatusBadge";
-import type { FreeTierView } from "./types";
+import type { FreeTierView, RouteItem } from "./types";
 
 /** Statuses produced by the bridge/routing that the shared badge does not name. Never rendered as pass. */
 const EXTRA: Record<string, { status: string; label: string }> = {
@@ -15,10 +15,31 @@ export function Badge({ status, label }: { status: string | null | undefined; la
   return <StatusBadge status={status} label={label} />;
 }
 
-/** Route status as the owner reads it: TRIAL/APPROVED are active; a catalogue row is not (never a bare "Kandidat"). */
-export function RouteStatusBadge({ status }: { status: string }) {
-  if (status === "CANDIDATE") return <StatusBadge status="CANDIDATE" label="Katalog, belum diaktifkan" />;
-  return <StatusBadge status={status} />;
+/** A route is active only when its status is TRIAL/APPROVED AND an ACTIVE decision bound to the current config hash
+ * exists (`active_decision`). Nothing resets `status` when a decision expires or is invalidated, so the status alone
+ * would show a route the router rejects as active. */
+export function isActiveRoute(r: Pick<RouteItem, "status" | "active_decision">): boolean {
+  return (r.status === "TRIAL" || r.status === "APPROVED") && !!r.active_decision;
+}
+
+/** TRIAL/APPROVED whose decision expired or no longer matches the configuration: not active, whatever `status` says. */
+export function isLapsedRoute(r: Pick<RouteItem, "status" | "active_decision">): boolean {
+  return (r.status === "TRIAL" || r.status === "APPROVED") && !r.active_decision;
+}
+
+/** Route status as the owner reads it: an active TRIAL/APPROVED route is active; a catalogue row is not (never a bare
+ * "Kandidat"); a TRIAL/APPROVED status without a valid decision is a warning, never green. */
+export function RouteStatusBadge({ route }: { route: Pick<RouteItem, "status" | "active_decision"> }) {
+  if (route.status === "CANDIDATE") return <StatusBadge status="CANDIDATE" label="Katalog, belum diaktifkan" />;
+  if (isLapsedRoute(route))
+    return (
+      <StatusBadge
+        status="EXPIRED"
+        label={`${route.status} · keputusan kedaluwarsa/tidak berlaku`}
+        title={`${route.status}: tidak ada keputusan ACTIVE untuk konfigurasi saat ini; router menolak rute ini`}
+      />
+    );
+  return <StatusBadge status={route.status} />;
 }
 
 /** Compact free-tier badge for the table: today's count against the daily limit (account-wide, this instance only). */

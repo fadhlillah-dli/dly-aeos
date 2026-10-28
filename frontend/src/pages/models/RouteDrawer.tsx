@@ -8,7 +8,7 @@ import { Button, ErrorBox, Field, Freshness, KeyValue, Loading, Mono, Notice, in
 import { absoluteTime, shortHash } from "../../lib/format";
 import { ActivationDialog } from "./ActivationDialog";
 import { useDisableRoute, useRouteDetail, useSetRouteEndpoint } from "./api";
-import { RouteStatusBadge } from "./badges";
+import { RouteStatusBadge, isActiveRoute } from "./badges";
 import { POOL_LABELS, type FreeTierView, type RouteItem } from "./types";
 
 function freeLabel(r: RouteItem) {
@@ -294,8 +294,8 @@ export function RouteDrawer({ routeKey, onClose }: { routeKey: string; onClose: 
         {r && (
           <div className="space-y-4">
             <div className="flex flex-wrap gap-2">
-              <RouteStatusBadge status={r.status} />
-              {r.active_decision?.expires_at && (
+              <RouteStatusBadge route={r} />
+              {isActiveRoute(r) && r.active_decision?.expires_at && (
                 <span className="self-center text-xs text-ink-2" data-testid="route-valid-until">
                   s/d {absoluteTime(r.active_decision.expires_at)}
                 </span>
