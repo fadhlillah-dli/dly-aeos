@@ -28,6 +28,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from aeos.broker import facade as broker_contract
 from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.core.redaction import redact_text
@@ -55,6 +56,9 @@ REPORTED_OUTCOME = "INVESTIGATION_REPORTED"
 # run's lifecycle code and changes later (integrator choice, review findings); it never decides what was investigated.
 OUTCOME_CAP = "investigation_outcome"
 READ_ONLY_FORBIDDEN_TOOLS = ("bash", "webfetch", "edit", "write", "patch")
+# ADR-0127: the broker refused a model request of the run (it carried a credential). Not an investigated outcome: the
+# hypothesis is not counted as investigated and the task is BLOCKED instead of moving to the next hypothesis.
+SENSITIVE_STOP = broker_contract.SENSITIVE_CONTENT_BLOCKED
 
 
 # ----------------------------------------------------------------------------- the TaskSpec pattern
@@ -187,7 +191,7 @@ def after_run(session: Session, run: WorkerRun, te: TaskExecution, task: TaskSpe
     from aeos.workforce import scheduler
 
     report = (run.caps or {}).get("investigation_report") or {}
-    if stop_reason in ("TIMEOUT", "RESOURCE_LIMIT"):
+    if stop_reason in ("TIMEOUT", "RESOURCE_LIMIT", SENSITIVE_STOP):
         code = stop_reason
     elif violations or stop_reason == "SCOPE_VIOLATION":
         code = "SCOPE_VIOLATION"
@@ -209,6 +213,19 @@ def after_run(session: Session, run: WorkerRun, te: TaskExecution, task: TaskSpe
         scheduler.set_run_status(session, run, S.FAILED.value, actor=actor, outcome_code=code,
                                  reason=f"hypothesis {hyp}: {code} (inconclusive; no evidenced finding)")
     spec = spec_of(task) or {"hypotheses": []}
+    if code == SENSITIVE_STOP:
+        # ADR-0127: the broker refused a model request of this run because it carried a credential. The next hypothesis
+        # would read the same content and be refused again, so nothing is queued: the task waits, BLOCKED, until the
+        # owner removes the credential from what the worker reads (the hypothesis stays uninvestigated; retry_task).
+        why = (f"hypothesis {hyp}: {SENSITIVE_STOP} - a model request carried a credential and was not sent (see the "
+               "run's broker.model_proxy.sensitive_blocked audit record); remove the credential from what the worker "
+               "reads, then retry")
+        if te.state == S.RUNNING.value:  # a lost lease: the reconciler already moved the task; its state is kept
+            scheduler.transition_task(session, te.task_id, S.BLOCKED.value, actor=actor,
+                                      expected_from=S.RUNNING.value, reason_code=SENSITIVE_STOP, reason=why)
+        run.block_reason = why
+        session.flush()
+        return "BLOCKED"
     remaining = next_hypothesis(session, task, spec)
     attempts_left = te.attempts_used < max_attempts(spec, te.extra_attempts)
     if remaining is not None and attempts_left:
