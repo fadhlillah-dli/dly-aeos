@@ -402,3 +402,48 @@ def test_both_route_checks_declare_the_store_signal():
     for cid in (*ROUTE_CHECKS, "secret.status"):
         assert STORE_INVALIDATOR in REGISTRY[cid].invalidators, cid
 
+
+# ------------------------------------------------------------------------------ round 2 (f) pool/endpoint events
+# R28 "always up to date": the CLI set-pool / set-endpoint emitted no event, so an open Models page never refreshed.
+# The routing service is the one emit point (route.pool_set / route.endpoint_set, the kinds the API already used).
+
+LOCAL = "local/qwen3.8-flash-next"
+
+
+def test_bite_f_cli_set_pool_and_set_endpoint_emit_exactly_one_event(routes, monkeypatch):
+    from aeos.cli import app
+    from tests.unit.test_routing_free_worker import _discover
+
+    install_fakes(monkeypatch)
+    create_admin(routes)
+    _discover(routes)
+    routes.commit()
+    runner = CliRunner()
+    out = runner.invoke(app, ["routes", "set-pool", FREE, "--pool", "WORKER", "--as", "owner", "--rationale",
+                              "owner decision C move"], input=ADMIN_PW + "\n")
+    assert out.exit_code == 0, out.output
+    assert _events(routes, "route.pool_set", FREE) == 1, "CLI set-pool must emit exactly one route.pool_set"
+    out = runner.invoke(app, ["routes", "set-endpoint", LOCAL, "--as", "owner", "--rationale",
+                              "llama.cpp server on this laptop", "--endpoint", "http://127.0.0.1:8080/v1"],
+                        input=ADMIN_PW + "\n")
+    assert out.exit_code == 0, out.output
+    assert _events(routes, "route.endpoint_set", LOCAL) == 1, "CLI set-endpoint must emit exactly one event"
+    # near miss: a refused move records nothing
+    bad = runner.invoke(app, ["routes", "set-pool", DS, "--pool", "ARENA", "--as", "owner", "--rationale",
+                              "not an OpenRouter route"], input=ADMIN_PW + "\n")
+    assert bad.exit_code == 1 and _events(routes, "route.pool_set", DS) == 0
+
+
+def test_bite_f_api_set_pool_and_set_endpoint_emit_exactly_one_event(personal_client: AuthedClient, db):
+    from tests.unit.test_routing_free_worker import _discover
+
+    seed.run(db)
+    _discover(db)
+    db.commit()
+    res = personal_client.post(f"/api/routes/{FREE}/pool", json={"pool": "WORKER", "rationale": "owner decision C"})
+    assert res.status_code == 200, res.text
+    assert _events(db, "route.pool_set", FREE) == 1, "API set-pool must emit exactly one route.pool_set"
+    res = personal_client.post(f"/api/routes/{LOCAL}/endpoint",
+                               json={"endpoint": "http://127.0.0.1:8080/v1", "rationale": "llama.cpp on this host"})
+    assert res.status_code == 200, res.text
+    assert _events(db, "route.endpoint_set", LOCAL) == 1, "API set-endpoint must emit exactly one event"

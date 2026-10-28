@@ -1704,6 +1704,11 @@ def set_local_endpoint(
     changed = refresh_config_hash(session, route, reason=f"owner set LOCAL endpoint {previous['endpoint'] or 'none'} "
                                                           f"-> {base}: {redact_text(rationale.strip())[:120]}")
     session.flush()
+    from aeos.events.service import emit
+
+    # the one emit point of an endpoint change: the API and the CLI both call this function (event parity)
+    emit(session, source="routing", kind="route.endpoint_set", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"endpoint": route.endpoint, "config_changed": changed})
     return route, {"previous": previous, "config_changed": changed, "config_hash": route.config_hash,
                    "needs_new_trial": changed and previous["status"] in {"APPROVED", "TRIAL"}}
 
@@ -1742,6 +1747,11 @@ def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: st
     changed = refresh_config_hash(session, route, reason=reason)  # invalidates the route's decisions, readiness STALE
     notify_readiness(session, route.route_key, reason=reason, pool=previous["pool"])  # the old pool's checks too
     session.flush()
+    from aeos.events.service import emit
+
+    # the one emit point of a pool move: the API and the CLI both call this function (event parity)
+    emit(session, source="routing", kind="route.pool_set", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"pool": route.pool, "previous_pool": previous["pool"]})
     return route, {"previous": previous, "config_changed": changed, "config_hash": route.config_hash,
                    "needs_new_trial": changed and previous["status"] in {"APPROVED", "TRIAL"}}
 

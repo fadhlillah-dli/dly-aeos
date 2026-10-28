@@ -414,8 +414,6 @@ def set_endpoint(route_key: str, body: EndpointBody, db: DB, principal: AdminPri
                  details={"endpoint": route.endpoint, "previous_endpoint": change["previous"]["endpoint"],
                           "previous_config_hash": change["previous"]["config_hash"], "config_hash": route.config_hash,
                           "needs_new_trial": change["needs_new_trial"]})
-    emit(db, source="routing", kind="route.endpoint_set", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
-         entity_version=route.config_hash, payload={"endpoint": route.endpoint, "config_changed": change["config_changed"]})
     db.commit()
     return {"route": route_view(db, route, principal), "config_changed": change["config_changed"],
             "needs_new_trial": change["needs_new_trial"]}
@@ -438,8 +436,6 @@ def set_pool(route_key: str, body: PoolBody, db: DB, principal: AdminPrincipal) 
                  details={"pool": route.pool, "previous_pool": change["previous"]["pool"],
                           "previous_config_hash": change["previous"]["config_hash"], "config_hash": route.config_hash,
                           "needs_new_trial": change["needs_new_trial"]})
-    emit(db, source="routing", kind="route.pool_set", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
-         entity_version=route.config_hash, payload={"pool": route.pool, "previous_pool": change["previous"]["pool"]})
     db.commit()
     return {"route": route_view(db, route, principal), "config_changed": change["config_changed"],
             "needs_new_trial": change["needs_new_trial"]}
