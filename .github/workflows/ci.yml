@@ -17,7 +17,7 @@
 # Backend layout (ADR-0115 amendments "CI in about ten minutes" and "rebalanced shards"): on every host OS the full
 # backend suite is split by test file (tests/conftest.py --shard K/N, weights in tests/ci_durations.json) and each
 # shard runs with one pytest-xdist worker per logical CPU: 3 shards on windows-latest (Windows jobs do not use the
-# macOS slots), 2 on each macOS. Together the shards of an OS run every test of the old single job, and every shard
+# macOS slots), 3 on macos-26-intel (its runners vary up to 2x; ADR-0115 amendment 2026-10-29) and 2 on macos-latest. Together the shards of an OS run every test of the old single job, and every shard
 # job is the same (install, pytest, JUnit upload). The G1 static checks (ruff, mypy for darwin and win32, the secret
 # scan, shellcheck, actionlint) run once, in their own job on ubuntu-latest, so no shard carries extra work and the split can be even. The
 # real trusted-suite verifier run has its own job on macos-latest. The required check names of the main ruleset,
@@ -199,8 +199,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-26-intel, shard: 1, shards: 2 }
-          - { os: macos-26-intel, shard: 2, shards: 2 }
+          - { os: macos-26-intel, shard: 1, shards: 3 }
+          - { os: macos-26-intel, shard: 2, shards: 3 }
+          - { os: macos-26-intel, shard: 3, shards: 3 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
