@@ -125,3 +125,15 @@ def pause_info(session: Session) -> dict[str, Any]:
     from aeos.workforce.scheduler import pause_info as impl
 
     return impl(session)
+
+
+# ---- additive (ADR-0126, 2026-10-28): role -> agent map of the category agents ------------------------------------
+
+
+def agent_key_for_role(role_key: str | None) -> str | None:
+    """The one OpenCode worker agent the reviewed catalog maps to *role_key* (``allowed_scope.roles``, else the
+    agent's own role_key); None when no worker agent serves it (admission then refuses it with ROLE_UNKNOWN). Its
+    ``route_policy.preferred_routes`` is the ordered route preference ADR-0124 applies to already eligible routes."""
+    from aeos.workforce.role_agents import agent_key_for_role as impl
+
+    return impl(role_key)

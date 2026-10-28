@@ -19,9 +19,14 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 from aeos.core.paths import DataLayout, default_config_dir, default_data_dir
 
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-# Upper bound of every route concurrency setting: the scheduler's HARD_MAX_ACTIVE in this phase (owner decision
-# 2026-10-28, ADR-0124). core cannot import workforce; tests/unit/test_routing_best_first.py keeps the two equal.
-MAX_ROUTE_ACTIVE = 2
+# HARD_MAX_ACTIVE: the highest number of implementation workers that may run at once, across all routes (§19/§21
+# pilot: 1 by default, 2 only with a recorded owner POLICY decision; owner answer 4 of 2026-10-28: 2 in this phase).
+# It is defined only here (core cannot import workforce); aeos.workforce.limits re-exports it for the scheduler, the
+# CLI and the API (ADR-0126). Raising it is an ADR amendment.
+HARD_MAX_ACTIVE = 2
+# Upper bound of every per-route concurrency setting (ADR-0124): a route cap never exceeds the global cap, so it is
+# derived from HARD_MAX_ACTIVE, never a second number.
+MAX_ROUTE_ACTIVE = HARD_MAX_ACTIVE
 
 
 def _config_file_path() -> Path:

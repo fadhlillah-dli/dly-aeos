@@ -33,7 +33,9 @@ from aeos.models.planning import PlanVersion, TaskSpec
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import AgentDefinition, Lease, TaskExecution, WorkerRun
 from aeos.workforce import integrations as ext
-from aeos.workforce.catalog import IMPLEMENTER_AGENT_KEY, REVIEWER_AGENT_KEYS
+from aeos.workforce import role_agents
+from aeos.workforce.catalog import REVIEWER_AGENT_KEYS
+from aeos.workforce.limits import HARD_MAX_ACTIVE
 from aeos.workforce.states import ACTIVE_STATES, RUN_TERMINAL, RUNNING_STOP_CODES, is_legal
 
 log = logging.getLogger("aeos.workforce.scheduler")
@@ -46,7 +48,8 @@ KEY_CONCURRENCY = "workforce.concurrency"
 KEY_LEASE_TTL = "workforce.lease_ttl_seconds"
 DEFAULT_LEASE_TTL = 120
 DEFAULT_MAX_ATTEMPTS = 2
-HARD_MAX_ACTIVE = 2  # §19/§21 pilot: 1 by default, 2 only with a recorded decision
+# HARD_MAX_ACTIVE (defined once in aeos.core.config, re-exported by aeos.workforce.limits): §19/§21 pilot, 1 by
+# default, 2 only with a recorded decision
 DEFAULT_MAX_REQUESTS = 300
 DEFAULT_MAX_TOKENS = 2_000_000
 
@@ -411,8 +414,8 @@ def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user
     A) of the same suite/configuration/conditions (§44), states the task-class scope and the rollback (previous
     mode), and carries the §44 DecisionRecord fields. ``max_active=1`` returns to the pilot mode (no decision
     needed)."""
-    if max_active not in (1, 2):
-        raise ValidationFailed("max_active must be 1 or 2 (pilot cap)")
+    if not 1 <= max_active <= HARD_MAX_ACTIVE:
+        raise ValidationFailed(f"max_active must be between 1 and {HARD_MAX_ACTIVE} (pilot cap)")
     previous, _ = concurrency_cap(session)
     if max_active == 1:
         _set_setting(session, KEY_CONCURRENCY, {"max_active": 1, "decision_id": None, "by": actor,
@@ -466,22 +469,22 @@ def set_concurrency(session: Session, *, max_active: int, actor: str, actor_user
     clean_scope["role_keys"] = [proven["role_key"]]
     d = ext.record_decision(
         session, kind="POLICY", actor_user_id=actor_user_id, target_type=policy_catalog.TARGET_WORKFORCE,
-        target_id=policy_catalog.TARGET_ID_CONCURRENCY, target_hash=content_hash({"max_active": 2, "scope": clean_scope}),
+        target_id=policy_catalog.TARGET_ID_CONCURRENCY, target_hash=content_hash({"max_active": max_active, "scope": clean_scope}),
         allowed_operations=["run_two_workers"], auth_scope={"scope": clean_scope or "all task classes"},
         rationale=rationale,
-        details={"max_active_workers": 2, "eval_run_id": run.id, "suite_key": run.suite_key, "scope": clean_scope,
+        details={"max_active_workers": max_active, "eval_run_id": run.id, "suite_key": run.suite_key, "scope": clean_scope,
                  "task_class": proven, "baseline_eval_run_id": benefit["baseline_eval_run_id"],
                  "parallel_execution": benefit.get("parallel_execution"),
                  "benefit": {"gains": benefit["gains"], "compared": benefit["compared"]},
                  "rollback": {"previous_max_active": previous, "how": "set concurrency 1 (no decision needed)"},
                  "decision_record": record})
-    _set_setting(session, KEY_CONCURRENCY, {"max_active": 2, "decision_id": d.id, "by": actor,
+    _set_setting(session, KEY_CONCURRENCY, {"max_active": max_active, "decision_id": d.id, "by": actor,
                                             "at": utcnow().isoformat()})
     _audit(session, actor, "workforce.concurrency.set", target_type="workforce", target_id="concurrency",
-           project_id=None, domain=None, reason=rationale, details={"max_active": 2, "decision_id": d.id})
+           project_id=None, domain=None, reason=rationale, details={"max_active": max_active, "decision_id": d.id})
     events.emit(session, source="controller", kind="scheduler.concurrency_changed", entity_type="scheduler",
-                entity_id="scheduler", payload={"max_active": 2, "decision_id": d.id, "scope": clean_scope})
-    return {"max_active": 2, "decision_id": d.id, "previous": previous, "scope": clean_scope}
+                entity_id="scheduler", payload={"max_active": max_active, "decision_id": d.id, "scope": clean_scope})
+    return {"max_active": max_active, "decision_id": d.id, "previous": previous, "scope": clean_scope}
 
 
 # ----------------------------------------------------------------------------- transitions
@@ -655,7 +658,9 @@ def ensure_executions(session: Session, plan_version_id: str, *, actor: str, req
             te = TaskExecution(task_id=t.id, project_id=t.project_id, domain=t.domain, state=S.QUEUED.value,
                                plan_id=version.plan_id, plan_version_id=plan_version_id, task_key=t.task_key,
                                requested_by=requested_by, mode=te_mode, state_changed_at=utcnow(),
-                               assigned_agent_key=IMPLEMENTER_AGENT_KEY)
+                               # ADR-0126: the agent that serves the task's role (None: admission refuses it
+                               # with ROLE_UNKNOWN; never the implementer by default)
+                               assigned_agent_key=role_agents.agent_key_for_role(t.role_key))
             session.add(te)
             session.flush()
             _audit(session, actor, "workforce.task.enqueue", target_type="task", target_id=t.id,
@@ -778,6 +783,10 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
     if task.role_key not in roles.executor_role_keys():
         reasons.append(("ROLE_UNKNOWN", f"role_key {task.role_key!r} is not an executor RoleSkillPack (a title grants "
                                         "nothing; the task needs a new plan version with a catalog role)"))
+    else:
+        mapped = role_agents.resolve(task.role_key)
+        if mapped.code:  # ADR-0126: no worker agent serves the role - refused, never given to the implementer
+            reasons.append((mapped.code, mapped.reason))
     if te.attempts_used >= max_attempts(task, te):
         reasons.append(("NEEDS_DECISION", f"attempt cap reached ({te.attempts_used}/{max_attempts(task, te)})"))
     quota_bound = quota_stop_problem(session, task, te)
@@ -1521,12 +1530,21 @@ def admission_check(session: Session, task_id: str) -> Admission:
         else:
             adm.answers["investigation"] = {"hypothesis": nxt["key"], "index": nxt["index"],
                                             "of": len(inv["hypotheses"]), "timebox_seconds": inv["timebox_seconds"]}
-    agent_key = te.assigned_agent_key or IMPLEMENTER_AGENT_KEY
-    agent = session.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
-    if agent is None or agent.harness != "opencode" or agent_key in REVIEWER_AGENT_KEYS:
-        adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is not an implementation agent"))
-    elif not agent.enabled:
-        adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is disabled: {agent.enabled_reason}"))
+    # ADR-0126: the agent is the one the catalog maps to the task's role (an earlier assignment never overrides it);
+    # a role no worker agent serves is refused here, never run by the implementer by default
+    mapped = role_agents.resolve(task.role_key)
+    agent: AgentDefinition | None = None
+    if mapped.agent_key is None:
+        if task.role_key in roles.executor_role_keys():  # a non-executor role is already refused above
+            adm.blocks.append((mapped.code or "ROLE_UNKNOWN", mapped.reason))
+    else:
+        agent_key = mapped.agent_key
+        agent = session.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
+        if agent is None or agent.harness != "opencode" or agent_key in REVIEWER_AGENT_KEYS:
+            adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is not an implementation agent"
+                              + (" (not seeded: run aeos seed)" if agent is None else "")))
+        elif not agent.enabled:
+            adm.waits.append(("AGENT_DISABLED", f"agent {agent_key} is disabled: {agent.enabled_reason}"))
     out_of_scope = _agent_scope_problem(agent, task)
     if out_of_scope:
         adm.blocks.append(("AGENT_OUT_OF_SCOPE", out_of_scope))
@@ -1716,6 +1734,7 @@ def acquire_lease(session: Session, task_id: str, *, actor: str, admission: Admi
         .where(TaskExecution.id == te.id, TaskExecution.state == S.READY.value, TaskExecution.row_version == expected_rv)
         .values(state=S.LEASED.value, row_version=expected_rv + 1, active_run_id=run_id,
                 attempts_used=TaskExecution.attempts_used + 1, reason="lease acquired", reason_code="",
+                assigned_agent_key=adm.agent.agent_key,
                 state_changed_at=now, updated_at=now)
     ))
     if res.rowcount != 1:
@@ -2020,9 +2039,8 @@ def request_repair(session: Session, task_id: str, *, findings: list[Any], revie
         raise NotFound("task spec missing")
     if te.state != S.REVIEW.value:
         raise Conflict(f"repair requires REVIEW, task is {te.state}", code="NOT_IN_REVIEW")
-    agent = te.assigned_agent_key or IMPLEMENTER_AGENT_KEY
-    if agent in REVIEWER_AGENT_KEYS:
-        agent = IMPLEMENTER_AGENT_KEY
+    # the repair runs on the agent that serves the task's role (ADR-0126), never on a reviewer
+    agent = role_agents.agent_key_for_role(task.role_key)
     clean = redact(list(findings or []))[:100]
     cap = max_attempts(task, te)
     _close_reviewed_run(session, te, review_record_id=review_record_id, actor=actor, findings=len(clean))
@@ -2201,12 +2219,29 @@ def retry_task(session: Session, task_id: str, *, actor: str, extra_attempts: in
 
 
 def reassign_task(session: Session, task_id: str, *, agent_key: str, actor: str, reason: str = "") -> TaskExecution:
-    """Stop the old lease and revoke its capability BEFORE a new lease can be taken (§35)."""
+    """Stop the old lease and revoke its capability BEFORE a new lease can be taken (§35).
+
+    The target must be the agent that serves the task's role (ADR-0126): admission and the lease always take the
+    role-mapped agent, so a reassign to any other agent would be accepted and audited without effect. It is
+    refused with AGENT_OUT_OF_SCOPE (ROLE_UNKNOWN when no worker agent serves the role)."""
     agent = session.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
     if agent is None:
         raise NotFound("agent definition not found")
     if agent.harness != "opencode" or agent_key in REVIEWER_AGENT_KEYS:
         raise ValidationFailed("only implementation agents can take a task (reviewers never repair)")
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task spec missing")
+    mapped = role_agents.resolve(task.role_key)
+    if mapped.agent_key is None:
+        raise Blocked(mapped.reason, code=mapped.code or role_agents.ROLE_UNKNOWN,
+                      details={"role_key": task.role_key, "agent_key": agent_key})
+    if mapped.agent_key != agent_key:
+        raise ValidationFailed(
+            f"agent {agent_key} does not serve role {task.role_key!r}; tasks of that role run only on "
+            f"{mapped.agent_key} (ADR-0126: the role map decides the agent, a reassign cannot override it)",
+            code="AGENT_OUT_OF_SCOPE",
+            details={"role_key": task.role_key, "agent_key": agent_key, "role_agent_key": mapped.agent_key})
     if not agent.enabled:
         raise Blocked(f"agent {agent_key} is disabled", code="AGENT_DISABLED", details={"reasons": [agent.enabled_reason]})
     te = get_te(session, task_id)
