@@ -1280,3 +1280,22 @@ def test_container_run_with_a_granted_shell_allows_only_the_aeos_runner(settings
     assert runner.read_text(encoding="utf-8") == container.SHELL_RUNNER_JS
     prompt = (Path(run.sandbox_ref) / "config" / "aeos-task.md").read_text(encoding="utf-8")
     assert "## Shell" in prompt and container.SHELL_RUNNER_COMMAND in prompt
+
+
+def test_a_context_pack_the_route_may_not_carry_never_starts_the_run(settings, setup):
+    """ADR-0133 (review H1): the run's context pack (INTERNAL here) must be data the route may carry; a route that
+    allows only PUBLIC refuses the start (own code, nothing spawned). Near miss: every other run in this file starts on
+    a route that allows INTERNAL."""
+    from aeos.models.routing import ModelRoute
+
+    make, _ = setup
+    run_id, task_id = make("ctxclass")
+    with session_factory()() as s:
+        route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == "worker.test-free"))
+        route.allowed_data_classes = ["PUBLIC"]
+        s.commit()
+    res = executor.execute_run(settings, run_id)
+    run, _te = _load(run_id, task_id)
+    assert res["status"] == "BLOCKED" and res["code"] == "CONTEXT_CLASS_NOT_ALLOWED", res
+    assert "is INTERNAL" in res["reason"] and "worker.test-free" in res["reason"]
+    assert run.pid is None

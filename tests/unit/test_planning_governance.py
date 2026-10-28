@@ -271,8 +271,11 @@ def test_input_artifacts_are_bound_by_hash_from_compile_to_prompt(db):
     spec = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id))
     prd, att, label = spec.input_artifacts
     assert prd["ref"] == "plan:requirements/F1" and prd["sha256"] == content_hash(content["requirements"][0])
+    # ADR-0133: a compiled artifact records its own class (here: no class in the planning context -> the project's
+    # highest class), so a later copy never takes a lower task class
     assert att == {"ref": "attachment:att-1", "kind": "attachment", "sha256": "sha256:file", "name": "brief.md",
-                   "trusted": False, "label": "brief.md", "resolved": True}
+                   "trusted": False, "label": "brief.md", "resolved": True, "classification": "INTERNAL"}
+    assert prd["classification"] == "INTERNAL"  # the project's class when this plan version was created
     assert label == {"ref": None, "kind": "label", "label": "papan tulis", "resolved": False}
     text = executor.build_prompt(spec, findings=[], protected=(), branch="aeos/t1",
                                  artifacts=executor.resolve_artifacts(db, spec))

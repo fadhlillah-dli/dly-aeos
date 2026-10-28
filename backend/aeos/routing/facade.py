@@ -59,6 +59,29 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
     return impl(session, task=task, failed_route_key=failed_route_key)
 
 
+def effective_task_class(session: Session, task: TaskSpec) -> str:
+    """Additive (ADR-0133): the class routing applies to *task*, max(its compiled class, its project's current
+    class). Every reader that checks a route against a task's class uses it, so a project raise applies at once."""
+    from aeos.routing.task_class import effective_task_class as impl
+
+    return impl(session, task)
+
+
+def route_class_problem(route: ModelRoute, klass: str) -> str | None:
+    """Additive (ADR-0133): why *route* may not carry data of *klass* (allowed classes, PUBLIC-only terms), or None."""
+    from aeos.routing.task_class import route_class_problem as impl
+
+    return impl(route, klass)
+
+
+def run_class_problem(session: Session, route: ModelRoute, *, run_id: str | None) -> str | None:
+    """Additive (ADR-0133): the broker's per-request class check for any route - the run's task at its effective
+    class (a project raise applies at the next model call) must be data the route may carry; None = allowed."""
+    from aeos.routing.task_class import run_class_problem as impl
+
+    return impl(session, route, run_id=run_id)
+
+
 def terms_eligibility(route: ModelRoute, *, data_classification: str) -> list[str]:
     """Terms/data/provider eligibility reasons of *route* for a workload of *data_classification* (empty =
     eligible). The evaluation gate of §40/§43; a subset of the routing hard filter."""

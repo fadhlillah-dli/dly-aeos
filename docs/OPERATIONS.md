@@ -411,6 +411,39 @@ snapshot is never a live status.
   `RETIREMENT_CHECKLIST_STALE` / `RETIREMENT_REQUIRES_RETIRING`); lifecycle `RETIRED` is refused
   (`RETIREMENT_NOT_VERIFIED`) unless that decision still matches the current checklist.
 
+## Project data classification (ADR-0133)
+
+A project's data classification is chosen when it is created (`aeos seed` registers the DLY AEOS project INTERNAL)
+and is the floor of its work. At compile time a task with no stated class gets the project's class, a stated class
+can only raise it, and an unknown label becomes RESTRICTED (listed under `classification_findings` in the compile
+result). Routing applies the higher of the task's class and the project's current class, and sends a task only to
+routes that allow it. `aeos project reclassify` is the one path that changes the project's class
+(owner decision 2026-10-28: the DLY AEOS project becomes PUBLIC, [OWNER_ACTIONS 2.13](OWNER_ACTIONS.md#213-data-classification-of-the-dly-aeos-project-per-machine)):
+
+```bash
+./aeos project reclassify --project dly-aeos --domain PERSONAL \
+  --to PUBLIC --actor "<admin>" \
+  --approval-ref "chat 2026-10-28, owner rule R43" \
+  --reason "owner decision 2026-10-28: the repository is public"
+```
+
+| Question | Answer |
+|---|---|
+| Raise (more restrictive) | allowed for an active SUPER_ADMIN whose scope covers the project, in both domains; audit record `portfolio.project.reclassify` and event `portfolio.project.reclassified`, no decision. It ends (INVALIDATED) the project's ACTIVE lowering decision and applies to open tasks at once: routing no longer selects a route that may not carry the new class, the broker refuses a running run's next model request on such a route (403 `TASK_CLASS_NOT_ALLOWED`, any route, nothing sent) and a run whose context pack the route may not carry does not start (`CONTEXT_CLASS_NOT_ALLOWED`) |
+| Lower | a POLICY decision on `project_classification:<project id>` (`target_version` = the new class, details `from_classification`/`to_classification`), plus the audit record and the event; all three name old class, new class, reason and actor. Needs an active SUPER_ADMIN (`LOWERING_NEEDS_SUPER_ADMIN` otherwise); an ARCHIVED or RETIRED project is refused (`PROJECT_READ_ONLY`). A newer lowering supersedes the previous decision |
+| Lowering with content | refused (`LOWERING_BLOCKED_BY_CONTENT`, nothing changed, DENIED audit record) while the project has any plans, plan versions, planning contexts or runs, task specs, worker runs, reviews, documents or document revisions (checkpoints included), memory records, attachments, evidence, context packs, decision requests, eval case candidates, export snapshots or change proposals; the message lists the count per kind. Copies of older content (compiled task inputs, re-rendered documents, context packs) would otherwise reach lower-class tasks and routes. Archive or delete the content first; plan versions, task specs and evidence are append-only, so a project that has them keeps its class (a new project at the lower class takes that work). Repositories and integrations are not content, nor is platform probe evidence (`PROVIDER_CAPABILITY` without a run or task, decision 19: it never reaches a task's context; the output counts it as not counted). `portfolio.reclassify.CONTENT_TABLES` is the list, and a test fails when a new project table is neither content nor named as not content |
+| OFFICE | never lowered by this command (`OFFICE_LOWERING_DENIED`): which OFFICE data classes may leave the host is the company's authorisation (master §23, `approved_data_classes`). Raising is allowed |
+| In-flight work | TaskSpecs are immutable and never rewritten. A lowering never relaxes them (routing keeps the task's own class as the floor); only plans and task DAGs compiled afterwards use the new class. The delivery gate G0 refuses a task below the project class |
+| Context after a lowering (defence in depth) | a lowering happens only without content, so this applies to a project lowered before that rule or by a direct database edit: every item keeps the class it had when it was created (its own label; else the project's class when the record was created, from the reclassification audit trail; the highest class the project ever had when the time is unknown); repository files at the task's commit take the current class. Compiled task inputs carry the class recorded at compile time (a PRD section: the class when its plan version was created; a documentation checkpoint: the class when it was recorded). A task-bound pack leaves out every item above the task's effective class (`omitted`, reason "classification ..."); every input artifact but a plain label above it is withheld from the prompt; a pack above the task's class is never given to the worker, also when it was not rebuilt; the owner-local MCI source never goes into a pack for a PUBLIC task |
+| Refused input | an unknown class (`INVALID_CLASSIFICATION`), a reason under 10 characters (`REASON_TOO_SHORT`), an actor who is not active (exit 2) or is VIEWER, a project of the other domain ("not found"). Every policy refusal is a DENIED audit record. The same class again records nothing. A stored label that is not a known class (for example `Secret`) is read as RESTRICTED, as routing reads it: a lowering from it records RESTRICTED (the raw label in `from_label`) and a revocation restores RESTRICTED; `--to RESTRICTED` normalises it |
+| Undo | raise it again with the same command, or revoke the decision (`aeos policy revoke <decision id>`): a revoked lowering decision that still backs the class restores the class before its chain of lowerings (`restore_to`: CONFIDENTIAL -> INTERNAL -> PUBLIC, revoke the newest -> CONFIDENTIAL; audit trigger `decision_inactive`) |
+| Not here | `PATCH /api/projects/{id}` refuses `data_classification` (`FIELD_NOT_EDITABLE`, pointing at this command); `aeos policy decide` refuses the target (`DEDICATED_ENDPOINT_REQUIRED`) |
+| Actor and approval | the command names the actor and asks no password: that is allowed only because the owner approves in chat and the maintainer runs it as the owner's actor (owner rule R43). `actor_check` in the decision and the audit record states this, and `--approval-ref` (for example "chat 2026-10-28, owner rule R43") is stored in the decision, the audit record and the event; without it they say null |
+
+How to read it: *Keputusan* lists the POLICY decision (`./aeos policy decisions --kind POLICY --target-type
+project_classification`); *Riwayat, Audit & Pemulihan* > Audit shows `portfolio.project.reclassify` with
+`from`, `to`, `direction`, `actor_username`, `approval_ref`, `decision_id` and the in-flight TaskSpec counts.
+
 ## Dependency lockfile
 
 `requirements.lock` is a **universal** lock (Windows, macOS, Linux; markers such as
