@@ -53,8 +53,10 @@ Invariant 6 (Claude only through the native `claude` binary) was enforced in the
    * The translation candidates are `gemini-4-argon` ($30), `qwen3.8-max` ($15), `qwen3.8-flash` ($30),
      `qwen3.7-plus` ($60) and `minimax-m3` ($60). `data_terms.serving` and the notes say "served through OpenCode
      Console API translation - NOT PROVEN until the plain and --tools probes pass". `data_terms.native_api_family`
-     names the family models.dev states. They get priorities 30 to 34, after the Zen pilots. The broker already speaks
-     chat-completions, so no broker code changes.
+     names the family models.dev states. Their `source_refs` cite that native family and its endpoint and the Go docs'
+     translation sentence; they never cite a catalog listing on chat-completions, which is the claim not yet proven.
+     They get priorities 30 to 34, after the Zen pilots. The broker already speaks chat-completions, so no broker code
+     changes.
    * `mimo-v2.5` ($60) and `mimo-v2.5-pro` ($15) are superseded by mimo-v2.6-flash and mimo-v2.6-pro. They have their
      own allowances and priorities 990 and 991, the lowest of the WORKER pool, so they serve as overflow only.
    * Context-tier rates (qwen3.7-plus above 256k tokens, minimax-m3 above 512k) are kept in

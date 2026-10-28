@@ -193,6 +193,11 @@ GO_R34_DEEPSEEK_TERMS: dict[str, Any] = {**GO_DEEPSEEK_TERMS, "read_for_research
 # seeded on the chat-completions endpoint and stay unproven until both probes pass for their configuration.
 GO_TRANSLATION_STATEMENT = ("served through OpenCode Console API translation - NOT PROVEN until the plain and --tools "
                             "probes pass")
+# models.dev providers/opencode-go models/<id>.provider: the native endpoint of each translation candidate's family
+GO_NATIVE_API: dict[str, str] = {
+    "google": "https://opencode.ai/inference/go/google/v1beta",
+    "anthropic": "https://opencode.ai/inference/go/anthropic/v1",
+}
 # (model, display, monthly allowance USD, allowance rate per 1M tokens per models.dev)
 GO_DIRECT_R34: tuple[tuple[str, str, float, dict[str, float]], ...] = (
     ("hy4-preview", "Hy4 preview", 30, {"input": 0.834, "output": 2.501, "cached_read": 0.042}),
@@ -341,6 +346,20 @@ def _go_routes() -> list[dict[str, Any]]:
     return out
 
 
+def go_translation_sources(model: str, family: str) -> list[str]:
+    """source_refs of a Console-translation candidate: they cite the native API family models.dev states and the Go
+    docs' translation sentence, never a catalog listing on chat-completions (that serving is NOT PROVEN).
+    GO_R34_SOURCES (chat-completions family) is for the models Go lists natively on chat-completions only."""
+    return [
+        "S07",
+        f"https://opencode.ai/go (monthly allowance and privacy table, read {GO_R31_READ})",
+        f"https://models.dev/api.json providers/opencode-go models/{model} (native {family} API family, "
+        f"{GO_NATIVE_API[family]}; tool_call, rates; read {GO_R31_READ}) - not listed on chat-completions",
+        f"{GO_DOCS} (every text model also works through the other APIs, which the Console translates; read "
+        f"{GO_R31_READ}) - chat-completions serving {GO_TRANSLATION_STATEMENT}",
+    ]
+
+
 def _go_r34_routes(paid: str, *, first_priority: int) -> list[dict[str, Any]]:
     """The OpenCode Go WORKER candidates of owner decision R34 (2026-10-28, ADR-0129): the remaining chat-completions
     models (DeepSeek V4 Pro PUBLIC only, Hy4 preview, the superseded MiMo V2.5 pair last) and the five models Go serves
@@ -379,7 +398,7 @@ def _go_r34_routes(paid: str, *, first_priority: int) -> list[dict[str, Any]]:
                        notes=f"{head}: {GO_TRANSLATION_STATEMENT}. Go serves it natively on the {family} API family; "
                              "the broker calls the chat-completions endpoint (no new broker code). Priority after the "
                              f"Zen pilots, not a ranking. {tools} {paid}",
-                       **common))
+                       **{**common, "source_refs": go_translation_sources(model, family)}))
     for i, (model, display, allowance, rates, successor) in enumerate(GO_SUPERSEDED_R34):
         out.append(_go(model, display, pricing=pricing(model, allowance, rates),
                        priority=GO_R34_SUPERSEDED_PRIORITY + i, terms=GO_R34_TERMS,

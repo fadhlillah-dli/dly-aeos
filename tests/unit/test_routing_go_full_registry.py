@@ -104,6 +104,36 @@ def test_r34_routes_are_seeded_as_worker_candidates_with_their_terms(db):
     assert rows["opencode-go/qwen3.7-plus"].pricing["context_tier_rate_per_mtok"]["from_context_tokens"] == 256000
 
 
+def _overstated_evidence(route: dict) -> str | None:
+    """A Console-translation route whose source_refs cite a catalog listing on the chat-completions family overstates
+    its evidence: that serving is the NOT PROVEN claim."""
+    if route["data_terms"].get("serving") == GO_TRANSLATION_STATEMENT and any(
+            "chat-completions API family" in ref for ref in route["source_refs"]):
+        return f"{route['route_key']}: source_refs cite the chat-completions family for a translation candidate"
+    return None
+
+
+def test_bite_translation_source_refs_cite_the_native_family_not_chat_completions():
+    routes = {r["route_key"]: r for r in seed.seed_routes()}
+    families = {m: fam for m, *_rest, fam in seed.GO_TRANSLATION_R34}
+    for model in TRANSLATION:
+        r = routes[f"opencode-go/{model}"]
+        assert _overstated_evidence(r) is None, _overstated_evidence(r)
+        assert any(f"native {families[model]} API family" in ref and seed.GO_NATIVE_API[families[model]] in ref
+                   for ref in r["source_refs"]), r["source_refs"]
+        assert any(GO_TRANSLATION_STATEMENT in ref for ref in r["source_refs"])
+    assert families["minimax-m3"] == "anthropic" and families["gemini-4-argon"] == "google"
+    # red: the pre-fix source list (shared with the native chat-completions routes) is caught with its own message
+    stale = {**routes[ARGON], "source_refs": list(seed.GO_R34_SOURCES)}
+    assert _overstated_evidence(stale) == (f"{ARGON}: source_refs cite the chat-completions family for a translation "
+                                           "candidate")
+    # near miss: a model Go lists natively on chat-completions keeps that citation and is green
+    assert any("chat-completions API family" in ref for ref in routes["opencode-go/hy4-preview"]["source_refs"])
+    assert _overstated_evidence(routes["opencode-go/hy4-preview"]) is None
+    # source_refs is not part of the configuration identity: no route hash moves with this correction
+    assert "source_refs" not in service.CONFIG_FIELDS
+
+
 def test_bite_seeding_a_claude_or_meta_router_route_is_refused(db, monkeypatch):
     real = seed.seed_routes
     bad_go = seed._go("claude-haiku-5-5", "Claude Haiku 5.5", pool="WORKER", priority=99,
