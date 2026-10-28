@@ -75,3 +75,4 @@ SUPERSEDED on ADR-0003 also revokes the decisions its `owner:ADR-0003` actor hol
 | [ADR-0121](ADR-0121-code-host-identity-and-no-ai-attribution.md) | Owner identity per code host (local `aeos.yaml`), broker push gate, outbound attribution guard, neutral labels; provenance stays in AEOS | ACCEPTED |
 | [ADR-0122](ADR-0122-release-provenance-in-ci.md) | Release evidence and build provenance in CI on a tag push; the GitHub Release stays a human action | PROPOSED |
 | [ADR-0123](ADR-0123-openbao-unseal-key-in-os-keyring.md) | OpenBao unseal key in the OS keyring, auto-unseal at `serve`/`vault unseal`, one-time import and an owner-only offline recovery copy (amends ADR-0042) | ACCEPTED |
+| [ADR-0125](ADR-0125-go-route-pool-move-and-tool-call-probe.md) | OpenCode Go WATCHLIST/WORKER owner move (CANDIDATE without decisions), R31 Go WORKER candidates, tool-call probe evidence and `tool_capable` (owner decision 2026-10-28) | PROPOSED |

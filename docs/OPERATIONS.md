@@ -678,8 +678,23 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   `client-terms=OWNER_DECISION_REQUIRED`.
 * **OpenCode Go routes (owner decision A, ADR-0041 amendment 2026-10-26):** `aeos seed` adds the `opencode-go/*`
   CANDIDATE routes. In the WORKER pool they rank above the Zen pilots: glm-5.3-flash, mimo-v2.6-flash,
-  minimax-m3.1-flash, hy3 (no documented tool support) and kimi-k2.7-code. The other chat-completions models are on
-  the WATCHLIST.
+  minimax-m3.1-flash, hy3 (no documented tool support) and kimi-k2.7-code, then the R31 candidates kimi-k3 and
+  step-5-preview (owner decision 2026-10-28, ADR-0125; tool support UNKNOWN until a tool-call probe PASS). The other
+  chat-completions models are on the WATCHLIST.
+  * **WATCHLIST to WORKER (ADR-0125).** `aeos routes set-pool opencode-go/<id> --pool WORKER|WATCHLIST --as <admin>
+    --rationale "..."` (or `POST /api/routes/<key>/pool`) moves an OpenCode Go route between WATCHLIST and WORKER only
+    while it is CANDIDATE and no decision of any kind or status names it (its key as the target, or a BUDGET decision
+    listing it): otherwise `ROUTE_POOL_MOVE_NOT_CANDIDATE` / `ROUTE_POOL_MOVE_HAS_DECISIONS`. The move is a new
+    configuration hash, audited (`route.set_pool`) and emitted (`route.pool_set`); the seed and the catalog refresh
+    never change a pool.
+  * **Tool-call probe (ADR-0125).** `aeos broker probe-route --tools <key>` / `POST /api/broker/routes/<key>/tool-probe`
+    runs the feasibility probe's gates (TRIAL/APPROVED, PERSONAL, PUBLIC, no money) and sends one synthetic PUBLIC
+    request with one trivial function (`report_status`, `tool_choice` auto, output cap `TOOL_PROBE_MAX_TOKENS` 1024).
+    PASS needs a 200 answer whose every tool call has an id, the defined name and the arguments `{"status": "OK"}`;
+    anything else is FAIL with the reason. The verdict is PROBE evidence (E3) bound to the route's configuration hash
+    (audit `broker.route_tool_probe`, event `route.tool_probe`, readiness STALE). A route is tool-capable
+    (`routing.facade.tool_capable`) when `supports_tools` is YES or such a PASS exists for its CURRENT hash; the probe
+    never changes `supports_tools`, so the owner's TRIAL stays valid, and a new configuration needs a new probe.
   * **Request.** The broker calls `https://opencode.ai/inference/go/openai/v1/chat/completions` with the bare model
     id and the key `workers/opencode-go`, sent only to https://opencode.ai. It also sends `User-Agent:
     dly-aeos-broker/<version>` and a stable `x-opencode-session` per worker run (a hash, never a secret), as the Go
@@ -722,8 +737,8 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
       task admission answer show the plan and the allowance per window (advisory windows marked), never per-token
       spend; the figures are hidden from a principal who cannot see every domain. `aeos routes list` only flags
       `billing=SUBSCRIPTION`; the Control Center pages do not show the windows yet.
-  * **Probe.** `aeos broker probe-route opencode-go/<id>` is allowed on an activated Go route. It consumes allowance,
-    not money, and is refused with the same codes (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`,
+  * **Probe.** `aeos broker probe-route [--tools] opencode-go/<id>` is allowed on an activated Go route. It consumes
+    allowance, not money, and is refused with the same codes (`SUBSCRIPTION_ALLOWANCE_EXHAUSTED`,
     `SUBSCRIPTION_ALLOWANCE_UNKNOWN`, `SUBSCRIPTION_BEYOND_PLAN`). A per-token paid route is still refused
     (`ROUTE_NOT_FREE`). Everything about Go is E1 (docs read 2026-10-26) until a probe or TRIAL run.
 * **LOCAL route endpoint:** start an OpenAI-compatible server on this host, then `aeos routes set-endpoint

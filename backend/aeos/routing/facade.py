@@ -144,6 +144,34 @@ def free_tier_count_lock(session: Session) -> bool:
     return impl(session)
 
 
+# --- tool-call probe evidence (additive, ADR-0125, owner decision 2026-10-28) ------------------------------------
+# The broker's tool-call probe (``aeos broker probe-route --tools``) records PROBE evidence with these marks and routing
+# reads them back (``tool_capable``): one definition for the writer and the reader.
+TOOL_PROBE_EVIDENCE_KIND = "PROBE"
+TOOL_PROBE_COLLECTOR = "aeos-broker/route-tool-probe"
+TOOL_PROBE_MARK = "TOOL_CALL"  # the evidence environment's ``probe`` value
+TOOL_PROBE_PASS = "PASS"
+TOOL_PROBE_FAIL = "FAIL"
+
+
+def tool_capable(session: Session, route: ModelRoute) -> bool:
+    """Contract (b) of 2026-10-28 (ADR-0125): *route* counts as tool-capable when ``supports_tools`` is YES, or when
+    a trusted tool-call probe recorded a PASS bound to the route's CURRENT configuration hash. A configuration change
+    (a new hash) makes older probe evidence irrelevant. The probe never changes ``supports_tools`` (a CONFIG_FIELD).
+    Routing's hard filter uses it wherever a task needs tools."""
+    from aeos.routing.service import tool_capable as impl
+
+    return impl(session, route)
+
+
+def tool_probe_recorded(session: Session, *, route_key: str, verdict: str, evidence_id: str | None) -> None:
+    """The broker recorded a tool-call probe of *route_key* (additive, ADR-0125): routing's eligibility may have
+    changed, so the dependent readiness checks go STALE and ``route.tool_probe`` is emitted (the one emit point)."""
+    from aeos.routing.service import tool_probe_recorded as impl
+
+    impl(session, route_key=route_key, verdict=verdict, evidence_id=evidence_id)
+
+
 def unstored_credential_ref(reason: str) -> str | None:
     """The secret reference a ``credential <ref> not stored: aeos secrets set <ref>`` rejection names (additive,
     2026-10-28): the key the route needs is not in the secret store. None for any other reason."""

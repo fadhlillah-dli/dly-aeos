@@ -33,6 +33,7 @@ QWEN = "opencode-zen/qwen3.8-flash"
 KIMI = "opencode-zen/kimi-k2.7-code"  # paid, chat-completions API (QWEN: anthropic.messages, never served)
 # OpenCode Go (owner decision A, ADR-0041 amendment 2026-10-26): subscription WORKER candidates, no client restriction
 GO_WORKERS = ("glm-5.3-flash", "mimo-v2.6-flash", "minimax-m3.1-flash", "hy3", "kimi-k2.7-code")
+GO_R31 = ("kimi-k3", "step-5-preview")  # owner decision R31 (2026-10-28, ADR-0125): tools UNKNOWN until probed
 GO_WATCH = ("longcat-2.0", "glm-5.2", "glm-5.3", "kimi-k3.1-pro", "mimo-v2.6-pro", "deepseek-v4.1-flash")
 GO_GLM = "opencode-go/glm-5.3-flash"
 GO_HY3 = "opencode-go/hy3"
@@ -110,7 +111,7 @@ def test_seed_is_design_candidate_personal_only(routes):
 
 SEEDED = {
     "SUPERVISOR": {"claude-native/fable", "claude-native/opus"},
-    "WORKER": {DS, GLM, *(f"opencode-go/{m}" for m in GO_WORKERS)},
+    "WORKER": {DS, GLM, *(f"opencode-go/{m}" for m in GO_WORKERS + GO_R31)},
     "COMPARATOR": {GEMINI},
     "ARENA": {"opencode-zen/longcat-2.5-preview-free", "opencode-zen/mimo-v2.6-flash-free", "opencode-zen/beam-free",
               "opencode-zen/nemotron-3-ultra-free", "opencode-zen/nemotron-3.5-lightning-free",
@@ -128,7 +129,7 @@ def test_seed_registers_every_section_23_candidate_with_its_terms(routes):
     data terms the hard filter relies on (a widened MiMo or a Nemotron without its trial flag fails here)."""
     by = {r.route_key: r for r in routes.query(ModelRoute).all()}
     assert {k: {key for key, r in by.items() if r.pool == k} for k in SEEDED} == SEEDED
-    assert len(by) == sum(len(v) for v in SEEDED.values()) == 35
+    assert len(by) == sum(len(v) for v in SEEDED.values()) == 37
     for key in SEEDED["ARENA"] | SEEDED["WORKER"] | SEEDED["WATCHLIST"] | SEEDED["COMPARATOR"]:
         r = by[key]
         # a research reading of a provider claim is not an owner terms review (§23, §51 P2)
@@ -160,7 +161,7 @@ def test_seeded_go_routes_are_subscription_candidates_without_a_client_restricti
     only, a subscription with dollar allowances (never a per-token price), Go allows other clients, the reviewed
     region is required, and the free Zen pilots keep their S07 client restriction."""
     by = {r.route_key: r for r in routes.query(ModelRoute).filter(ModelRoute.provider == "opencode-go")}
-    assert set(by) == {f"opencode-go/{m}" for m in GO_WORKERS + GO_WATCH}
+    assert set(by) == {f"opencode-go/{m}" for m in GO_WORKERS + GO_R31 + GO_WATCH}
     for key, r in by.items():
         assert (r.status, r.mode, r.origin, r.evidence_level) == ("CANDIDATE", "DESIGN", "SEED", "E1"), key
         assert r.eligible_domains == ["PERSONAL"] and r.is_free == "NO" and service.needs_budget(r), key
@@ -188,10 +189,18 @@ def test_seeded_go_routes_are_subscription_candidates_without_a_client_restricti
         "glm-5.3-flash": "YES", "mimo-v2.6-flash": "YES", "minimax-m3.1-flash": "YES", "hy3": "UNKNOWN",
         "kimi-k2.7-code": "YES"}
     assert all(by[f"opencode-go/{m}"].supports_tools == "UNKNOWN" for m in GO_WATCH)
+    # R31 candidates: models.dev says tool_call true, but only a tool-call probe PASS makes them tool-capable
+    for m in GO_R31:
+        r31 = by[f"opencode-go/{m}"]
+        assert (r31.pool, r31.supports_tools, r31.pricing["allowance_usd_month"]) == ("WORKER", "UNKNOWN", 15), m
+        assert r31.pricing["checked_at"] == "2026-10-28" and r31.data_terms["read_for_research"].startswith(
+            "2026-10-28"), m
+        assert any("https://opencode.ai/go" in ref and "2026-10-28" in ref for ref in r31.source_refs), m
+        assert max(by[f"opencode-go/{w}"].priority for w in GO_WORKERS) < r31.priority, m  # after the earlier pilots
     # ranked above the client-restricted Zen pilots, glm-5.3-flash first
     zen = {k: service.get_route(routes, k) for k in (DS, GLM)}
     assert min(by[f"opencode-go/{m}"].priority for m in GO_WORKERS) == glm.priority
-    assert max(by[f"opencode-go/{m}"].priority for m in GO_WORKERS) < min(r.priority for r in zen.values())
+    assert max(by[f"opencode-go/{m}"].priority for m in GO_WORKERS + GO_R31) < min(r.priority for r in zen.values())
     assert all(service.client_restriction_problem(r) for r in zen.values())  # the Zen pilots stay restricted
     ds = by[GO_DS]
     assert ds.pool == "WATCHLIST" and "2026-10-31" in ds.data_terms["retention"] and "Global" in ds.data_terms["regions"]
