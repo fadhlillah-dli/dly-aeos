@@ -20,8 +20,9 @@ Guarantees:
   and pool, worker and probe traffic alike - every string of the forwarded payload is scanned with the one secret
   detector (``aeos.core.redaction``: token shapes and the secret values registered at runtime). A match is never sent:
   403 ``SENSITIVE_CONTENT_BLOCKED``, a ``SENSITIVE_BLOCKED`` broker request, an audit record and a run event naming the
-  detector kinds and a SHA-256 of each matched span (never the text), and the executor stops the run. No setting
-  disables or narrows it;
+  detector kinds with the offset and length of each match (never the text and nothing derived from it: an unkeyed
+  hash of a short registered secret could be brute-forced), and the executor stops the run. No setting disables or
+  narrows it;
 * upstream 429 -> 429 + ``Retry-After`` to the worker, QuotaState recorded, and NO fallback to any
   other (paid or unapproved) model (§42, §50 "Free quota habis / 429");
 * the real provider key is fetched in-process from the secrets facade, registered for redaction,
@@ -647,18 +648,19 @@ def outgoing_text(payload: Any) -> str:
     return _SCAN_SEPARATOR.join(parts)
 
 
-def sensitive_content_findings(payload: Any) -> list[dict[str, str]]:
-    """The secrets *payload* would carry upstream (ADR-0127): one ``{"kind", "span_sha256"}`` per distinct detector
-    kind and matched span, sorted - never the matched text. Empty when the payload may be sent. Detection is the one
+def sensitive_content_findings(payload: Any) -> list[dict[str, Any]]:
+    """The secrets *payload* would carry upstream (ADR-0127): one ``{"kind", "offset", "length"}`` per distinct
+    detector kind and match (offset into the scanned text, ``outgoing_text``), sorted - never the matched text and
+    nothing derived from it (an unkeyed hash of a short registered secret, such as a password, could be brute-forced;
+    CodeQL py/weak-sensitive-data-hashing, review of PR #51). Empty when the payload may be sent. Detection is the one
     owner of secret detection, ``aeos.core.redaction.find_high_confidence_secrets`` (token shapes and the registered
     runtime secret values); personal data such as e-mail addresses is not blocked (ADR-0127: code is full of them)."""
     text = outgoing_text(payload)
-    found = {(f.kind, hashlib.sha256(text[f.start:f.end].encode("utf-8", "surrogatepass")).hexdigest())
-             for f in find_high_confidence_secrets(text)}
-    return [{"kind": kind, "span_sha256": digest} for kind, digest in sorted(found)]
+    found = {(f.kind, f.start, f.end - f.start) for f in find_high_confidence_secrets(text)}
+    return [{"kind": kind, "offset": offset, "length": length} for kind, offset, length in sorted(found)]
 
 
-def sensitive_content_message(findings: list[dict[str, str]]) -> str:
+def sensitive_content_message(findings: list[dict[str, Any]]) -> str:
     kinds = ", ".join(sorted({f["kind"] for f in findings}))
     return (f"the request was not sent: it carries a credential ({kinds}). Remove the secret from the conversation "
             "(do not read key, environment or token files into the prompt) and start again; nothing sensitive leaves "
@@ -666,7 +668,7 @@ def sensitive_content_message(findings: list[dict[str, str]]) -> str:
 
 
 def _sensitive_blocked(s: Any, grant: CapabilityGrant, route_key: str, exposed: str,
-                       findings: list[dict[str, str]]) -> None:
+                       findings: list[dict[str, Any]]) -> None:
     """A request refused by the outgoing-content guard (ADR-0127): never forwarded and never counted against a
     free-model limit (no upstream model), recorded for the run (the executor stops it), the audit trail and the run
     timeline."""

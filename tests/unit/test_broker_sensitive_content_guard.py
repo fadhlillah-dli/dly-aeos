@@ -84,8 +84,18 @@ NEAR_MISSES = {
 }
 
 
-def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def _has(findings: list[dict], kind: str, secret: str) -> bool:
+    """A finding of *kind* whose length is the secret's (findings carry no text and no hash)."""
+    return any(f["kind"] == kind and f["length"] == len(secret) for f in findings)
+
+
+def _located(payload: dict, findings: list[dict], kind: str) -> str | None:
+    """The text a finding of *kind* points at in the scanned payload (tests only: the guard never returns text)."""
+    text = outgoing_text(payload)
+    for f in findings:
+        if f["kind"] == kind:
+            return text[f["offset"]:f["offset"] + f["length"]]
+    return None
 
 
 def _placements(secret: str) -> dict[str, list[dict]]:
@@ -104,11 +114,13 @@ def _placements(secret: str) -> dict[str, list[dict]]:
 
 # ------------------------------------------------------------------------------------- detection (pure, no DB)
 @pytest.mark.parametrize("kind", sorted(SECRETS))
-def test_each_credential_kind_is_found_with_its_kind_and_span_hash(kind):
+def test_each_credential_kind_is_found_with_its_kind_and_span(kind):
     secret = SECRETS[kind]
-    findings = sensitive_content_findings({"messages": [{"role": "user", "content": f"x {secret} y"}]})
-    assert {"kind": kind, "span_sha256": _sha(secret)} in findings, findings
+    payload = {"messages": [{"role": "user", "content": f"x {secret} y"}]}
+    findings = sensitive_content_findings(payload)
+    assert _located(payload, findings, kind) == secret, findings
     assert secret not in json.dumps(findings)  # never the text
+    assert set(findings[0]) == {"kind", "offset", "length"}  # nothing derived from the secret (no hash)
 
 
 def test_a_json_escaped_token_in_tool_call_arguments_is_found():
@@ -117,7 +129,7 @@ def test_a_json_escaped_token_in_tool_call_arguments_is_found():
     assert GITHUB_TOKEN not in arguments
     found = sensitive_content_findings({"messages": [{"role": "assistant", "tool_calls": [
         {"function": {"name": "w", "arguments": arguments}}]}]})
-    assert {"kind": "github_token", "span_sha256": _sha(GITHUB_TOKEN)} in found
+    assert any(f["kind"] == "github_token" for f in found), found
 
 
 def test_tool_definitions_and_stop_sequences_are_scanned_too():
@@ -131,7 +143,7 @@ def test_a_registered_runtime_secret_of_unknown_shape_is_found():
     assert sensitive_content_findings({"messages": [{"content": value}]}) == []
     register_secret(value)
     found = sensitive_content_findings({"messages": [{"content": f"key is {value}"}]})
-    assert found == [{"kind": REGISTERED_SECRET, "span_sha256": _sha(value)}]
+    assert [(f["kind"], f["length"]) for f in found] == [(REGISTERED_SECRET, len(value))]
 
 
 @pytest.mark.parametrize("name", sorted(NEAR_MISSES))
@@ -161,7 +173,7 @@ def test_a_token_after_a_json_escape_or_an_encoded_separator_is_found():
                         json.dumps(json.dumps({"o": "x\n" + secret})), "https://h/p?a%3Ftoken%3D" + secret,
                         "https://h/p?a=1%26" + secret):
             found = sensitive_content_findings({"messages": [{"role": "tool", "content": content}]})
-            assert {"kind": kind, "span_sha256": _sha(secret)} in found, (kind, content.replace(secret, "<secret>"))
+            assert _has(found, kind, secret), (kind, content.replace(secret, "<secret>"))
 
 
 def _image_data_uri() -> str:
@@ -306,7 +318,7 @@ def test_a_credential_is_never_sent_to_a_free_route(env, db, kind, where):  # no
     rec = db.scalar(select(AuditEvent).where(AuditEvent.action == "broker.model_proxy.sensitive_blocked"))
     assert rec.result == "DENIED" and rec.target_id == "worker.free-a"
     assert rec.details["route_key"] == "worker.free-a" and kind in rec.details["kinds"]
-    assert {"kind": kind, "span_sha256": _sha(secret)} in rec.details["findings"]
+    assert _has(rec.details["findings"], kind, secret)
     ev = db.scalar(select(Event).where(Event.kind == "run.model_call_blocked"))
     assert ev.run_id == env["run"].id and ev.payload["code"] == "SENSITIVE_CONTENT_BLOCKED"
     stored = json.dumps([req.error_summary, run.current_action, rec.reason, rec.details, ev.payload])
@@ -377,4 +389,4 @@ def test_a_credential_is_never_sent_by_a_probe(world, db, monkeypatch, kind):  #
     db.commit()
     rec = db.scalars(select(AuditEvent).where(AuditEvent.action == "broker.route_feasibility.probe")).all()[-1]
     assert rec.result == "DENIED" and rec.details["sent"] is False and kind in rec.details["kinds"]
-    assert {"kind": kind, "span_sha256": _sha(SECRETS[kind])} in rec.details["findings"]
+    assert _has(rec.details["findings"], kind, SECRETS[kind])

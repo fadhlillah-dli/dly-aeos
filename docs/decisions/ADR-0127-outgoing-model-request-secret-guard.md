@@ -44,8 +44,10 @@
 4. **What happens.** Nothing is sent. The caller gets HTTP 403 in the proxy's OpenAI-compatible error shape with
    code `SENSITIVE_CONTENT_BLOCKED` and a message naming the detector kinds only. The broker records a broker request
    with outcome `SENSITIVE_BLOCKED` (route key, no upstream model), an audit record
-   `broker.model_proxy.sensitive_blocked` (DENIED; details: route key, kinds, up to 20 findings as detector kind plus a
-   SHA-256 of the matched span, the total, `sent: false`), a run event `run.model_call_blocked` shown in the run's
+   `broker.model_proxy.sensitive_blocked` (DENIED; details: route key, kinds, up to 20 findings as detector kind plus the
+   offset and length of the match - nothing derived from the secret, because an unkeyed hash of a short registered
+   secret such as a password could be brute-forced (CodeQL py/weak-sensitive-data-hashing on PR #51) - the total,
+   `sent: false`), a run event `run.model_call_blocked` shown in the run's
    timeline, `usage_summary.sensitive_blocked` and the run's current action. The worker runtime stops the run at its
    next heartbeat, or at the outcome phase if the worker already exited, as FAILED with outcome code
    `SENSITIVE_CONTENT_BLOCKED` and a readable reason (fail closed; never REVIEW, never DONE). The refusal decides the

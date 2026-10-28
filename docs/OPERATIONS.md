@@ -837,8 +837,8 @@ How to read it: in the Control Center open the run (**Pekerjaan Live**, run deta
 model ditahan, tidak dikirim: berisi kredensial (kinds)" (event `run.model_call_blocked`), and its outcome code is
 `SENSITIVE_CONTENT_BLOCKED`. In **Riwayat, Audit & Pemulihan** > Audit, the record
 `broker.model_proxy.sensitive_blocked` (DENIED, target = the route key) lists `kinds` and `findings`: each finding is
-a detector kind and the SHA-256 of the matched text, never the text. Two findings with the same hash are the same
-secret. What to do: find where the worker read the credential (a key file, an environment file, a log, a fixture),
+a detector kind with the offset and length of the match in the scanned request, never the text and nothing derived
+from it (an unkeyed hash of a short secret such as a password could be brute-forced). What to do: find where the worker read the credential (a key file, an environment file, a log, a fixture),
 move it out of the repository or the task's inputs, rotate it if it is real (AGENTS.md invariant 12), then let the
 task run again. A fixture that only looks like a key is assembled from parts at run time instead of written literally.
 
