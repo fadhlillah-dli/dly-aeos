@@ -282,6 +282,91 @@ def test_admission_records_the_hold_on_the_run(db, monkeypatch):
     assert run.caps["allowance_hold"] == {"usd": "1.63", "basis": "PRIOR"}
 
 
+
+GO_PRO = "opencode-go/kimi-k3.1-pro"  # $15/month: 5h window $3.00, cap 1, LiveBench prior $7.43 (bigger than the window)
+
+
+def _promote(db, key: str) -> None:
+    """The owner's WATCHLIST -> WORKER promotion of a Go route (ADR-0125's owner action, simulated on the row), then its
+    activation: a new configuration, so a new hash before the BUDGET + TRIAL decisions."""
+    r = service.get_route(db, key)
+    r.pool, r.supports_tools = "WORKER", "YES"
+    r.config_hash = service.compute_config_hash(r)
+    db.flush()
+    _go(db, key)
+
+
+def test_a_prior_bigger_than_the_whole_window_is_capped_so_the_route_still_serves(routes, monkeypatch):
+    """Review finding 1. Red before the fix: the kimi-k3.1-pro prior ($7.43) exceeds its whole 5h window ($3.00), so no
+    task ever fitted and no history could ever replace the prior. Now the estimate is capped at the window: the route
+    takes a task on an empty window (equal fits, as a pinned primary too), and one cent of usage skips it."""
+    install_fakes(monkeypatch)
+    _promote(routes, GO_PRO)
+    route = service.get_route(routes, GO_PRO)
+    est = capacity.allowance_estimate(routes, route, "feature-implementer", window_limit=Decimal("3.00"))
+    assert est["usd"] == "3.00" and est["basis"] == "PRIOR" and est["capped_at_window"] is True
+    assert est["uncapped_usd"] == "7.43" and "capped at the route's whole 5h window" in est["source"]
+    fit = capacity.allowance_fit(routes, route, role="feature-implementer", data_classification="INTERNAL", runs=[])
+    assert fit["skip"] is None and fit["remaining_usd"] == "3.00"
+    assert select_route(routes, task=task()).route.route_key == GO_PRO
+    pinned = task()
+    pinned.model_route_policy = {"primary": GO_PRO}
+    assert select_route(routes, task=pinned).route.route_key == GO_PRO
+    assert capacity.allowance_estimate(routes, service.get_route(routes, GO_GLM), "feature-implementer",
+                                       window_limit=Decimal(12))["usd"] == "1.63"  # below its window: not capped
+    _use(routes, GO_PRO, "0.01")
+    with pytest.raises(Blocked) as ei:
+        select_route(routes, task=task())
+    assert ei.value.code == "ROUTE_CAPACITY"
+    assert _skip(ei.value, GO_PRO).startswith("ALLOWANCE_FIT: route opencode-go/kimi-k3.1-pro: the estimated allowance")
+
+
+def test_an_eval_bound_task_obeys_the_route_caps_and_waits(routes, monkeypatch):
+    """Review finding 3. Red: a task bound to an evaluation of the cap-1 minimax route while another task runs there is
+    refused with ROUTE_CAPACITY (it waits; never another route), and admission enforces the selected route's capacity
+    answer (``wait``). Near miss: with the route free the evaluation task is served on exactly that route."""
+    install_fakes(monkeypatch)
+    _go(routes, GO_MINIMAX, GO_GLM)
+    bound = {"status": "SERVED", "route_key": GO_MINIMAX, "eval_run_id": "ev-1", "slot_id": "s-1", "pool": "WORKER"}
+    monkeypatch.setattr(service, "_eval_serving", lambda session, t: dict(bound))
+    sel = select_route(routes, task=task())
+    assert sel.route.route_key == GO_MINIMAX and sel.eval_run_id == "ev-1"  # near miss: free route, served
+    assert capacity.route_capacity(routes, task=task(), route=service.get_route(routes, GO_MINIMAX))["wait"] is None
+    _run(routes, GO_MINIMAX, hold="1.09")
+    with pytest.raises(Blocked) as ei:
+        select_route(routes, task=task())
+    assert ei.value.code == "ROUTE_CAPACITY" and "bound to evaluation ev-1" in ei.value.message
+    assert "ROUTE_BUSY: 1 active task(s) on route opencode-go/minimax-m3.1-flash" in _skip(ei.value, GO_MINIMAX)
+    route, reasons, code = integrations.select_route_detail(routes, task())
+    assert route is None and code == "ROUTE_CAPACITY" and code in scheduler.WAIT_CODES
+    answer = capacity.route_capacity(routes, task=task(), route=service.get_route(routes, GO_MINIMAX))
+    assert answer["wait"]["code"] == "ROUTE_CAPACITY" and answer["wait"]["reason"].startswith("ROUTE_BUSY: route ")
+    routes.query(WorkerRun).delete()
+    _use(routes, GO_MINIMAX, "3.50")  # $4.00 window: $0.50 left against the $1.09 prior
+    answer = capacity.route_capacity(routes, task=task(), route=service.get_route(routes, GO_MINIMAX))
+    assert answer["allowance_fit"]["fits"] is False and answer["wait"]["reason"].startswith("ALLOWANCE_FIT: route ")
+    assert "$" not in answer["wait"]["reason"] and "0.50" not in answer["wait"]["reason"]  # no figures in a reason
+    with pytest.raises(Blocked) as ei:
+        select_route(routes, task=task())
+    assert ei.value.code == "ROUTE_CAPACITY" and "ALLOWANCE_FIT" in _skip(ei.value, GO_MINIMAX)
+
+
+def test_admission_enforces_the_route_capacity_wait(db, monkeypatch):
+    """Red: the selected route's capacity answer carries a wait -> admission refuses with ROUTE_CAPACITY. Near miss:
+    no wait -> admitted."""
+    from tests.unit.test_workforce_scheduler import _go_ready
+    from tests.unit.test_workforce_support import FakeModules
+
+    fakes = FakeModules().install(monkeypatch)
+    _route, specs = _go_ready(db, fakes)
+    assert scheduler.admission_check(db, specs[0].id).admitted
+    real = integrations.route_capacity
+    monkeypatch.setattr(integrations, "route_capacity", lambda s, t, r: {
+        **real(s, t, r), "wait": {"code": "ROUTE_CAPACITY", "reason": "ROUTE_BUSY: route x is at its concurrency cap"}})
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert not adm.admitted and ("ROUTE_CAPACITY", "ROUTE_BUSY: route x is at its concurrency cap") in adm.waits
+
+
 # ------------------------------------------------------------------ 4. cool-down after 429 / 5xx
 
 
@@ -336,6 +421,27 @@ def test_a_provider_5xx_starts_a_cool_down_and_its_expiry_returns_the_primary(ro
     row.resets_at = utcnow() - timedelta(seconds=1)  # the cool-down ended
     routes.flush()
     assert select_route(routes, task=task()).route.route_key == GO_GLM
+
+
+
+def test_a_5xx_after_a_longer_429_reset_never_shortens_it(routes, monkeypatch):
+    """Review finding 2. Red before the fix: a 429 with Retry-After 3600, then a 503 on the same route, cut the reset to
+    the 120 s doubling. Now the longer reset stays (EXISTING_RESET), so new tasks keep skipping the route and a
+    quota-stopped task may still move. Near miss: a 5xx on a route with no recorded reset starts the plain doubling."""
+    install_fakes(monkeypatch)
+    _go(routes, GO_GLM, GO_MIMO)
+    _broker_429(routes, GO_GLM, retry_after=3600)
+    before = routes.scalar(select(QuotaState).where(QuotaState.scope == GO_GLM)).resets_at
+    cd = routing.note_route_cooldown(routes, provider="opencode-go", route_key=GO_GLM, status=503, run_id="r")
+    row = routes.scalar(select(QuotaState).where(QuotaState.scope == GO_GLM))
+    assert cd["basis"] == "EXISTING_RESET" and cd["streak"] == 2 and row.resets_at == before
+    assert cd["seconds"] > 3500 and row.source == "observed-5xx"
+    assert routing.reselect_allowed(routes, GO_GLM) is True  # still about 60 min > 30 min
+    assert select_route(routes, task=task()).route.route_key == GO_MIMO
+    _broker_429(routes, GO_GLM, retry_after=10)  # a later, shorter 429 does not cut it either
+    assert routes.scalar(select(QuotaState).where(QuotaState.scope == GO_GLM)).resets_at == before
+    near = routing.note_route_cooldown(routes, provider="opencode-go", route_key=GO_MIMO, status=502)
+    assert near["basis"] == "DOUBLING" and near["seconds"] == 60
 
 
 def test_a_quota_stopped_task_moves_only_to_a_zero_marginal_route(routes, monkeypatch):

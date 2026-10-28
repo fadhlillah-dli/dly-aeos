@@ -1619,7 +1619,13 @@ def admission_check(session: Session, task_id: str) -> Admission:
             adm.waits.append(("QUOTA_EXHAUSTED", moved))
         # ADR-0124: the route's cap, its active tasks and the allowance estimate the run holds while in flight (figures
         # span domains: the admission API shows them only to a principal who may see every domain)
-        adm.answers["route_capacity"] = ext.route_capacity(session, task, route)
+        rcap = ext.route_capacity(session, task, route)
+        adm.answers["route_capacity"] = rcap
+        cap_wait = rcap.get("wait") if isinstance(rcap, dict) else None
+        if isinstance(cap_wait, dict) and cap_wait.get("code"):
+            # enforced for every selection (an evaluation-bound task included): never two runs over a route's cap or a
+            # start that does not fit its 5h window; the reason carries no allowance figures
+            adm.waits.append((str(cap_wait["code"]), str(cap_wait.get("reason") or "")))
         est_usd, est_tokens, cost_unknown = _cost_estimate(task, route)
         if est_usd is None:
             adm.waits.append(("COST_UNKNOWN", cost_unknown))

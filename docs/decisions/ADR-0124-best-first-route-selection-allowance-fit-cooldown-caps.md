@@ -62,7 +62,12 @@ the worker prompt, `policy/` or the context strategy, or raise any global cap.
    table (LiveBench 2.0 release 2026-10-25 `cost.csv`, `long_agentic / nq_long_agentic`, read 2026-10-28, rounded up
    to the cent: kimi-k3 18.00, step-5-preview 9.06, kimi-k3.1-pro 7.43, glm-5.3-flash 1.63, deepseek-v4.1-flash 1.45,
    mimo-v2.6-pro 1.22, minimax-m3.1-flash 1.09 USD; these models' list prices equal their Go allowance rates); else half
-   the route's 5h window (conservative default). The admitted run records its estimate as
+   the route's 5h window (conservative default). An estimate larger than the route's whole 5h window is capped at that
+   window (`capped_at_window`, the uncapped figure kept beside it): the kimi-k3 (18.00), step-5-preview (9.06) and
+   kimi-k3.1-pro (7.43) priors exceed the 3.00 USD window of a 15 USD/month route, and uncapped they would never fit,
+   so no run could ever start and build the history that replaces the prior. Capped, such a route takes a task only on
+   an empty window (no recorded usage, no holds) - the most the window can give - and a run that still outgrows it
+   meets Go's own 5h limit (a 429: cool-down, the attempt stays on its route). The admitted run records its estimate as
    `WorkerRun.caps.allowance_hold`; while the run is LEASED or RUNNING it holds that estimate minus what it already
    used (which the ledger counts); the hold ends when the run leaves those states. A route that does not fit is skipped
    (`ALLOWANCE_FIT`), never a failure and never a paid route. A window AEOS cannot count (`UNKNOWN`) is skipped too
@@ -71,7 +76,9 @@ the worker prompt, `policy/` or the context strategy, or raise any global cap.
    on the route's existing `QuotaState` (provider, scope = route key) - the 429 through the broker's existing quota
    write (cost module), a 5xx through `routing.service.note_rate_limited`: 60 s, doubling per repeat while the previous
    cool-down ended less than 30 minutes ago (or is still running), at most 30 minutes, or the provider's Retry-After when
-   that is longer. No new column. A route in cool-down is a "limit" rejection, so new tasks skip it. A running attempt
+   that is longer. A new cool-down never shortens a reset still recorded on that `QuotaState`: a 5xx after a 429 with
+   a longer Retry-After keeps the longer reset (`EXISTING_RESET`), so new tasks keep skipping the route and the expected
+   wait that decides re-selection stays the provider's. No new column. A route in cool-down is a "limit" rejection, so new tasks skip it. A running attempt
    stays pinned to its route: the broker does not refuse its requests for a cool-down, and nothing re-routes an attempt.
    Re-selection happens only between attempts: a task the executor stopped at a quota (`QUOTA_EXHAUSTED`) stops waiting
    for its old route only when the expected wait is known and longer than the owner setting
@@ -90,6 +97,9 @@ the worker prompt, `policy/` or the context strategy, or raise any global cap.
    route `openrouter_free_max_active` (default 1, the account-wide rate limit). Every value is 1..2:
    `HARD_MAX_ACTIVE` stays 2 (answer 4) and still bounds everything. A route at a cap is skipped (`ROUTE_BUSY`). The
    active tasks are the LIVE runs that are LEASED or RUNNING.
+   The load rules (caps, allowance fit, PUBLIC share) hold for every selection, an evaluation-bound task included, and
+   admission enforces them: the selected route's `route_capacity` answer carries a `wait` (code `ROUTE_CAPACITY`, a
+   reason without figures) when the route cannot take the task now, and the task waits.
 6. **Never a paid route after a skip** (answer 3, widening ADR-0041 decision C point 5 from free routes to every skip):
    once a ranked route was skipped for load or kept out by a limit, only a $0-marginal route may serve; otherwise the
    task waits with `ROUTE_CAPACITY` (a quota wait, WAITING_QUOTA), or `FREE_TIER_LIMIT_REACHED` when a free route is at
@@ -102,9 +112,11 @@ the worker prompt, `policy/` or the context strategy, or raise any global cap.
 ## Consequences
 
 * The best eligible route serves first; load spreads to the next ranked $0-marginal route instead of queueing behind
-  one route. Pro Go routes take a task only when it fits their window; most long work lands on the cheaper Go models.
-* An evaluation-bound task (`_select_eval_route`) runs on exactly its evaluated route, with no ranking and no load
-  skip (unchanged). A TaskSpec `primary` route is pinned: when it is at capacity the task waits (`ROUTE_CAPACITY`).
+  one route. Pro Go routes take a task only when it fits their window (for a prior above the window: only on an empty
+  window); most long work lands on the cheaper Go models.
+* An evaluation-bound task (`_select_eval_route`) runs on exactly its evaluated route, with no ranking and no
+  fallback; when that route is busy or the task does not fit its window, the task waits (`ROUTE_CAPACITY`) instead of
+  overshooting the route's cap or 5h window. A TaskSpec `primary` route is pinned: when it is at capacity the task waits (`ROUTE_CAPACITY`).
 * Identity invariance: `worker_prompt_revision()`, `policy_version`, `context_strategy` and the configuration hash of
   every seeded route are byte-identical to origin/main 27ebb58 (`tests/unit/test_routing_best_first.py` pins them and
   re-checks them after ranking, caps, fits and cool-downs). No ACTIVE TRIAL is voided.

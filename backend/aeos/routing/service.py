@@ -1201,7 +1201,17 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
         served = ("WORKER",)
     bound = _eval_serving(session, task)
     if bound.get("status") != "NOT_BOUND":
-        return _select_eval_route(session, task, pol, bound)
+        chosen = _select_eval_route(session, task, pol, bound)
+        assert chosen.route is not None  # _select_eval_route returns a route or raises
+        skip = capacity.capacity_skip(session, chosen.route, task=task, runs=capacity.in_flight_runs(session))
+        if skip is not None:  # ADR-0124: the evaluated route's load rules hold too; it waits, never another route
+            key = chosen.route.route_key
+            raise Blocked(f"the task is bound to evaluation {bound.get('eval_run_id')}; its route {key} cannot take it "
+                          "now (busy or out of 5h allowance); the task waits - never another or a paid route",
+                          code=capacity.CODE_CAPACITY,
+                          details={"held": [key], "rejected": {key: [f"{skip[0]}: {skip[1]}"]}, "would_serve": None,
+                                   "reasons": [f"{skip[0]}: {skip[1]}"], "eval_run_id": bound.get("eval_run_id")})
+        return chosen
     if pol["pool"] not in served:
         # §23: refuse at admission instead of failing at the worker's first model call (ADR-0106).
         raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "

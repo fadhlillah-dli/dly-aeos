@@ -474,11 +474,13 @@ Copy the route key and its config hash from the `routes list` output.
     at most 2 across all Go routes), when the task's estimated allowance does not fit what is left of its 5h window
     (`ALLOWANCE_FIT`), or, for a PUBLIC task, when PUBLIC tasks have used their share of that window (`PUBLIC_SHARE`,
     half by default). The estimate is this machine's own median for the route and the task's role after 3 finished
-    runs, before that the LiveBench 2026-10-25 cost of one long agentic task, else half the window; a running task
-    holds its estimate until it ends. After a skip only a route with no cost per call (Go within the plan, or free)
+    runs, before that the LiveBench 2026-10-25 cost of one long agentic task, else half the window, and never more
+    than the whole window (a Pro Go model whose LiveBench cost is above its window takes a task when its window is
+    empty); a running task holds its estimate until it ends. A task bound to an evaluation obeys the same limits and
+    waits for its route. After a skip only a route with no cost per call (Go within the plan, or free)
     may take the task; otherwise it waits (`ROUTE_CAPACITY`). The global limit stays 2 tasks at once.
   * **Cool-down.** A 429 or a 5xx from Go starts a cool-down of that route: 60 s, doubling on each repeat up to
-    30 minutes, or longer when Go's Retry-After says so. New tasks skip the route meanwhile; a running task stays on
+    30 minutes, or longer when Go's Retry-After says so; a later error never shortens a longer wait. New tasks skip the route meanwhile; a running task stays on
     it. A task stopped at a quota moves to another Go or free route between attempts only when the wait is longer
     than 30 minutes; otherwise it waits for its route.
   * **Settings (`aeos.yaml`, optional).** `go_public_share`, `route_max_active`, `go_max_active_total`,

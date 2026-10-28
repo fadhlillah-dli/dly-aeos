@@ -9,6 +9,9 @@ its plan) may be chosen; otherwise the task waits (``ROUTE_CAPACITY``).
 
 Skips (the reason code leads the rejection text; a reason never carries allowance figures, they span domains):
 
+The skips apply to every selection, an evaluation-bound task included (it waits for its evaluated route, never moves),
+and admission re-checks them for the selected route (``route_capacity`` -> ``wait``).
+
 * ``ROUTE_BUSY``: the route is at its concurrency cap (setting ``route_max_active``; default 1 for a SUBSCRIPTION route
   with a monthly allowance of at most 30 USD, else 2), every SUBSCRIPTION route of the provider together is at
   ``go_max_active_total``, or every OpenRouter ``:free`` route together is at ``openrouter_free_max_active`` (one
@@ -16,8 +19,10 @@ Skips (the reason code leads the rejection text; a reason never carries allowanc
 * ``ALLOWANCE_FIT``: a SUBSCRIPTION route admits a task only when the task's estimated allowance fits the trailing 5h
   window: 20% of the monthly allowance minus the usage this AEOS instance recorded minus the holds of its in-flight runs
   (equal fits). The estimate: the median allowance of this instance's last finished runs of the same role on the route
-  (at least ``MIN_HISTORY_RUNS``), else the LiveBench prior below, else half the route's 5h window (``DEFAULT``). The
-  admitted run holds its estimate (``WorkerRun.caps.allowance_hold``) until it is no longer in flight; what it used is
+  (at least ``MIN_HISTORY_RUNS``), else the LiveBench prior below, else half the route's 5h window (``DEFAULT``). An
+  estimate larger than the route's whole 5h window is capped at that window (``capped_at_window``): such a task is
+  admitted only on an empty window (no usage, no holds), so a route whose prior exceeds its window (the Pro Go models)
+  still serves and builds the history that replaces the prior, instead of being skipped forever. The admitted run holds its estimate (``WorkerRun.caps.allowance_hold``) until it is no longer in flight; what it used is
   in the usage ledger, so the hold shrinks by it. A window AEOS cannot count (``UNKNOWN``) is skipped too (fail closed).
   No calendar-month pace guard: the week and month windows stay advisory (ADR-0080 amendment 2026-10-26).
 * ``PUBLIC_SHARE``: a PUBLIC task fits only into ``go_public_share`` of the route's 5h window minus what PUBLIC runs
@@ -27,7 +32,8 @@ Skips (the reason code leads the rejection text; a reason never carries allowanc
 Cool-down: a 429 or a provider 5xx records a cool-down on the route's own ``QuotaState`` (scope = route key; written by
 the broker through the cost module or ``service.note_rate_limited``): 60 s, doubling per repeat while the previous
 cool-down ended less than 30 minutes ago, at most 30 minutes - or longer when the provider's reset (Retry-After) says
-so. A route in cool-down is a "limit" rejection, so it is skipped for NEW tasks only; a running attempt stays pinned to
+so. A new cool-down never shortens a reset already recorded on that QuotaState (a 429's longer Retry-After stays when
+a 5xx follows; ``EXISTING_RESET``). A route in cool-down is a "limit" rejection, so it is skipped for NEW tasks only; a running attempt stays pinned to
 its route (the broker does not refuse its requests). Between attempts, a task the executor stopped at a quota moves to
 another route only when the expected wait for its route exceeds ``route_reselect_after_minutes`` (``reselect_allowed``)
 and only to an ACTIVE $0-marginal route of the same data class (the scheduler checks it at admission).
@@ -38,6 +44,7 @@ the worker prompt revision or the policy version: no ACTIVE TRIAL is voided by t
 
 from __future__ import annotations
 
+import math
 import statistics
 from datetime import datetime, timedelta
 from decimal import ROUND_CEILING, Decimal, InvalidOperation
@@ -206,7 +213,16 @@ def _upstream_model(route: ModelRoute) -> str:
 def allowance_estimate(session: Session, route: ModelRoute, role: str | None, *,
                        window_limit: Decimal | None = None) -> dict[str, Any]:
     """The allowance (USD) one task of *role* is expected to use on *route*, with its basis: LEDGER_HISTORY, PRIOR or
-    DEFAULT (see the module docstring)."""
+    DEFAULT (see the module docstring), capped at *window_limit* when it is larger (``capped_at_window``)."""
+    est = _estimate(session, route, role, window_limit=window_limit)
+    if window_limit is not None and window_limit > 0 and Decimal(est["usd"]) > window_limit:
+        est = {**est, "usd": _out(window_limit), "capped_at_window": True, "uncapped_usd": est["usd"],
+               "source": f"{est['source']}; capped at the route's whole 5h window (admitted only on an empty window)"}
+    return est
+
+
+def _estimate(session: Session, route: ModelRoute, role: str | None, *,
+              window_limit: Decimal | None = None) -> dict[str, Any]:
     if role:
         rows = session.scalars(select(WorkerRun).where(
             WorkerRun.model_route_key == route.route_key, WorkerRun.role_key == role, WorkerRun.mode == "LIVE",
@@ -338,13 +354,18 @@ def capacity_skip(session: Session, route: ModelRoute, *, task: TaskSpec, runs: 
 
 def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> dict[str, Any]:
     """The §19 admission answer for the selected route: its cap, the active tasks on it and - for a SUBSCRIPTION route -
-    the allowance fit with the estimate the run will hold (``hold``). Figures span domains (route-level)."""
+    the allowance fit with the estimate the run will hold (``hold``). Figures span domains (route-level). ``wait``
+    ({code, reason}, the reason without figures) when the route cannot take the task now (busy, allowance fit, PUBLIC
+    share): admission enforces it for every selection, an evaluation-bound task included."""
     settings = _settings()
     runs = [r for r in in_flight_runs(session) if r.task_id != task.id]
     cap, basis = route_cap(route, settings)
     out: dict[str, Any] = {"route_key": route.route_key, "cap": cap, "cap_basis": basis,
                            "active_on_route": sum(1 for r in runs if r.model_route_key == route.route_key),
-                           "zero_marginal": zero_marginal(route), "hold": None}
+                           "zero_marginal": zero_marginal(route), "hold": None, "wait": None}
+    if busy_problem(session, route, runs, settings) is not None:
+        out["wait"] = {"code": CODE_CAPACITY, "reason": f"{ROUTE_BUSY}: route {route.route_key} or its provider group "
+                                                        "is at its concurrency cap; the task waits - never a paid route"}
     fit = allowance_fit(session, route, role=task.role_key, data_classification=task.data_classification, runs=runs,
                         settings=settings)
     if fit is not None:
@@ -353,6 +374,10 @@ def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> di
         est = fit.get("estimate")
         if isinstance(est, dict):
             out["hold"] = {"usd": est.get("usd"), "basis": est.get("basis")}
+        if skip is not None and out["wait"] is None:
+            out["wait"] = {"code": CODE_CAPACITY, "reason": f"{skip[0]}: route {route.route_key} cannot take this task "
+                                                            "within its 5h window now (allowance fit or PUBLIC share); "
+                                                            "the task waits - never a paid route"}
     return out
 
 
@@ -362,7 +387,8 @@ def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> di
 def cooldown_for(session: Session, *, provider: str, route_key: str, reported_seconds: int | None = None,
                  now: datetime | None = None) -> dict[str, Any]:
     """The cool-down a new 429/5xx on *route_key* starts: 60 s doubling per repeat (the previous cool-down of the route
-    ended less than 30 minutes ago, or is still running) up to 30 minutes, or the provider's longer reset."""
+    ended less than 30 minutes ago, or is still running) up to 30 minutes, or the provider's longer reset; never shorter
+    than a reset still recorded on the route's QuotaState (``EXISTING_RESET``)."""
     current = ensure_aware(now or utcnow())
     assert current is not None
     row = session.scalar(select(QuotaState).where(QuotaState.provider == provider, QuotaState.scope == route_key))
@@ -378,8 +404,11 @@ def cooldown_for(session: Session, *, provider: str, route_key: str, reported_se
     seconds, basis = doubling, "DOUBLING"
     if isinstance(reported_seconds, int) and not isinstance(reported_seconds, bool) and reported_seconds > doubling:
         seconds, basis = reported_seconds, "PROVIDER_RESET"
-    return {"streak": streak, "seconds": seconds, "basis": basis,
-            "resets_at": (current + timedelta(seconds=seconds)).isoformat()}
+    resets_at = current + timedelta(seconds=seconds)
+    if row is not None and row.state == "EXHAUSTED" and ended is not None and ended > resets_at:
+        # a longer reset already recorded on the route (a 429's Retry-After) is never cut by a later 429/5xx
+        seconds, basis, resets_at = math.ceil((ended - current).total_seconds()), "EXISTING_RESET", ended
+    return {"streak": streak, "seconds": seconds, "basis": basis, "resets_at": resets_at.isoformat()}
 
 
 def note_route_cooldown(session: Session, *, provider: str, route_key: str, status: int,
