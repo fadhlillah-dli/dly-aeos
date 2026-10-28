@@ -335,15 +335,16 @@ two $10 plans are used well, from records AEOS already keeps:
 
 | Part | What it shows (computed from) |
 |---|---|
-| OpenCode Go | Per SUBSCRIPTION route: allowance used in the trailing 5h window, the trailing week (both for the current month only) and the month, against the window's limit (seeded monthly allowance x 20 %, 50 %, 100 %), in percent; the plan fee once; allowance used per fee dollar; WORKER routes never used in the month (usage ledger: the recorded `usage.opencode.allowance`, else the cost module's estimate) |
+| OpenCode Go | Per SUBSCRIPTION route: allowance used in the trailing 5h window, the trailing week (both for the current month only) and the month, against the window's limit (seeded monthly allowance x 20 %, 50 %, 100 %), in percent; the plan fee once; allowance used per fee dollar; WORKER routes never used in the month (usage ledger: the recorded `usage.opencode.allowance`, else the cost module's estimate). Routes with UNTRUSTED terms are listed but not counted in the total (`routes_untrusted`); when they had calls, or a call's allowance is UNKNOWN, the total is marked `LOWER_BOUND` (JSON `totals.state`, text "LOWER BOUND") |
 | OpenRouter | `:free` requests counted today (UTC) against the daily cap; paid spend per route and per role, actual, estimate and UNKNOWN apart (usage ledger, worker runs); the GLOBAL and `openrouter/*` ROUTE budgets (limit, spent, held, remaining) and the key limit from the last `aeos routes refresh` |
-| Work | Tasks and runs per role; verifier pass rate per (route, role) (NOT_RUN is undecided, NOT_PROVEN is not a pass); escalation and overflow events of the paid admission (`NO_EVENTS` when none happened or that change is not installed); median run wall-clock and plan wall-clock per plan |
+| Work | Tasks and runs per role; verifier pass rate per (route, role) (NOT_RUN is undecided, NOT_PROVEN is not a pass); paid admissions: the `route.paid_admitted` events of the paid-admission change counted by their reason, ESCALATION, OVERFLOW or unclassified (`NO_EVENTS` when none happened or that change is not installed); median run wall-clock and plan wall-clock per plan |
 | Claude | States that Claude Max token use is measured by ccusage outside AEOS. With `ccusage_export_path` set (`AEOS_CCUSAGE_EXPORT_PATH`), the token totals of that export for the month (an ESTIMATE, never dollars); beside it the NATIVE_CLAUDE rows AEOS recorded itself |
 
 Limits: AEOS counts only the calls made through this instance, so the provider's own count can be higher; the Go
 month is the calendar month, not the provider's billing cycle. The GLOBAL and ROUTE budget figures and the key limit
 cover every domain, so the API shows them only to a principal who can see every domain (the same rule as
-`GET /api/budgets`); the ccusage totals follow the same rule. Only route keys, role keys, plan ids, counts and
+`GET /api/budgets`); the ccusage totals follow the same rule. A project-scoped principal sees ledger rows, runs and
+paid-admission events of its allowed projects (and project-less ones) only. Only route keys, role keys, plan ids, counts and
 amounts are output: no task text, error text, event payload or secret. Proven by unit tests on macOS arm64;
 NOT-PROVEN on Windows and Intel macOS until CI runs them.
 

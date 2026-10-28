@@ -93,10 +93,11 @@ def seeded(db, tmp_path):
     db.add(BrokerRequest(grant_id="g", run_id=r3.id, project_id=personal.id, domain="PERSONAL", route_key=FREE,
                          provider="openrouter", upstream_model="vendor/free-model:free", outcome="OK",
                          error_summary=MARKER, created_at=NOW - timedelta(minutes=30)))
-    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind="routing.paid.escalation", domain="PERSONAL",
-                 run_id=r3.id, payload={"text": MARKER}))
-    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind="routing.paid.escalation", domain="PERSONAL",
-                 payload={"text": MARKER}))
+    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind=usage_report.PAID_ADMITTED_KIND,
+                 domain="PERSONAL", run_id=r3.id, project_id=personal.id,
+                 payload={"reason": "ESCALATION", "text": MARKER}))
+    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind=usage_report.PAID_ADMITTED_KIND,
+                 domain="PERSONAL", payload={"reason": "ESCALATION", "text": MARKER}))
     db.commit()
     export = tmp_path / "ccusage.json"
     export.write_text(json.dumps({
@@ -197,7 +198,8 @@ def test_office_records_never_change_the_personal_report(db, seeded):
     # an entry without a domain but tied to an OFFICE run is still OFFICE's
     _ledger(db, route=PAID, at=NOW - timedelta(hours=1), domain=None, cost="7", run_id=orun.id,
             provider="openrouter")
-    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind="routing.paid.overflow", domain="OFFICE"))
+    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind=usage_report.PAID_ADMITTED_KIND,
+                 domain="OFFICE", project_id=office.id, payload={"reason": "OVERFLOW"}))
     db.add(WorkerRun(task_id=seeded["ospecs"][0].id, project_id=office.id, domain="OFFICE", role_key="writer",
                      model_route_key=PAID, verifier_status="FAIL", created_at=NOW - timedelta(hours=1)))
     db.commit()
@@ -294,3 +296,75 @@ def test_seeded_go_worker_routes_show_as_never_used(db):
                                                                           ModelRoute.pool == "WORKER"))}
     assert seeded_go and never == seeded_go
     assert rep["opencode_go"]["totals"]["used_usd_month"] == 0.0
+
+
+def _admitted(db, *, reason: str, project_id: str | None, kind: str = usage_report.PAID_ADMITTED_KIND) -> None:
+    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind=kind, domain="PERSONAL", project_id=project_id,
+                 payload={"reason": reason, "text": MARKER}))
+    db.commit()
+
+
+def test_paid_admissions_of_another_personal_project_are_hidden_from_a_scoped_principal(db, seeded):
+    """Review finding 1: a project-scoped PERSONAL principal sees no paid-admission counts of a project outside its
+    allowed_project_ids; a principal allowed that project (near miss) does."""
+    other = make_project(db)
+    _admitted(db, reason="OVERFLOW", project_id=other.id)
+    scoped = _report(db, seeded, allowed_project_ids=[seeded["personal"].id], cross_domain_visible=False)
+    pa = scoped["work"]["paid_admissions"]
+    assert (pa["escalations"], pa["overflows"]) == (2, 0), pa  # the seeded own-project and project-less events only
+    both = _report(db, seeded, allowed_project_ids=[seeded["personal"].id, other.id], cross_domain_visible=False)
+    assert both["work"]["paid_admissions"]["overflows"] == 1
+    # an event without a project but tied to a run of the other project is that project's
+    orun = WorkerRun(task_id=None, project_id=other.id, domain="PERSONAL", role_key="coder", model_route_key=PAID)
+    db.add(orun)
+    db.flush()
+    db.add(Event(at=NOW - timedelta(hours=1), source="scheduler", kind=usage_report.PAID_ADMITTED_KIND,
+                 domain=None, run_id=orun.id, payload={"reason": "ESCALATION"}))
+    db.commit()
+    again = _report(db, seeded, allowed_project_ids=[seeded["personal"].id], cross_domain_visible=False)
+    assert again["work"]["paid_admissions"] == pa
+
+
+def test_paid_admissions_are_counted_by_the_reason_of_the_route_paid_admitted_event(db, seeded):
+    """Review finding 2: the paid-admission change emits one kind and puts ESCALATION or OVERFLOW in the payload."""
+    _admitted(db, reason="OVERFLOW", project_id=seeded["personal"].id)
+    _admitted(db, reason="SOMETHING_ELSE", project_id=seeded["personal"].id)
+    _admitted(db, reason="OVERFLOW", project_id=seeded["personal"].id, kind="routing.paid.overflow")  # not the kind
+    rep = _report(db, seeded)
+    pa = rep["work"]["paid_admissions"]
+    assert (pa["escalations"], pa["overflows"], pa["unclassified"]) == (2, 1, 1), pa
+    assert pa["by_kind"] == {usage_report.PAID_ADMITTED_KIND: 4} and pa["status"] == "EVENTS_FOUND"
+    text = "\n".join(usage_report.render_text(rep))
+    assert "paid admissions: escalations 2, overflows 1, unclassified 1 (EVENTS_FOUND)" in text
+    assert "SOMETHING_ELSE" not in json.dumps(rep) and MARKER not in json.dumps(rep)
+
+
+def test_paid_admitted_kind_matches_the_paid_admission_module_when_installed():
+    paid = pytest.importorskip("aeos.routing.paid")
+    assert paid.EVENT_KIND == usage_report.PAID_ADMITTED_KIND
+    assert (paid.ESCALATION, paid.OVERFLOW) == (usage_report.ESCALATION, usage_report.OVERFLOW)
+
+
+def test_go_totals_are_a_lower_bound_when_calls_cannot_be_counted(db, seeded):
+    """Review finding 3: calls on an UNTRUSTED route and calls with UNKNOWN allowance mark the totals and the text
+    total line as a lower bound; the seeded report (near miss) stays exact."""
+    exact = _report(db, seeded)
+    t0 = exact["opencode_go"]["totals"]
+    assert (t0["state"], t0["routes_counted"], t0["routes_untrusted"]) == ("OK", 2, 0)
+    assert "LOWER BOUND" not in "\n".join(usage_report.render_text(exact))
+    unchecked = _go("opencode-go/test-unchecked", 20)
+    unchecked.pricing_checked_at = None
+    db.add(unchecked)
+    _ledger(db, route=unchecked.route_key, at=NOW - timedelta(hours=1), allowance="20")
+    db.add(UsageLedgerEntry(at=NOW - timedelta(hours=2), route_key=GO_A, provider="opencode-go", category="WORKER_API",
+                            domain="PERSONAL", requests=1, input_tokens=None, output_tokens=None, cost_usd=Decimal("0"),
+                            source="broker", details={}, mode="LIVE"))
+    db.commit()
+    rep = _report(db, seeded)
+    t = rep["opencode_go"]["totals"]
+    assert (t["used_usd_month"], t["routes"], t["routes_counted"], t["routes_untrusted"]) == (18.0, 3, 2, 1)
+    assert (t["untrusted_requests_month"], t["unknown_requests_month"], t["state"]) == (1, 1, "LOWER_BOUND")
+    text = "\n".join(usage_report.render_text(rep))
+    assert "over 2 counted route(s)" in text and "(LOWER BOUND)" in text
+    assert "LOWER BOUND: the total leaves out 1 call(s) on UNTRUSTED route(s) and 1 call(s) with UNKNOWN" in text
+    assert "not counted: 1 UNTRUSTED route(s) (1 call(s) this month)" in text

@@ -12,16 +12,16 @@ report answers that from records AEOS already keeps; it decides nothing, changes
   spend per route and per role from the usage ledger (actual / estimate / UNKNOWN kept apart), the owner BUDGET rows
   that govern it (GLOBAL and ``openrouter/*`` ROUTE budgets: limit, spent, held, headroom) and the key limit the
   OpenRouter key endpoint last reported.
-* **Work**: tasks and runs per role, the verifier pass rate per (route, role), escalation and overflow events (emitted
-  by the paid-admission change once it is merged; their absence is reported, not treated as zero use of a feature),
-  and the median wall-clock of the finished runs per plan.
+* **Work**: tasks and runs per role, the verifier pass rate per (route, role), the paid admissions by reason
+  (ESCALATION / OVERFLOW from the ``route.paid_admitted`` events of the paid-admission change, ADR-0128; their absence
+  is reported, not treated as zero use of a feature), and the median wall-clock of the finished runs per plan.
 * **Claude**: Claude Max token use is measured by ccusage outside AEOS. When ``ccusage_export_path`` names a
   ``ccusage daily --json`` export, its token totals are shown (never a dollar figure, §42); AEOS's own NATIVE_CLAUDE
   ledger rows are counted beside it.
 
 Scope: PERSONAL only. Ledger rows, runs and events of OFFICE never enter it (``service._visible_ledger`` and explicit
-domain filters). Figures that span domains (GLOBAL/ROUTE budget spend, the OpenRouter key limit, the ccusage export)
-follow the GLOBAL/ROUTE visibility rule: hidden from a principal who cannot see every domain. Only route keys, role
+domain filters), and a project-scoped principal sees only its allowed projects (and project-less rows) in every
+part. Figures that span domains (GLOBAL/ROUTE budget spend, the OpenRouter key limit, the ccusage export) follow the GLOBAL/ROUTE visibility rule: hidden from a principal who cannot see every domain. Only route keys, role
 keys, plan ids, counts and amounts are output: no prompt, task text, error text, event payload or secret.
 """
 
@@ -36,7 +36,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aeos.core.enums import DataMode, Domain
@@ -63,10 +63,13 @@ TRAILING = {"5h": timedelta(hours=5), "week": timedelta(days=7)}
 PASS_STATUSES = frozenset({"PASS", "PASSED"})
 # A verifier verdict that is not a pass (NOT_PROVEN and BLOCKED are never rendered as pass, invariant 7).
 NOT_PASS_STATUSES = frozenset({"FAIL", "FAILED", "QUARANTINED", "NOT_PROVEN", "BLOCKED", "ERROR"})
-# Event kinds of the paid-admission branch (owner R34: escalation after two failed $0-marginal attempts, overflow when
-# every $0-marginal route of the role is at capacity). Matched by marker so the report needs no change when it lands.
-ESCALATION_MARKER = "escalat"
-OVERFLOW_MARKER = "overflow"
+# The one event the paid-admission change emits when it admits a run on a paid route (owner R34; ADR-0128): its kind is
+# ``aeos.routing.paid.EVENT_KIND`` and ``payload.reason`` says why, ESCALATION (after two failed $0-marginal attempts)
+# or OVERFLOW (every $0-marginal route of the role at capacity). Kept here as a literal because that module may be
+# absent; tests/unit/test_cost_usage_report.py compares the two once it exists.
+PAID_ADMITTED_KIND = "route.paid_admitted"
+ESCALATION = "ESCALATION"
+OVERFLOW = "OVERFLOW"
 CCUSAGE_MAX_BYTES = 5 * 1024 * 1024
 HIDDEN = "Angka ini mencakup domain lain yang tidak dapat Anda lihat."
 CLAUDE_STATEMENT = ("Claude Max token use is measured by ccusage outside AEOS (local Claude Code logs). AEOS never "
@@ -140,6 +143,9 @@ def _go_section(session: Session, routes: list[ModelRoute], entries: list[UsageL
     plans: dict[str, float | None] = {}
     total_allowance = ZERO
     total_used = ZERO
+    unknown_month = 0  # calls of trusted routes whose allowance cannot be counted
+    untrusted: list[str] = []  # routes whose terms are untrusted: neither their use nor their allowance is counted
+    untrusted_month = 0
     for route in routes:
         if not subs.is_subscription_priced(route):
             continue
@@ -152,6 +158,8 @@ def _go_section(session: Session, routes: list[ModelRoute], entries: list[UsageL
                                 "allowance_usd_month": None, "windows": [], "state": "OK"}
         if terms is None:
             items.append(item | {"state": "UNTRUSTED", "problem": problem, "requests_month": len(month_calls)})
+            untrusted.append(route.route_key)
+            untrusted_month += len(month_calls)
             continue
         allowance: Decimal = terms["allowance_usd_month"]
         plans[str(terms["plan"])] = _f(terms["monthly_fee_usd"])
@@ -181,6 +189,7 @@ def _go_section(session: Session, routes: list[ModelRoute], entries: list[UsageL
             if name == "month":
                 total_used += used
                 item["requests_month"] = len(inside)
+                unknown_month += unknown
                 if unknown:
                     item["state"] = "LOWER_BOUND"  # some calls have no countable allowance
         total_allowance += allowance
@@ -190,11 +199,16 @@ def _go_section(session: Session, routes: list[ModelRoute], entries: list[UsageL
                                "allowance_usd_month": float(allowance)})
     fees = [v for v in plans.values() if v is not None]
     fee_total = sum(fees) if fees else None
+    lower_bound = bool(unknown_month or untrusted_month)
     return {
         "routes": items,
         "never_used_this_month": never_used,
         "totals": {"allowance_usd_month": float(total_allowance), "used_usd_month": float(total_used),
                    "used_pct": _pct(total_used, total_allowance), "routes": len(items),
+                   "routes_counted": len(items) - len(untrusted), "routes_untrusted": len(untrusted),
+                   "untrusted_requests_month": untrusted_month, "unknown_requests_month": unknown_month,
+                   # used (and used per fee dollar) leave out calls AEOS cannot count: a lower bound, never exact
+                   "state": "LOWER_BOUND" if lower_bound else "OK",
                    "routes_never_used": len(never_used),
                    "plans": [{"plan": k, "monthly_fee_usd": v} for k, v in sorted(plans.items())],
                    "allowance_used_per_fee_dollar": (round(float(total_used) / fee_total, 2)
@@ -304,7 +318,36 @@ def _plan_of_tasks(session: Session, task_ids: set[str]) -> dict[str, str]:
     return {tid: pid for tid, pid in rows}
 
 
-def _work_section(session: Session, runs: list[WorkerRun], *, start: datetime, end: datetime) -> dict[str, Any]:
+def _paid_admissions(session: Session, *, start: datetime, end: datetime,
+                     allowed_project_ids: list[str] | None) -> dict[str, int]:
+    """Counts by reason of the month's ``route.paid_admitted`` events in scope: PERSONAL (the event's domain, else its
+    run's), and for a project-scoped principal only its allowed projects (and project-less events), the same rule as
+    the ledger (``service._visible_ledger``). Only the reason is read from the payload, and only a known one is kept."""
+    from aeos.models.portfolio import Project
+
+    rows = list(session.execute(select(Event.domain, Event.run_id, Event.project_id, Event.payload).where(
+        Event.at >= start, Event.at < end, Event.mode == LIVE, Event.kind == PAID_ADMITTED_KIND)))
+    run_ids = {run_id for _, run_id, _, _ in rows if run_id}
+    run_of = ({r.id: r for r in session.scalars(select(WorkerRun).where(WorkerRun.id.in_(run_ids)))}
+              if run_ids else {})
+    project_domains = {p.id: p.domain for p in session.scalars(select(Project))}
+    counts = {ESCALATION: 0, OVERFLOW: 0, "UNCLASSIFIED": 0}
+    for domain, run_id, project_id, payload in rows:
+        run = run_of.get(run_id or "")
+        dom = domain or (run.domain if run is not None else None)
+        pid = project_id or (run.project_id if run is not None else None)
+        if dom != SCOPE_DOMAIN or (run is not None and run.domain != SCOPE_DOMAIN):
+            continue
+        if pid is not None and (project_domains.get(pid, dom) != SCOPE_DOMAIN
+                                or (allowed_project_ids is not None and pid not in allowed_project_ids)):
+            continue
+        reason = payload.get("reason") if isinstance(payload, dict) else None
+        counts[reason if reason in (ESCALATION, OVERFLOW) else "UNCLASSIFIED"] += 1
+    return counts
+
+
+def _work_section(session: Session, runs: list[WorkerRun], *, start: datetime, end: datetime,
+                  allowed_project_ids: list[str] | None) -> dict[str, Any]:
     roles: dict[str, dict[str, Any]] = {}
     rates: dict[tuple[str, str], dict[str, int]] = {}
     for r in runs:
@@ -343,26 +386,21 @@ def _work_section(session: Session, runs: list[WorkerRun], *, start: datetime, e
                       "median_run_wall_clock_s": round(statistics.median(durations), 1) if durations else None,
                       "plan_wall_clock_s": (round(max(0.0, (max(b for _, b in spans) - min(a for a, _ in spans))
                                                   .total_seconds()), 1) if spans else None)})
-    run_ids = {r.id for r in runs}
-    ev_q = select(Event.kind, Event.domain, Event.run_id).where(
-        Event.at >= start, Event.at < end, Event.mode == LIVE,
-        or_(Event.kind.like(f"%{ESCALATION_MARKER}%"), Event.kind.like(f"%{OVERFLOW_MARKER}%")))
-    by_kind: dict[str, int] = defaultdict(int)
-    for kind, domain, run_id in session.execute(ev_q):
-        if domain == SCOPE_DOMAIN or (domain is None and run_id in run_ids):
-            by_kind[kind] += 1
-    escalations = sum(n for k, n in by_kind.items() if ESCALATION_MARKER in k)
-    overflows = sum(n for k, n in by_kind.items() if OVERFLOW_MARKER in k)
+    by_reason = _paid_admissions(session, start=start, end=end, allowed_project_ids=allowed_project_ids)
+    admitted = sum(by_reason.values())
     return {
         "tasks_per_role": [{"role_key": k, "tasks": len(v["tasks"]), "runs": v["runs"]}
                            for k, v in sorted(roles.items())],
         "pass_rate": pass_rates,
         "paid_admissions": {
-            "escalations": escalations, "overflows": overflows, "by_kind": dict(sorted(by_kind.items())),
-            "status": "EVENTS_FOUND" if by_kind else "NO_EVENTS",
-            "note": ("Escalation (after two failed $0-marginal attempts) and overflow (every $0-marginal route of the "
-                     "role at capacity) events come from the paid-admission change; NO_EVENTS means none happened in "
-                     "the month or that change is not installed - AEOS cannot tell the two apart here."),
+            "escalations": by_reason[ESCALATION], "overflows": by_reason[OVERFLOW],
+            "unclassified": by_reason["UNCLASSIFIED"], "by_kind": {PAID_ADMITTED_KIND: admitted} if admitted else {},
+            "status": "EVENTS_FOUND" if admitted else "NO_EVENTS",
+            "note": (f"Paid admissions are the {PAID_ADMITTED_KIND} events of the paid-admission change (ADR-0128), "
+                     "counted by their reason: ESCALATION (after two failed $0-marginal attempts) or OVERFLOW (every "
+                     "$0-marginal route of the role at capacity); any other reason is unclassified. NO_EVENTS means "
+                     "none happened in the month or that change is not installed - AEOS cannot tell the two apart "
+                     "here."),
         },
         "plans": plans,
         "basis": ("Worker runs created in the month (PERSONAL). Pass rate = verifier PASS / runs with a verifier "
@@ -459,7 +497,7 @@ def build_report(session: Session, *, month: str | None = None, allowed_project_
         "openrouter": _openrouter_section(session, routes, month_entries, runs_by_id,
                                           allowed_project_ids=allowed_project_ids,
                                           cross_domain_visible=cross_domain_visible, now=current_time),
-        "work": _work_section(session, runs, start=start, end=end),
+        "work": _work_section(session, runs, start=start, end=end, allowed_project_ids=allowed_project_ids),
         "claude": _claude_section(month_entries, label=label, cross_domain_visible=cross_domain_visible,
                                   ccusage_path=ccusage_path),
     }
@@ -483,10 +521,18 @@ def render_text(report: dict[str, Any]) -> list[str]:
     go = report["opencode_go"]
     t = go["totals"]
     fees = ", ".join(f"{p['plan']} {_usd(p['monthly_fee_usd'])}/month" for p in t["plans"]) or "no plan"
+    per_fee = t["allowance_used_per_fee_dollar"]
     lines += ["OpenCode Go (subscription allowance, counted by this AEOS instance):",
               f"  total: used {_usd(t['used_usd_month'])} of {_usd(t['allowance_usd_month'])} monthly allowance "
-              f"({_p(t['used_pct'])}) over {t['routes']} route(s); plan: {fees}; allowance per fee dollar: "
-              f"{t['allowance_used_per_fee_dollar'] if t['allowance_used_per_fee_dollar'] is not None else 'n/a'}"]
+              f"({_p(t['used_pct'])}) over {t['routes_counted']} counted route(s); plan: {fees}; allowance per fee "
+              f"dollar: {per_fee if per_fee is not None else 'n/a'}"
+              + (" (LOWER BOUND)" if t["state"] == "LOWER_BOUND" else "")]
+    if t["routes_untrusted"]:
+        lines.append(f"  not counted: {t['routes_untrusted']} UNTRUSTED route(s) ({t['untrusted_requests_month']} "
+                     "call(s) this month): neither their use nor their allowance is in the total")
+    if t["state"] == "LOWER_BOUND":
+        lines.append(f"  LOWER BOUND: the total leaves out {t['untrusted_requests_month']} call(s) on UNTRUSTED "
+                     f"route(s) and {t['unknown_requests_month']} call(s) with UNKNOWN allowance")
     for r in go["routes"]:
         if r.get("state") == "UNTRUSTED":
             lines.append(f"  {r['route_key']} [{r['status']}] UNTRUSTED terms: {r.get('problem')}")
@@ -526,7 +572,8 @@ def render_text(report: dict[str, Any]) -> list[str]:
     lines += [f"  pass rate {p['route_key']} x {p['role_key']}: {_p(p['pass_rate_pct'])} ({p['passed']} pass, "
               f"{p['not_passed']} not pass, {p['undecided']} undecided)" for p in w["pass_rate"]]
     pa = w["paid_admissions"]
-    lines.append(f"  escalations {pa['escalations']}, overflows {pa['overflows']} ({pa['status']})")
+    lines.append(f"  paid admissions: escalations {pa['escalations']}, overflows {pa['overflows']}, unclassified "
+                 f"{pa['unclassified']} ({pa['status']})")
     lines += [f"  plan {p['plan_id']}: {p['tasks']} task(s), median run {p['median_run_wall_clock_s']} s, plan "
               f"wall-clock {p['plan_wall_clock_s']} s" for p in w["plans"]]
     c = report["claude"]
