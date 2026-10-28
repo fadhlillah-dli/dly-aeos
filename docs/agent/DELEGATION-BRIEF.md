@@ -76,6 +76,9 @@ RULES (lesson ids in brackets)
 18. Dependent steps [L22]. Chain a step whose failure must stop the next one with && or a checked if, never ';' or
     a separate line, and run chains with 'set -o pipefail' (a gate piped into tail or grep hides its exit code). Check
     each result before a commit, merge or push; the pre-push hook refuses static-gate failures and conflict markers.
+19. No secret shapes in reports [L26]. Never write a secret-shaped string in a report, log or message, not even a
+   synthetic test value (a provider key prefix with a body, a vault token, a PEM header, a JWT): name the case by its
+   corpus variant, pattern or test name. Test corpora assemble secret samples from parts at run time.
 
 REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results
 (violating fixture red, near-miss fixture green), NOT-PROVEN items.

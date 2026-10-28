@@ -75,7 +75,9 @@ WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CO
 QUOTA_CODES = frozenset({"BUDGET_EXCEEDED", "QUOTA_EXHAUSTED", "SUBSCRIPTION_ALLOWANCE_EXHAUSTED",
                          "SUBSCRIPTION_ALLOWANCE_UNKNOWN", "FREE_TIER_LIMIT_REACHED", "ROUTE_CAPACITY"})
 # BLOCKED reason codes that only an owner action clears (retry_task / quarantine release), never a tick.
-HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER"})
+# SENSITIVE_CONTENT_BLOCKED (ADR-0127): an investigation run's model request carried a credential; a new attempt
+# waits until the owner has removed it from what the worker reads.
+HUMAN_BLOCK_CODES = frozenset({"QUARANTINED", "REVIEW_BLOCKED", "WORKER_BLOCKER", "SENSITIVE_CONTENT_BLOCKED"})
 
 
 # ----------------------------------------------------------------------------- small helpers

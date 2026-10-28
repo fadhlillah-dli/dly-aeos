@@ -262,3 +262,11 @@ def note_route_cooldown(session: Session, *, provider: str, route_key: str, stat
 
     return impl(session, provider=provider, route_key=route_key, status=status, reported_seconds=reported_seconds,
                 run_id=run_id)
+
+
+def scope_route_keys(auth_scope: object) -> list[str]:
+    """The exact route keys a decision's ``auth_scope.routes`` names (a list, or a ',' separated text); test
+    membership in this list, never in the raw value. The one implementation lives in ``aeos.routing.service``."""
+    from aeos.routing.service import scope_route_keys as impl
+
+    return impl(auth_scope)
