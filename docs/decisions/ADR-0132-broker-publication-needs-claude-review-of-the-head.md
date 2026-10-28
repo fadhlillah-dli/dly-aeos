@@ -99,7 +99,15 @@
    missing: BLOCKED `GIT_DIR_UNKNOWN`), every call ignores replace refs (`--no-replace-objects`,
    `GIT_NO_REPLACE_OBJECTS=1`), and a trusted git dir with replace refs, grafts or a non-empty `info/attributes`
    blocks the verification (`GIT_CONTROL_UNTRUSTED`). With no recorded head and no task branch the verifier no
-   longer falls back to a HEAD (BLOCKED `HEAD_UNKNOWN`). The broker's own push still falls back to the work tree when
+   longer falls back to a HEAD (BLOCKED `HEAD_UNKNOWN`). Final round: git is pinned to the trusted dir as the common
+   dir too (`GIT_COMMON_DIR`), and a `commondir` or `gitdir` file in it (a redirect to a planted dir) or a common
+   dir that resolves elsewhere blocks the verification; the runtime fingerprints `commondir` with its other control
+   files. The host's global and system git config are not read (`GIT_CONFIG_GLOBAL` = the null device,
+   `GIT_CONFIG_NOSYSTEM=1`): HOME is passed through, so `~/.gitconfig` and its includes (`diff.context`,
+   `diff.ignoreSubmodules` ...) would otherwise shape the reads. Submodules are not supported for worker candidates:
+   every verifier diff (and the runtime's own) shows submodule entries whatever `.gitmodules`, `diff.ignoreSubmodules`
+   or `submodule.<name>.ignore` say (`--ignore-submodules=none`), a head with a submodule entry (mode 160000) is
+   BLOCKED (`SUBMODULE_UNSUPPORTED`), and `**/.gitmodules` is a generic protected path. The broker's own push still falls back to the work tree when
    no git dir is recorded; it fetches the exact head sha, so content cannot differ, and replace refs are not
    fetched.
    **Paths and listings (second delta review).** numstat records are split at the first two tabs only, so a path

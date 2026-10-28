@@ -100,6 +100,9 @@ GENERIC_RESTRICTED_AREAS: tuple[str, ...] = (
     # owner rule R44 (ADR-0132): attributes decide what a diff shows (``* -diff`` hides a change from the reviewer);
     # the verifier reads none of them, and a candidate that changes one goes to special review
     "**/.gitattributes",
+    # submodule settings (``ignore = all`` hides a pointer change from a diff); submodules are not supported for
+    # worker candidates and the verifier blocks a head that has one
+    "**/.gitmodules",
 )
 
 GENERIC_PROTECTED_PATHS: tuple[str, ...] = GENERIC_TRUSTED_PATHS + GENERIC_RESTRICTED_AREAS

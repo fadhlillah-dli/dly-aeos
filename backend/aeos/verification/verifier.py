@@ -747,6 +747,16 @@ class _Verifier:
     def _diff_and_scope(self, git: GitReader, task: TaskSpec, project: Project) -> str:
         out = self.out
         try:
+            submodules = git.gitlinks(out.head_commit or "")
+        except GitError as exc:
+            raise _Blocked("DIFF_FAILED", str(exc)) from exc
+        if submodules:
+            # owner rule R44 (ADR-0132): a submodule's content is another repository's; settings such as
+            # ``ignore = all`` hide even the pointer change from a diff, and the reviewer could not see what it points to
+            raise _Blocked("SUBMODULE_UNSUPPORTED", f"the candidate's head contains submodule entries "
+                                                    f"({', '.join(submodules[:5])}); submodules are not supported for "
+                                                    "worker candidates")
+        try:
             changed = git.changed_files(out.base_commit or "", out.head_commit or "")
             stats = git.numstat(out.base_commit or "", out.head_commit or "")
             raw_diff = git.diff_bytes(out.base_commit or "", out.head_commit or "")

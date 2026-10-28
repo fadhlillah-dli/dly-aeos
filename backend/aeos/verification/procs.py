@@ -372,14 +372,17 @@ def git_env() -> dict[str, str]:
     env.update({
         "GIT_TERMINAL_PROMPT": "0",
         "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_NO_LAZY_FETCH": "1",  # partial clones must not fetch missing objects (git >= 2.44)
         "GIT_ASKPASS": "",
         "SSH_ASKPASS": "",
-        # owner rule R44 (ADR-0132): nothing in the repository or the host decides what a read shows - no replace
-        # refs (they swap one object for another) and no system attributes file
-        "GIT_NO_REPLACE_OBJECTS": "1",
+        # owner rule R44 (ADR-0132): nothing on the host decides what a read shows - no system or global config
+        # (HOME is passed through for git's own needs, so without this ~/.gitconfig and anything its includeIf
+        # pulls in would apply: diff.context, diff.ignoreSubmodules ...), no system attributes file, and no replace
+        # refs (they swap one object for another)
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
     })
     return env
 
@@ -399,9 +402,13 @@ class GitReader:
     ``git_dir`` (owner rule R44, ADR-0132): the trusted git directory the runtime recorded for the candidate
     (``WorkerRun.git_dir_ref``). With it git never follows the work tree's ``.git`` pointer, which the worker can
     rewrite to a planted git dir (alternates to the trusted objects, its own attributes or replace refs) - the
-    verifier always passes it. Every call ignores replace refs (``--no-replace-objects``), the global and XDG
-    attributes files (``core.attributesFile`` = the null device) and the system attributes file; the repository's own
-    ``info/attributes``, ``info/grafts`` and ``refs/replace`` are refused by ``integrity_problem``."""
+    verifier always passes it, and git is pinned to it as the common dir too (``GIT_COMMON_DIR``: a planted
+    ``commondir`` is not followed). Every call ignores replace refs (``--no-replace-objects``), the host's system and
+    global config (``GIT_CONFIG_NOSYSTEM``, ``GIT_CONFIG_GLOBAL`` = the null device), the global and XDG attributes
+    files (``core.attributesFile`` = the null device) and the system attributes file, and every diff shows submodule
+    entries whatever their ignore settings say (``--ignore-submodules=none``); the repository's own
+    ``info/attributes``, ``info/grafts``, ``refs/replace`` and a ``commondir``/``gitdir`` redirect are refused by
+    ``integrity_problem``."""
 
     def __init__(self, repo: Path, *, timeout: float = 120.0, git_dir: Path | None = None):
         git = shutil.which("git")
@@ -412,6 +419,9 @@ class GitReader:
         self.git_dir = git_dir
         self.timeout = timeout
         self.env = git_env()
+        if git_dir is not None:
+            # the trusted git dir is its own common dir: a ``commondir`` file planted in it is never followed
+            self.env["GIT_COMMON_DIR"] = str(git_dir)
         self._empty_tree: str | None = None
 
     def _args(self, *args: str) -> list[str]:
@@ -429,6 +439,13 @@ class GitReader:
         """Why the repository's own control files could change what a read of it shows (None = none can): replace
         refs (ignored by every call, refused all the same), grafts (they rewrite commit parents) and a non-empty
         ``info/attributes`` (it outranks every other attributes source, ``--attr-source`` included)."""
+        if self.git_dir is not None:
+            for name in ("commondir", "gitdir"):
+                if (self.git_dir / name).exists():
+                    return f"{self.git_dir / name} exists: it would redirect git to another git dir"
+            common = self.run("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.decode().strip()
+            if not common or Path(common).resolve() != self.git_dir.resolve():
+                return f"git resolves the common git dir to {common or 'nothing'}, not the trusted {self.git_dir}"
         refs = self.run("for-each-ref", "--format=%(refname)", "refs/replace/").stdout.decode().split()
         if refs:
             return f"replace refs are present ({', '.join(refs[:3])}): they swap one object for another"
@@ -503,8 +520,8 @@ class GitReader:
         return cp
 
     def changed_files(self, base: str, head: str) -> list[tuple[str, str]]:
-        raw = self.diff_run("diff", "--name-status", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", base,
-                            head).stdout
+        raw = self.diff_run("diff", "--name-status", "--no-renames", "-z", "--no-ext-diff", "--no-textconv",
+                            "--ignore-submodules=none", base, head).stdout
         parts = raw.decode("utf-8", "surrogateescape").split("\x00")
         out: list[tuple[str, str]] = []
         i = 0
@@ -516,8 +533,8 @@ class GitReader:
         return out
 
     def numstat(self, base: str, head: str) -> dict[str, dict[str, int | None]]:
-        raw = self.diff_run("diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-textconv", base,
-                            head).stdout
+        raw = self.diff_run("diff", "--numstat", "--no-renames", "-z", "--no-ext-diff", "--no-textconv",
+                            "--ignore-submodules=none", base, head).stdout
         stats: dict[str, dict[str, int | None]] = {}
         for rec in raw.decode("utf-8", "surrogateescape").split("\x00"):
             if not rec.strip():
@@ -531,8 +548,19 @@ class GitReader:
         return stats
 
     def diff_bytes(self, base: str, head: str) -> bytes:
-        return self.diff_run("diff", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", base,
-                             head).stdout
+        return self.diff_run("diff", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv",
+                             "--ignore-submodules=none", base, head).stdout
+
+    def gitlinks(self, commit: str) -> list[str]:
+        """Paths of submodule entries (mode 160000) in *commit*'s tree: content that lives in another repository,
+        which no diff of this one shows and the broker would publish as a pointer (unsupported for candidates)."""
+        listing = self.run("ls-tree", "-r", "-z", "--full-tree", commit).stdout
+        out: list[str] = []
+        for rec in listing.split(b"\x00"):
+            meta, _, raw_path = rec.partition(b"\t")
+            if meta.split(b" ", 1)[0] == b"160000":
+                out.append(raw_path.decode("utf-8", "surrogateescape"))
+        return out
 
     def export_tree(self, commit: str, dest: Path, *, max_bytes: int) -> dict[str, object]:
         """Materialise exactly the blobs of *commit* into *dest* (no attributes/filters/hooks)."""

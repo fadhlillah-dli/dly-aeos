@@ -884,9 +884,11 @@ right to commit, push, let alone merge, as the architecture says.
   the work tree's `.git` pointer; missing: `GIT_DIR_UNKNOWN`), ignores replace refs, takes in-tree attributes from
   the empty tree (git 2.41 or newer; an older git fails the verification with a message) and switches off the
   global, XDG and system attributes files; a git dir with replace refs, grafts or a non-empty `info/attributes`
-  blocks the verification (`GIT_CONTROL_UNTRUSTED`: remove them, or re-run the task). So a worker cannot hide a
-  change as "binary"; a `.gitattributes` change itself goes to special review, and a file name with a control
-  character is refused (`CONTROL_CHARS`).
+  blocks the verification (`GIT_CONTROL_UNTRUSTED`: remove them, or re-run the task), as does a `commondir` or
+  `gitdir` redirect in it. The host's global and system git config are not read. So a worker cannot hide a change
+  as "binary"; a `.gitattributes` or `.gitmodules` change itself goes to special review, a file name with a control
+  character is refused (`CONTROL_CHARS`), and a head with a submodule is not verified (`SUBMODULE_UNSUPPORTED`:
+  submodules are not supported for worker candidates).
 
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 

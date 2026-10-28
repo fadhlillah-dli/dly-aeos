@@ -13,6 +13,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from aeos.core import protected_paths as pp
 from aeos.verification import scope as vscope
 from aeos.verification.procs import GitReader
@@ -230,3 +232,103 @@ def test_a_tab_in_a_path_never_hides_a_binary_file(tmp_path):
 def test_a_changed_path_without_a_numstat_entry_counts_as_binary():
     assert vscope.binary_changed_paths([("A", "a.txt"), ("M", "b.dat"), ("D", "c.bin")],
                                        {"a.txt": {"added": 1, "deleted": 0}}) == ["b.dat"]
+
+
+# ----------------------------------------------------------------------------- submodules, commondir, host config
+def _with_gitlink(work: Path, *, ignore_in_config: bool = False) -> str:
+    """Commit a submodule entry (mode 160000, no nested checkout needed) and a ``.gitmodules`` with ``ignore = all``
+    on top of the candidate; returns the new head."""
+    target = _git(work, "rev-parse", "HEAD")
+    (work / ".gitmodules").write_text('[submodule "lib"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = all\n',
+                                      encoding="utf-8")
+    _git(work, "add", ".gitmodules")
+    _git(work, "update-index", "--add", "--cacheinfo", f"160000,{target},vendor/lib")
+    if ignore_in_config:
+        _git(work, "config", "diff.ignoreSubmodules", "all")
+    _git(work, "commit", "-q", "-m", "aeos: candidate with a submodule")
+    return _git(work, "rev-parse", "HEAD")
+
+
+def test_a_submodule_entry_is_seen_whatever_the_ignore_settings_say(tmp_path):
+    work, trusted, _base, head = _separate(tmp_path)
+    new_head = _with_gitlink(work, ignore_in_config=True)
+    plain = subprocess.run(["git", "diff", "--name-only", head, new_head], cwd=work, capture_output=True, text=True,
+                           check=True, timeout=60).stdout.split()
+    assert "vendor/lib" not in plain, "the ignore settings hide the submodule from a plain diff (the bite is real)"
+    git = GitReader(work, git_dir=trusted)
+    assert ("A", "vendor/lib") in git.changed_files(head, new_head)
+    assert "vendor/lib" in git.numstat(head, new_head)
+    assert "Subproject commit" in git.diff_bytes(head, new_head).decode("utf-8", "replace")
+    assert git.gitlinks(new_head) == ["vendor/lib"] and git.gitlinks(head) == []  # the verifier blocks such a head
+
+
+def test_a_gitmodules_change_is_a_protected_path_anywhere():
+    assert "**/.gitmodules" in pp.GENERIC_RESTRICTED_AREAS
+    for path in (".gitmodules", "sub/.gitmodules"):
+        assert vscope.check_scope([path], allowed=["**"], forbidden=[],
+                                  protected=list(pp.GENERIC_PROTECTED_PATHS)).status == "QUARANTINED", path
+
+
+def test_a_commondir_file_in_the_trusted_git_dir_is_refused(tmp_path):
+    """A ``commondir`` planted in the trusted git dir would send git to another git dir (here one that borrows the
+    trusted objects and hides submodules): git is pinned to the trusted dir and the file is reported."""
+    work, trusted, _base, head = _separate(tmp_path)
+    git = GitReader(work, git_dir=trusted)
+    assert git.env["GIT_COMMON_DIR"] == str(trusted) and git.integrity_problem() is None  # near miss
+    planted = tmp_path / "planted.git"
+    _git(tmp_path, "init", "-q", "--bare", str(planted))
+    (planted / "objects" / "info" / "alternates").write_text((trusted / "objects").as_posix() + "\n",
+                                                              encoding="utf-8")
+    _git(tmp_path, "--git-dir", str(planted), "config", "diff.ignoreSubmodules", "all")
+    (trusted / "commondir").write_text(planted.as_posix() + "\n", encoding="utf-8")
+    problem = git.integrity_problem()
+    assert problem is not None and "commondir exists: it would redirect git to another git dir" in problem
+    (trusted / "commondir").unlink()
+    (trusted / "gitdir").write_text(planted.as_posix() + "\n", encoding="utf-8")
+    assert "gitdir exists" in (git.integrity_problem() or "")
+
+
+def test_a_planted_commondir_is_a_control_change_for_the_runtime(tmp_path):
+    from aeos.core.enums import Domain
+    from aeos.core.paths import DataLayout
+    from aeos.worker_runtime import workspace
+    from tests.unit.test_workforce_support import init_git_repo
+
+    src = tmp_path / "source"
+    init_git_repo(src)
+    ws = workspace.create_workspace(DataLayout(tmp_path / "data"), domain=Domain.PERSONAL, project_key="proj",
+                                    run_id="run-0003-cccc", task_key="Task C", source_repo=src, base_commit=None,
+                                    isolated=True)
+    workspace.verify_control_files(ws)  # near miss: untouched
+    (ws.git_dir / "commondir").write_text((tmp_path / "elsewhere").as_posix() + "\n", encoding="utf-8")
+    with pytest.raises(workspace.GitControlTampered):
+        workspace.verify_control_files(ws)
+
+
+def test_the_host_global_config_does_not_change_a_read(tmp_path, monkeypatch):
+    """F3: HOME is passed through for git, so without GIT_CONFIG_GLOBAL the host's ~/.gitconfig (and anything its
+    includeIf pulls in) would shape the diff the reviewer sees - here ``diff.context = 0`` drops every context line."""
+    work, trusted, _base, _head = _separate(tmp_path)
+    lines = [f"line {i}\n" for i in range(1, 10)]
+    (work / "app.py").write_text("".join(lines), encoding="utf-8")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "nine lines")
+    before = _git(work, "rev-parse", "HEAD")
+    lines[4] = "line five changed\n"
+    (work / "app.py").write_text("".join(lines), encoding="utf-8")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-q", "-m", "one line")
+    after = _git(work, "rev-parse", "HEAD")
+    home = tmp_path / "config-home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[diff]\n\tcontext = 0\n", encoding="utf-8")
+    env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "GIT_CONFIG_NOSYSTEM": "1"}
+    plain = subprocess.run(["git", "diff", before, after], cwd=work, env=env, capture_output=True, text=True,
+                           check=True, timeout=60).stdout
+    assert "+line five changed" in plain and "\n line 4\n" not in plain  # the global key shapes a plain diff
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    git = GitReader(work, git_dir=trusted)
+    assert git.env["GIT_CONFIG_GLOBAL"] == os.devnull and git.env["GIT_CONFIG_NOSYSTEM"] == "1"
+    diff = git.diff_bytes(before, after).decode("utf-8", "replace")
+    assert "+line five changed" in diff and "\n line 4\n" in diff and "\n line 6\n" in diff

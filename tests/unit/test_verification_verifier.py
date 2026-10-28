@@ -715,3 +715,29 @@ def test_a_comment_only_info_attributes_file_is_not_blocked(db, settings, contro
     (cand / ".git" / "info" / "attributes").write_text("# no attributes\n\n", encoding="utf-8")
     out = _verify(db, world)
     assert out.blocked_code != "GIT_CONTROL_UNTRUSTED", out.reasons
+
+
+def test_a_head_with_a_submodule_entry_is_blocked(db, settings, controller, wf):
+    """F1: a submodule's content is another repository's, and ``.gitmodules`` ``ignore = all`` hides even the pointer
+    change from a diff: a candidate head with a submodule entry is not verified (submodules unsupported)."""
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, _head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
+    (cand / ".gitmodules").write_text('[submodule "lib"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = all\n',
+                                      encoding="utf-8")
+    git(cand, "add", ".gitmodules")
+    git(cand, "update-index", "--add", "--cacheinfo", f"160000,{base},vendor/lib")
+    git(cand, "commit", "-q", "-m", "with a submodule")
+    head = git(cand, "rev-parse", "HEAD")
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.status == "BLOCKED" and out.blocked_code == "SUBMODULE_UNSUPPORTED", out.reasons
+    assert any("vendor/lib" in r and "submodules are not supported for worker candidates" in r for r in out.reasons)
+
+
+def test_an_ordinary_file_next_to_where_a_submodule_would_be_is_not_blocked(db, settings, controller, wf):
+    world = make_world(db, verifier_policy=FAST)
+    cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n",
+                                                                   "docs/vendor-lib.md": "# notes\n"})
+    bind_candidate(db, world, cand, base, head)
+    out = _verify(db, world)
+    assert out.blocked_code != "SUBMODULE_UNSUPPORTED", out.reasons
