@@ -16,7 +16,8 @@
   writes a CLI log), `promptfoo` (config, database, logs and an online update check) and `toolhive` (`thv version`
   writes `updates.json` and checks online) get a presence-only binary probe (`version_args: []`): the binary is
   located on PATH or through its settings override and never run, so it is INSTALLED with its version UNKNOWN and
-  the reason, or NOT_INSTALLED. `litellm`, `deep-agents`, `opentelemetry`, `langfuse`, `superpowers`,
+  the reason, or NOT_INSTALLED; its installation claim is static evidence (E1, a lookup and a file digest), never the
+  E3 of an executed probe. `litellm`, `deep-agents`, `opentelemetry`, `langfuse`, `superpowers`,
   `agency-agents`, `gstack`, `hermes` and `langgraph` keep `none` (`litellm` runs from a venv outside PATH and no
   Settings field names its location yet, although a binary probe can take one from `aeos.yaml`; the others are a
   library in a separate venv, a compose file, a text archive, or not installed). The `sops` probe passes

@@ -697,7 +697,8 @@ def _check_level(check_id: str, functional: bool) -> str:
 
 def _observation_level(session: Session, comp: ComponentReference, obs: ComponentObservation | None) -> str | None:
     """Level of one observation: its evidence artifact's level when linked, else by observer and probe kind
-    (file/lockfile/manifest/config reads E1; executed/imported/health probes E3)."""
+    (file/lockfile/manifest/config reads and a located, never-run presence-only binary E1; executed/imported/health
+    probes E3)."""
     if obs is None:
         return None
     if obs.evidence_id:
@@ -717,6 +718,10 @@ def _observation_level(session: Session, comp: ComponentReference, obs: Componen
         return "E3"
     if obs.dimension == "functional":
         return "E3" if obs.observer == "claude_bridge" else "E2"
+    if obs.dimension == "installation" and any(
+            isinstance(b, dict) and b.get("presence_only") for b in detail.get("binaries") or []):
+        # a presence-only binary was located (PATH lookup + file digest) and never run: a static fact, never E3
+        return "E1"
     return PROBE_LEVELS.get(str((comp.probe or {}).get("type")), "E1")
 
 

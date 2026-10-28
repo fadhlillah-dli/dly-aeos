@@ -419,6 +419,51 @@ def test_presence_only_entry_beside_a_version_entry_runs_only_the_version_call(s
     assert obs.detail["version_status"] == "UNKNOWN"  # tdbg's version is not read
 
 
+def _install_claim(db, cid):
+    from aeos.inventory import views
+
+    claims = views.component_detail(db, cid, domain="PERSONAL")["evidence"]["claims"]
+    return next(c for c in claims if c["claim"].startswith("Instalasi"))
+
+
+@pytest.mark.parametrize("cid", sorted(PRESENCE_ONLY))
+def test_presence_only_installation_claim_is_static_evidence_not_runtime(seeded, owner, settings, repo, cid):
+    """A binary located on PATH and never run is a static lookup fact (E1, master §875), never an E3 runtime claim."""
+    _decide(seeded, owner, _proposal(seeded, candidates=[cid]), "TRIAL")
+    seeded.commit()
+    runner = base_runner()
+    runner.add_binary(PRESENCE_ONLY[cid], "9.9.9\n")
+    reconcile(seeded, settings, component_id=cid, runner=runner, repo=repo)
+    seeded.commit()
+    assert runner.calls == []
+    claim = _install_claim(seeded, cid)
+    assert claim["claim"] == "Instalasi: INSTALLED"
+    assert claim["level"] == "E1", f"{cid} was never run, yet its installation claim is {claim['level']}"
+
+
+def test_executed_binary_installation_claim_stays_runtime_evidence(seeded, owner, settings, repo):
+    """Near miss: a binary whose version call ran keeps its E3 installation claim; one presence-only entry beside it
+    lowers the whole claim to E1 (the claim is only as strong as its weakest leg)."""
+    comp = seeded.get(ComponentReference, "temporal")
+    comp.probe = {"type": "binary", "binaries": [{"name": "temporal-server", "version_args": ["--version"]}]}
+    _decide(seeded, owner, _proposal(seeded, candidates=["temporal"]), "TRIAL")
+    seeded.commit()
+    runner = base_runner()
+    runner.add_binary("temporal-server", "temporal version 1.25.0\n")
+    runner.add_binary("tdbg", "1.25.0\n")
+    reconcile(seeded, settings, component_id="temporal", runner=runner, repo=repo)
+    seeded.commit()
+    assert len(runner.calls) == 1
+    assert _install_claim(seeded, "temporal")["level"] == "E3"
+    comp = seeded.get(ComponentReference, "temporal")
+    comp.probe = {"type": "binary", "binaries": [{"name": "temporal-server", "version_args": ["--version"]},
+                                                 {"name": "tdbg", "version_args": []}]}
+    seeded.commit()
+    reconcile(seeded, settings, component_id="temporal", runner=runner, repo=repo)
+    seeded.commit()
+    assert _install_claim(seeded, "temporal")["level"] == "E1"
+
+
 def test_manifest_presence_only_entries_are_exactly_the_tools_with_a_stateful_version_call(seeded):
     got = {c.component_id: [b["name"] for b in (c.probe or {}).get("binaries") or [] if not b.get("version_args")]
            for c in seeded.scalars(select(ComponentReference))}
