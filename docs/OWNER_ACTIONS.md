@@ -451,6 +451,13 @@ Copy the route key and its config hash from the `routes list` output.
      Jenis keputusan BUDGET and target `model_route` / the route key. In PowerShell, use single quotes
      (`'OpenCode Go subscription, $10/month plan fee for the TRIAL'`) or escape the dollar sign with a backtick
      (`` `$10 ``): inside double quotes PowerShell reads `$10` as a variable.
+
+     A BUDGET decision can also name the routes it covers in its scope, beside its target, for example
+     `--scope 'routes=opencode-go/glm-5.3-flash,opencode-go/glm-5.3'` (quoted: PowerShell splits an unquoted comma).
+     The command stores the exact route keys as a list, and the BUDGET covers only a route whose key is exactly one
+     of them: `opencode-go/kimi-k3.1-pro` does not cover `opencode-go/kimi-k3`, and an OpenRouter `:free` key does
+     not cover its paid twin. A text scope recorded before this change is read the same way (split on commas, exact
+     keys). A BUDGET that names a route also keeps an OpenCode Go route from moving between WATCHLIST and WORKER.
   5. Activate it as TRIAL with that BUDGET decision. The provider restricts regions, so state the region(s) your
      workspace allows: `--region EU-US` for the workspace default (Europe and United States). If you want one region
      only, restrict the workspace first (Console → Settings → Privacy → Regions), then state that one. Name the ToS

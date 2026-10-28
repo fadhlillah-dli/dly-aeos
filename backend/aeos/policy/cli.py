@@ -100,13 +100,18 @@ def _admin_user_id(session, username: str, password: str) -> str:
     return user.id
 
 
-def _scope(pairs: list[str] | None) -> dict[str, str]:
-    out: dict[str, str] = {}
+def _scope(pairs: list[str] | None) -> dict[str, object]:
+    """``key=value`` pairs -> auth scope. ``routes=a,b`` is stored as the JSON list of exact route keys (a BUDGET
+    covers exactly those routes, never a route whose key merely contains one of them); other values stay text."""
+    from aeos.routing.facade import scope_route_keys
+
+    out: dict[str, object] = {}
     for p in pairs or []:
         k, sep, v = p.partition("=")
         if not sep or not k.strip():
             raise typer.BadParameter(f"--scope expects key=value, got {p!r}")
-        out[k.strip()] = v.strip()
+        key = k.strip()
+        out[key] = scope_route_keys({"routes": v}) if key == "routes" else v.strip()
     return out
 
 
@@ -150,7 +155,9 @@ def decide_cmd(
     as_user: str = typer.Option(..., "--as", help="Your SUPER_ADMIN username (the human decision actor)"),
     domain: str = typer.Option(..., help="PERSONAL or OFFICE (explicit, never inferred)"),
     rationale: str = typer.Option(..., help="Why (min 10 characters)"),
-    scope: list[str] = typer.Option(None, "--scope", help="Explicit auth scope key=value (repeatable)"),
+    scope: list[str] = typer.Option(
+        None, "--scope", help="Explicit auth scope key=value (repeatable). 'routes=a,b' (quoted) is stored as the "
+        "list of exact route keys a BUDGET covers"),
     days: int = typer.Option(None, help="Expiry in days (required for EXCEPTION / RISK_ACCEPTANCE)"),
     exception: str = typer.Option(None, help="EXCEPTION preset: secret_store_interim_keyring | worker_sandbox_process"),
     allow_bash: bool = typer.Option(None, "--allow-bash/--no-allow-bash", help="worker_sandbox_process only"),
