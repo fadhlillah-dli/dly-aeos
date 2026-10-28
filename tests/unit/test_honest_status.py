@@ -77,8 +77,10 @@ def test_free_tier_is_present_only_for_a_free_model_route(personal_client: Authe
     assert items[DS]["free_tier"] is None  # an OpenCode Zen route is not an OpenRouter :free route
 
 
-def _comp(requirement: str = "OPTIONAL"):
-    return SimpleNamespace(component_id="hermes", tombstoned_at=None, requirement=requirement, probe={})
+def _comp(requirement: str = "OPTIONAL", probe: dict | None = None):
+    # probeable by default: INSTALL_TRIAL ("pasang lalu probe") is only satisfiable for a component reconcile can observe
+    return SimpleNamespace(component_id="hermes", tombstoned_at=None, requirement=requirement,
+                           probe={"type": "binary"} if probe is None else probe)
 
 
 def _dims(admission: str, installation: str, **over):
@@ -112,3 +114,14 @@ def test_install_trial_near_misses_stay_monitor():
     assert _code("DISCOVERED", "UNKNOWN") != "INSTALL_TRIAL"  # no approval, no install request
     assert _code("UNDER_REVIEW", "NOT_INSTALLED") != "INSTALL_TRIAL"
     assert _code("TRIAL_APPROVED", "INSTALL_FAILED") != "INSTALL_TRIAL"  # a failed install is not "not installed yet"
+
+
+@pytest.mark.parametrize("admission", ["TRIAL_APPROVED", "APPROVED"])
+def test_admitted_without_probe_is_asked_for_a_probe_not_an_install(admission):
+    action = views.next_action(_comp(probe={}), _dims(admission, "UNKNOWN"), [], {"status": "NO_PIN"})
+    assert action["code"] == "ADD_PROBE", action
+    assert action["command"] is None and action["link"] == "/readiness"
+    # near misses: a probeable admitted component still asks to install; an unadmitted unprobed one is no probe request
+    assert _code(admission, "UNKNOWN") == "INSTALL_TRIAL"
+    assert views.next_action(_comp(probe={}), _dims("DISCOVERED", "UNKNOWN"), [], {"status": "NO_PIN"})["code"] \
+        != "ADD_PROBE"

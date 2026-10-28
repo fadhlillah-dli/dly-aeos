@@ -23,7 +23,8 @@
   library in a separate venv, a compose file, a text archive, or not installed). The `sops` probe passes
   `--disable-version-check`, so it no longer asks GitHub for the latest release. A new
   Doctor check, `inventory.admitted_unprobed`, lists admitted components without a probe (CONFIGURED, informational,
-  in no capability). A TRIAL/PROMOTION decision on a change_proposal now invalidates
+  in no capability), and such a component's next action is ADD_PROBE (add a manifest probe in a PR) instead of the
+  unsatisfiable INSTALL_TRIAL "pasang lalu probe" while its installation is UNKNOWN. A TRIAL/PROMOTION decision on a change_proposal now invalidates
   `component:<id>` of its components and `inventory:admission` instead of `config:routes`/`model:route`, so it no
   longer makes the route and bridge checks STALE; a TRIAL on a model_route still does. Bite tests: red on the old
   code with their own messages, near misses green. E2 on macOS arm64; NOT-PROVEN on Windows and macOS Intel, where

@@ -297,6 +297,12 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
     if "installed-but-disabled" in classes:
         return act("DECIDE_ENABLEMENT", "Terpasang tetapi tidak aktif: putuskan enable atau biarkan",
                    link=f"/proposals?component={comp.component_id}")
+    if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and not is_probeable(comp) \
+            and inst["value"] == "UNKNOWN":
+        # admitted but the manifest probe is none: reconcile can never observe it, so "pasang lalu probe" would be an
+        # unsatisfiable next action (Doctor inventory.admitted_unprobed lists these)
+        return act("ADD_PROBE", "Admitted tanpa probe: instalasi tidak dapat diamati; tambahkan probe manifest (PR)",
+                   link="/readiness")
     if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):
         # Approved (trial) on paper but nothing installed: "pantau observasi" would hide the one thing left to do.
         # Master §38: this stays a manual step; the decision is not an enablement basis and nothing installs itself.
