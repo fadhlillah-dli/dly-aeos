@@ -10,7 +10,13 @@ reason and the fix:
 
 * ``set -- $NAME`` / ``set -- ${NAME}`` with one unquoted variable as the only argument;
 * ``for x in $NAME`` / ``for x in ${NAME}`` with one unquoted variable as the only word list;
-* a command substitution (``$(...)`` or backticks) holding a bare glob, passed to pytest or ``scripts/run_tests.sh``.
+* a command substitution (``$(...)`` or backticks) holding a bare glob, passed to pytest or ``scripts/run_tests.sh``;
+* an unquoted glob word that matches no file in the session's working directory (or after a plain ``cd DIR``): zsh's
+  NOMATCH error stops the whole command before anything runs (four maintainer commands on 2026-10-28/29, for example
+  ``grep -rn x backend --include=*.py``). Checked only when the hook input names an existing ``cwd``. Skipped: quoted,
+  escaped, expanded or braced words, assignments, ``[[ ]]``, ``(( ))`` and ``case`` patterns, and a command that turns
+  NOMATCH off (``setopt nonomatch``/``null_glob``, ``noglob``). Known false deny: a file created earlier in the same
+  command; the reason names the fix (``setopt nonomatch;`` first, or split the command).
 
 High precision over recall; everything else passes. Not denied: quoted expansions, explicit word lists, the zsh
 split form ``${=NAME}``, subscripted or flagged expansions, a NAME assigned as an array in the same command (zsh
@@ -44,6 +50,7 @@ sys.dont_write_bytecode = True  # a hook must not drop __pycache__ into the chec
 TRAP_SET = "set-unquoted-var"
 TRAP_FOR = "for-unquoted-var"
 TRAP_GLOB = "test-runner-glob-substitution"
+TRAP_NOMATCH = "unquoted-glob-matches-nothing"
 
 # str.format templates: '{name}' is the variable, '{{' and '}}' are literal braces.
 _FIX_SPLIT = (
@@ -67,6 +74,12 @@ REASONS: dict[str, str] = {
         "and pytest runs the WHOLE suite serially. Fix: scripts/run_tests.sh -- <explicit test file paths> (or "
         "pytest with explicit file paths)."
     ),
+    TRAP_NOMATCH: (
+        "zsh NOMATCH trap (LESSONS L14): the unquoted glob '{name}' matches no file, so zsh stops with 'no matches "
+        "found' and runs NOTHING of this command (an option such as --include=*.py is globbed too). Fix: quote it "
+        "('{name}'), or use find; if an earlier step of this same command creates the files, put 'setopt nonomatch;' "
+        "first or split the command."
+    ),
 }
 
 # zsh special parameters that are arrays: an unquoted one expands to its elements, so a loop over it is fine.
@@ -89,6 +102,14 @@ _WORD_SPLIT_ON = re.compile(
 _RUNNER_RE = re.compile(r"(?:^|[\s/=])(?:pytest|py\.test|run_tests\.sh)(?=\s|$)")
 _GLOB_RE = re.compile(r"(?<![$\\])[*?]|[A-Za-z0-9_./-]\[[^\]\s]+\]")
 _SEPARATOR = re.compile(r"[;&|\n]")
+# Words zsh does not glob or that this hook cannot resolve: anything quoted, expanded, braced or escaped.
+_UNRESOLVED = re.compile(r"['\"`$\\{}]|__")
+_GLOB_OFF = re.compile(r"\b(?:setopt|set\s+-o)\b[^;\n]*\b(?:no_?nomatch|null_?glob|csh_?null_?glob|no_?glob)\b"
+                       r"|\bunsetopt\b[^;\n]*\b(?:nomatch|glob)\b|(?:^|[;&|(\n]\s*)noglob\b", re.I)
+_NO_GLOB_SPANS = re.compile(r"\[\[.*?\]\]|\(\(.*?\)\)|\bcase\b.*?\besac\b", re.S)
+_CD_RE = re.compile(r"(?:^|[;&|(\n])[ \t]*cd[ \t]+([^\s;&|)]+)")
+_WORD_RE = re.compile(r"[^\s;&|()<>]+")
+_ASSIGNMENT = re.compile(rf"^{_NAME}(?:\[[^\]]*\])?\+?=")
 
 
 def _array_assigned(masked: str, name: str) -> bool:
@@ -268,8 +289,9 @@ def shell_is_zsh(env: Mapping[str, str], platform: str) -> bool:
     return platform == "darwin"
 
 
-def traps(command: str) -> list[tuple[str, str]]:
-    """(trap id, variable name or '') for every trap in ``command``, first occurrence order, without repeats."""
+def traps(command: str, cwd: str | None = None) -> list[tuple[str, str]]:
+    """(trap id, variable name or glob word or '') for every trap in ``command``, first occurrence order, without
+    repeats. The NOMATCH check needs the session's working directory and runs only when ``cwd`` is a directory."""
     masked = mask(command)
     found: list[tuple[int, str, str]] = []
     if not _WORD_SPLIT_ON.search(masked):
@@ -286,11 +308,58 @@ def traps(command: str) -> list[tuple[str, str]]:
         segment = masked[seps[-1].end() if seps else 0:start]
         if _RUNNER_RE.search(segment):
             found.append((start, TRAP_GLOB, ""))
+    if cwd and os.path.isdir(cwd):
+        for start, word in nomatch_globs(command, cwd):
+            found.append((start, TRAP_NOMATCH, word))
     result: list[tuple[str, str]] = []
     for _, trap, name in sorted(found):
         if (trap, name) not in result:
             result.append((trap, name))
     return result
+
+
+def _base_dir(masked: str, start: int, cwd: str) -> str | None:
+    """The directory a relative glob at ``start`` is matched in: the last plain ``cd DIR`` before it, else ``cwd``;
+    None when that ``cd`` cannot be resolved here (an expansion or a quoted path)."""
+    target = None
+    for m in _CD_RE.finditer(masked, 0, start):
+        target = m.group(1)
+    if target is None:
+        return cwd
+    if _UNRESOLVED.search(target):
+        return None
+    return os.path.join(cwd, os.path.expanduser(target))
+
+
+def nomatch_globs(command: str, cwd: str) -> list[tuple[int, str]]:
+    """(offset, word) for every unquoted glob word that matches no file: zsh's NOMATCH error stops the whole
+    command. Words zsh does not glob ([[ ]], (( )), case patterns, assignments) or that cannot be resolved here
+    (quoted, expanded, braced, escaped, after an unresolvable cd) are skipped."""
+    import glob
+
+    masked = mask(command)
+    if _GLOB_OFF.search(masked):
+        return []
+    blocked = [(m.start(), m.end()) for m in _NO_GLOB_SPANS.finditer(masked)]
+    found: list[tuple[int, str]] = []
+    for m in _WORD_RE.finditer(masked):
+        word, start = m.group(0), m.start()
+        if not _GLOB_RE.search(word) or _UNRESOLVED.search(word) or _ASSIGNMENT.match(word):
+            continue
+        if any(a <= start < b for a, b in blocked):
+            continue
+        pattern = os.path.expanduser(word)
+        if not os.path.isabs(pattern):
+            base = _base_dir(masked, start, cwd)
+            if base is None:
+                continue
+            pattern = os.path.join(base, pattern)
+        try:
+            if not glob.glob(pattern):
+                found.append((start, word))
+        except (OSError, ValueError, re.error):
+            continue
+    return found
 
 
 def deny_decision(found: list[tuple[str, str]]) -> dict[str, object]:
@@ -313,7 +382,8 @@ def decide(raw: str, env: Mapping[str, str] | None = None, platform: str | None 
         return None
     if not shell_is_zsh(os.environ if env is None else env, sys.platform if platform is None else platform):
         return None
-    found = traps(command)
+    cwd = data.get("cwd")
+    found = traps(command, cwd if isinstance(cwd, str) else None)
     return deny_decision(found) if found else None
 
 

@@ -226,3 +226,73 @@ def test_the_registration_checker_is_red_for_the_right_reason() -> None:
 def test_committed_settings_register_the_guard_beside_the_other_hooks() -> None:
     settings = json.loads(SETTINGS.read_text(encoding="utf-8"))
     assert bash_guard_problems(settings) == []
+
+
+# --- NOMATCH: an unquoted glob that matches no file stops the whole command (L14, 2026-10-28/29) ----------------------
+
+
+def _reason_in(cwd: Path, command: str) -> str | None:
+    raw = json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": str(cwd),
+                      "tool_input": {"command": command}})
+    decision = guard.decide(raw, env=ZSH, platform="darwin")
+    return None if decision is None else str(decision["hookSpecificOutput"]["permissionDecisionReason"])
+
+
+@pytest.fixture()
+def tree(tmp_path: Path) -> Path:
+    (tmp_path / "backend" / "pkg").mkdir(parents=True)
+    (tmp_path / "backend" / "pkg" / "mod.py").write_text("x = 1\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "ADR-0127-guard.md").write_text("# ADR\n")
+    return tmp_path
+
+
+NOMATCH_DENIED = [
+    ("include-option", "grep -rn x backend --include=*.py", "--include=*.py"),
+    ("missing-dir-glob", "grep -n classification backend/aeos/projects/*.py", "backend/aeos/projects/*.py"),
+    ("prefix-glob", "ls docs/adr/*0127*", "docs/adr/*0127*"),
+    ("after-cd", "cd backend && ls pkg/*.txt", "pkg/*.txt"),
+    ("question-mark-url", "curl -s https://example.invalid/a?b=1", "https://example.invalid/a?b=1"),
+    ("second-command", "git status && grep -rn x . --include=*.ts", "--include=*.ts"),
+]
+
+
+@pytest.mark.parametrize(("label", "command", "word"), NOMATCH_DENIED, ids=[d[0] for d in NOMATCH_DENIED])
+def test_an_unquoted_glob_that_matches_nothing_is_denied(tree: Path, label: str, command: str, word: str) -> None:
+    reason = _reason_in(tree, command)
+    assert reason is not None, f"{label}: a glob matching nothing was allowed"
+    assert f"the unquoted glob '{word}' matches no file" in reason and "runs NOTHING" in reason
+    assert "setopt nonomatch" in reason  # names the fix
+
+
+NOMATCH_ALLOWED = [
+    ("quoted-option", "grep -rn x backend --include='*.py'"),
+    ("double-quoted", 'grep -rn x backend --include="*.py"'),
+    ("escaped", r"grep -rn x backend --include=\*.py"),
+    ("glob-that-matches", "grep -n x backend/pkg/*.py"),
+    ("glob-that-matches-after-cd", "cd backend && ls pkg/*.py"),
+    ("prefix-glob-that-matches", "ls docs/*0127*"),
+    ("double-bracket", "[[ $f == *.zz ]] && echo yes"),
+    ("arithmetic", "(( n = 3*4 )); echo $n"),
+    ("case-pattern", "case $f in *.zz) echo z;; esac"),
+    ("assignment", "pat=*.zz; echo done"),
+    ("nonomatch", "setopt nonomatch; ls *.zz"),
+    ("noglob", "noglob ls *.zz"),
+    ("expansion", "ls $DIR/*.zz"),
+    ("brace", "ls backend/{a,b}*.zz"),
+    ("bash-c", "bash -c 'ls *.zz'"),
+    ("heredoc", "cat <<'EOF'\nls *.zz\nEOF"),
+    ("comment", "echo hi # ls *.zz"),
+    ("unresolvable-cd", "cd $W && ls *.zz"),
+]
+
+
+@pytest.mark.parametrize(("label", "command"), NOMATCH_ALLOWED, ids=[a[0] for a in NOMATCH_ALLOWED])
+def test_nomatch_near_misses_are_allowed(tree: Path, label: str, command: str) -> None:
+    assert _reason_in(tree, command) is None, label
+
+
+def test_nomatch_needs_a_real_cwd(tree: Path) -> None:
+    """Without a cwd in the hook input (or with one that does not exist) the NOMATCH check does not run."""
+    assert _reason("grep -rn x backend --include=*.py") is None
+    assert _reason_in(tree / "missing", "grep -rn x backend --include=*.py") is None
