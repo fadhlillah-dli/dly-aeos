@@ -48,7 +48,8 @@ KEY_CONCURRENCY = "workforce.concurrency"
 KEY_LEASE_TTL = "workforce.lease_ttl_seconds"
 DEFAULT_LEASE_TTL = 120
 DEFAULT_MAX_ATTEMPTS = 2
-# HARD_MAX_ACTIVE (aeos.workforce.limits, the one source): §19/§21 pilot, 1 by default, 2 only with a recorded decision
+# HARD_MAX_ACTIVE (defined once in aeos.core.config, re-exported by aeos.workforce.limits): §19/§21 pilot, 1 by
+# default, 2 only with a recorded decision
 DEFAULT_MAX_REQUESTS = 300
 DEFAULT_MAX_TOKENS = 2_000_000
 

@@ -540,7 +540,8 @@ def served_roles(allowed_scope: dict[str, Any] | None, role_key: str | None) -> 
 
 
 def role_agent_map() -> dict[str, list[str]]:
-    """role_key -> the agent keys of AGENT_DEFINITIONS that serve it (a reviewed catalog has exactly one)."""
+    """role_key -> the agent keys of AGENT_DEFINITIONS that serve it (a reviewed catalog has exactly one WORKER agent
+    per role; independent-verifier also keeps the deterministic verifier runner)."""
     out: dict[str, list[str]] = {}
     for spec in AGENT_DEFINITIONS:
         for role in served_roles(spec.get("allowed_scope"), spec.get("role_key")):
