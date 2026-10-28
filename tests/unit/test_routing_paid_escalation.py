@@ -154,6 +154,18 @@ def test_a_public_task_with_only_a_paid_route_is_not_admitted(routes, monkeypatc
 # ------------------------------------------------------------------ 3. ESCALATION after exactly 2 quality failures
 
 
+def test_a_request_the_secret_guard_refused_never_escalates(routes, monkeypatch):
+    """Red: a run stopped by the outgoing secret guard (ADR-0127) is not a quality failure, even with a verifier FAIL
+    beside it; two of them leave the free route first, since escalating would send the same content to a paid route."""
+    install_fakes(monkeypatch)
+    _go(routes, GO_GLM)
+    _paid(routes)
+    for _ in range(2):
+        _attempt(routes, GO_GLM, outcome="SENSITIVE_CONTENT_BLOCKED", verifier="FAIL")
+    assert paid.quality_failures(routes, _task()) == []
+    assert select_route(routes, task=_task()).route.route_key == GO_GLM
+
+
 def test_escalation_comes_after_exactly_two_quality_failures_and_never_after_quota_stops(routes, monkeypatch):
     """Red: quota, time-out, resource, lease and non-zero-exit stops never escalate, nor does one quality failure, nor a
     quality failure on the paid route itself. Two quality failures on Go (a verifier FAIL closed as REVIEW_FINDINGS,

@@ -58,10 +58,11 @@ QUALITY_OUTCOMES = frozenset({"REVIEW_FINDINGS"})
 QUALITY_VERIFIER = frozenset({"FAIL", "FAILED"})
 QUALITY_ACCEPTANCE = frozenset({"REJECTED"})
 # Outcomes that are never a quality failure, whatever another field says (provider quota, time, resources, lease,
-# controller, owner/operator actions, a worker blocker, a scope stop, a non-zero exit).
+# controller, owner/operator actions, a worker blocker, a scope stop, a non-zero exit, and a request the outgoing
+# secret guard refused: ADR-0127, escalating it would only send the same content to a paid route).
 NOT_QUALITY_OUTCOMES = frozenset({"QUOTA_EXHAUSTED", "CONTROLLER_SHUTDOWN", "LEASE_LOST", "ORPHANED_ALIVE", "TIMEOUT",
                                   "RESOURCE_LIMIT", "CANCELLED", "REASSIGNED", "POLICY_CHANGED", "WORKER_BLOCKER",
-                                  "SCOPE_VIOLATION", "EXIT_NONZERO"})
+                                  "SCOPE_VIOLATION", "EXIT_NONZERO", "SENSITIVE_CONTENT_BLOCKED"})
 
 
 def _settings() -> Any:
