@@ -12,6 +12,9 @@ fail (exit 2) with their message. The live file is byte-identical afterwards and
 Host endpoints: the 'live' fixture pins AEOS_PORT and AEOS_OPENBAO_ADDR to closed loopback ports and installs a fake
 probe runner, so no test here reaches the owner's running Control Center (default port 8787) or OpenBao; the
 SecretGuard refuses those ports as well, and a guard test records every connect of a dry run to prove it.
+Host binaries: 'live' also depends on no_docker and opencode_installed, so no test here asks the owner's Docker daemon
+(over its Unix socket, which no TCP guard sees) or runs the real opencode; an autouse guard refuses and records every
+subprocess.Popen in this file, and a test fails when one was attempted (bite: the real probes restored, red).
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ from pathlib import Path
 import pytest
 
 from aeos.core.paths import repo_root
+from aeos.worker_runtime import opencode as opencode_mod
+from aeos.worker_runtime import sandbox as sandbox_mod
 from tests.unit.test_doctor_seams import (  # noqa: F401 - fixtures used through usefixtures, autouse speed-ups
     ROUTE,
     _activate,
@@ -65,6 +70,29 @@ def _load():
 
 
 od = _load()
+
+# The real host-binary probes, kept before any fixture replaces them: only the bite test below puts them back.
+REAL_DOCKER_PROBE = sandbox_mod._docker_probe
+REAL_OPENCODE_STATUS = opencode_mod.opencode_status
+
+
+@pytest.fixture(autouse=True)
+def no_host_process(monkeypatch):
+    """Every subprocess.Popen in this file is refused (never started) and recorded; a test that attempted one fails.
+
+    The real Docker CLI talks to the owner's daemon over a Unix socket and the real opencode is a host binary: neither
+    may run from these tests (review finding on 729940b)."""
+    import subprocess
+
+    started: list[list[str]] = []
+
+    def refuse(args, *a, **kw):
+        started.append([str(x) for x in args] if isinstance(args, (list, tuple)) else [str(args)])
+        raise OSError("the owner dry-run tests never start a host process")
+
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    yield started
+    assert started == [], f"a test started a host process: {started}"
 
 LOGIN = '''
 def _login(client, username, password):
@@ -153,13 +181,17 @@ def live(settings, db, tmp_path, monkeypatch, request):
     """A synthetic 'live' database in tmp where CAN_RUN_WORKER is READY while KEY_REF is present.
 
     Hermetic host endpoints for every test: the 'live' Control Center and OpenBao are closed loopback ports (the
-    harness opens the Control Center port to the Doctor, so the default 8787 would reach the owner's running server)
-    and the Doctor's probe runner is a fake (no real binary, no HTTP beyond its canned answers)."""
+    harness opens the Control Center port to the Doctor, so the default 8787 would reach the owner's running server),
+    the Doctor's probe runner is a fake (no HTTP beyond its canned answers), and no_docker and opencode_installed are
+    requested before anything else here (the setup itself asks for the opencode status), so neither the Docker CLI (the
+    owner's daemon) nor the real opencode binary runs for any test that requests 'live'."""
     from aeos.core import config as config_mod
     from aeos.core.db import get_engine
     from aeos.inventory.probes import set_runner_override
     from tests.unit.test_inventory_fakes import base_runner
 
+    for fake in ("no_docker", "opencode_installed"):  # first: the setup below already asks for the opencode status
+        request.getfixturevalue(fake)
     admin = _admin(db)
     _route(db)
     _activate(db, admin)
@@ -607,4 +639,42 @@ def test_a_dry_run_test_never_contacts_the_default_control_center_port(live, tmp
     else:
         assert ports == [default, default], ports
         assert at_default and all("tests never reach the owner's real Control Center" in why for why in at_default), seen
+    _untouched(live)
+
+
+# ------------------------------------------------------------------ round 5: hermetic host binaries (review of 729940b)
+
+
+@pytest.mark.parametrize("real_probes", [False, True], ids=["live-alone", "bite-real-probes"])
+def test_a_dry_run_test_with_live_alone_starts_no_host_binary(live, tmp_path, capsys, monkeypatch, no_host_process,
+                                                               real_probes):
+    """Review finding: 'live' pinned the ports and the probe runner only, so a test that did not also request
+    no_docker and opencode_installed ran the real ``docker version`` and ``docker image inspect`` (the owner's daemon,
+    over its Unix socket) and the real ``opencode --version``. This test requests 'live' alone: no host process is
+    attempted. Bite: the real probes are put back (with a fake docker and opencode on the path); the autouse guard
+    refuses and records ``docker version`` and ``opencode --version``, so nothing runs even in the bite."""
+    import shutil
+
+    if real_probes:
+        docker = tmp_path / "fake-bin" / "docker"
+        docker.parent.mkdir()
+        docker.write_text("", encoding="utf-8")
+        real_which = shutil.which
+        monkeypatch.setattr(shutil, "which",
+                            lambda name, *a, **kw: str(docker) if name == "docker" else real_which(name, *a, **kw))
+        monkeypatch.setattr(opencode_mod, "resolve_binary", lambda configured=None: tmp_path / "fake-bin" / "opencode")
+        monkeypatch.setattr(sandbox_mod, "_docker_probe", REAL_DOCKER_PROBE)
+        monkeypatch.setattr(opencode_mod, "opencode_status", REAL_OPENCODE_STATUS)
+        monkeypatch.setitem(sandbox_mod._cache, "value", None)
+        monkeypatch.setitem(opencode_mod._status_cache, "value", None)
+    od.main([_script(tmp_path, "noop", NOOP)])
+    out = capsys.readouterr().out
+    started = list(no_host_process)
+    no_host_process.clear()  # the bite's refused attempts are its evidence, not a failure of the guard
+    if real_probes:
+        assert [str(docker), "version", "--format", "{{.Server.Version}}"] in started, started
+        assert [str(tmp_path / "fake-bin" / "opencode"), "--version"] in started, started
+    else:
+        assert started == [], started
+        assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: OK", out
     _untouched(live)
