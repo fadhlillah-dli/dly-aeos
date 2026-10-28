@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from aeos.broker import facade as broker_contract
 from aeos.core.config import Settings
 from aeos.core.db import session_factory
 from aeos.core.enums import Domain, ExecutionState
@@ -57,7 +58,9 @@ QUOTA_STOP_AFTER = 3  # consecutive rate-limit refusals of this run (since its l
 MAX_ATTACHMENT_CHARS = 20_000
 MAX_PROMPT_ATTACH_TOTAL = 100_000
 MAX_PROMPT_CONTEXT_TOTAL = 200_000
-FAILED_STOPS = ("TIMEOUT", "SCOPE_VIOLATION", "RESOURCE_LIMIT")
+# ADR-0127: a model request of the run carried a credential and the broker did not send it - the run is stopped
+SENSITIVE_STOP = broker_contract.SENSITIVE_CONTENT_BLOCKED
+FAILED_STOPS = ("TIMEOUT", "SCOPE_VIOLATION", "RESOURCE_LIMIT", SENSITIVE_STOP)
 
 # ----------------------------------------------------------------------------- prompt template (§23 revision)
 PROMPT_TEMPLATE_VERSION = 2
@@ -717,6 +720,12 @@ def _rate_limited_count(s: Any, run_id: str) -> int:
     return int(s.scalar(q) or 0)
 
 
+def _sensitive_blocked_count(s: Any, run_id: str) -> int:
+    """Model requests of this run the broker refused to send because they carried a credential (ADR-0127)."""
+    return int(s.scalar(select(func.count()).select_from(BrokerRequest).where(
+        BrokerRequest.run_id == run_id, BrokerRequest.outcome == broker_contract.SENSITIVE_BLOCKED_OUTCOME)) or 0)
+
+
 def _collect_evidence(s: Any, run: WorkerRun, *, kind: str, origin: str, claim: str, content: Any,
                       level: str, fallback_dir: Path, name: str) -> str:
     from aeos.verification import facade as verification
@@ -916,10 +925,13 @@ def _monitor_and_finalize(settings: Settings, run_id: str, prep: Prepared, mp: p
             with sf() as s:
                 ok = scheduler.heartbeat(s, run_id, lease_id=prep.lease_id)
                 rl = _rate_limited_count(s, run_id)
+                sensitive = _sensitive_blocked_count(s, run_id)
                 s.commit()
             last_hb = now
             if not ok:
                 stop_reason = "LEASE_INVALID"
+            elif sensitive:
+                stop_reason = SENSITIVE_STOP
             elif rl >= quota_stop_after:
                 stop_reason = "QUOTA_EXHAUSTED"
         if stop_reason is None and now - started > prep.timeout:
@@ -956,6 +968,11 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
         return run.execution_status  # someone else (cancel/reassign/reconcile) already decided
     scheduler.stop_run_resources(s, run, reason="run finished", lease_state="RELEASED")
     max_att = scheduler.max_attempts(task, te)
+    if stop_reason != SENSITIVE_STOP and _sensitive_blocked_count(s, run.id):
+        # ADR-0127: a refused model request decides the outcome whatever stopped the run afterwards (a quota stop, a
+        # controller shutdown, a lost lease, a time limit, refused after the last heartbeat): it fails closed and its
+        # attempt is never refunded as a quota stop would be
+        stop_reason = SENSITIVE_STOP
     if stop_reason in ("QUOTA_EXHAUSTED", "CONTROLLER_SHUTDOWN", "LEASE_INVALID", "STALE_ATTEMPT"):
         code = {"LEASE_INVALID": "LEASE_LOST", "STALE_ATTEMPT": "LEASE_LOST"}.get(stop_reason, stop_reason)
         scheduler.set_run_status(s, run, S.FAILED.value, reason=f"stopped: {stop_reason}", actor=ACTOR,
@@ -974,14 +991,20 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
         return workforce.investigation_after_run(s, run, te, task, exit_code=exit_code, stop_reason=stop_reason,
                                                  violations=[*violations, *protected_hits], actor=ACTOR)
     if stop_reason in FAILED_STOPS or violations or (exit_code != 0 and not blocker):
-        if stop_reason in ("TIMEOUT", "RESOURCE_LIMIT"):
+        if stop_reason in ("TIMEOUT", "RESOURCE_LIMIT", SENSITIVE_STOP):
             code = stop_reason
         else:
             code = "SCOPE_VIOLATION" if (violations or stop_reason == "SCOPE_VIOLATION") else "EXIT_NONZERO"
         why = {"TIMEOUT": "time limit reached", "RESOURCE_LIMIT": "memory/process cap exceeded (worker stopped)",
+               SENSITIVE_STOP: "a model request carried a credential and was not sent (see the run's "
+                               "broker.model_proxy.sensitive_blocked audit record; worker stopped)",
                "SCOPE_VIOLATION": "changes outside the TaskSpec scope (patch quarantined)",
                "EXIT_NONZERO": f"worker exited {exit_code}"}[code]
         scheduler.set_run_status(s, run, S.FAILED.value, reason=why, actor=ACTOR, outcome_code=code)
+        if code == SENSITIVE_STOP and te.state != S.RUNNING.value:
+            # the lease was lost and the reconciler already moved the task (BLOCKED, LEASE_LOST_PROCESS_ALIVE): its state
+            # is kept, as for LEASE_INVALID above, and the run still records the refusal (differential review 2026-10-28)
+            return "FAILED"
         if te.attempts_used < max_att:
             scheduler.transition_task(
                 s, te.task_id, S.REVIEW.value, actor=ACTOR, reason_code="ATTEMPT_FAILED", expected_from=S.RUNNING.value,

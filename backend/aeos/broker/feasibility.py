@@ -17,7 +17,9 @@ fast, at what reported cost, is it rate limited - is tested only through this pr
   (``ROUTE_NOT_FREE``): there is no budget path for a probe (no silent paid fallback, §42);
 * the route accepts PUBLIC data and the request is ONE fixed synthetic PUBLIC prompt - no project, task, user or
   OFFICE data, no tools, ``max_tokens`` 16, no streaming, no retry and never another route;
-* the credential comes from the route's own reference under the PERSONAL namespaces (same checks as the proxy).
+* the credential comes from the route's own reference under the PERSONAL namespaces (same checks as the proxy);
+* the request passes the broker's outgoing-content guard (ADR-0127) like every worker request: a credential in it is
+  never sent (``SENSITIVE_CONTENT_BLOCKED``, audited with detector kinds and span hashes, never counted).
 
 The outcome is recorded as ``PROBE`` evidence (E3, subject ``model_route``), in the usage ledger and the audit
 trail; a 429 records the quota state. It is DATA for the owner's activation/evaluation decision - it never
@@ -168,6 +170,8 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     """Send the one synthetic probe to *route_key* and record the observation (caller commits). ``tools=True`` sends
     the tool-call probe instead (ADR-0125): the same gates, one function definition, PASS/FAIL evidence."""
     from aeos.broker.model_proxy import (
+        SENSITIVE_CONTENT_BLOCKED,
+        SENSITIVE_FINDINGS_RECORDED,
         ProxyError,
         _billing_of,
         _retry_after,
@@ -175,6 +179,8 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         _usage_of,
         rate_limit_info,
         resolve_upstream,
+        sensitive_content_findings,
+        sensitive_content_message,
     )
 
     action = "broker.route_tool_probe" if tools else "broker.route_feasibility.probe"
@@ -206,7 +212,6 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
     if _is_free_model(route) and _holds_uncommitted_writes(session):
         raise Conflict("the probe needs a session without uncommitted writes (commit first): its free-model count is "
                        "recorded in its own transaction; nothing was sent", code="PROBE_SESSION_NOT_CLEAN")
-    reservation = _reserve_free_probe(route, upstream.model_id) if _is_free_model(route) else None
     from aeos.cost import facade as cost_facade
 
     subscription = cost_facade.subscription_terms(route)[0] is not None
@@ -222,6 +227,18 @@ def probe_route(session: Session, route_key: str, *, actor: str, client: httpx.C
         body["reasoning_effort"] = upstream.reasoning_effort
     if upstream.is_openrouter:
         body["usage"] = {"include": True}
+    # ADR-0127: the outgoing-content guard of every broker request, before the free-model count and before sending
+    findings = sensitive_content_findings(body)
+    if findings:
+        kinds = sorted({f["kind"] for f in findings})
+        audit.record(session, actor_type="user" if actor.startswith("user:") else "service", actor_id=actor,
+                     action="broker.route_feasibility.probe", result="DENIED", target_type="model_route",
+                     target_id=route_key, domain="PERSONAL",
+                     reason=f"{SENSITIVE_CONTENT_BLOCKED}: {', '.join(kinds)}"[:500],
+                     details={"route_key": route_key, "kinds": kinds, "findings": findings[:SENSITIVE_FINDINGS_RECORDED],
+                              "findings_total": len(findings), "sent": False})
+        raise PolicyDenied(sensitive_content_message(findings), code=SENSITIVE_CONTENT_BLOCKED)
+    reservation = _reserve_free_probe(route, upstream.model_id) if _is_free_model(route) else None
     started = time.monotonic()
     status: int | None = None
     error: str | None = None

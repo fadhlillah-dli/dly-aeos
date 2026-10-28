@@ -92,6 +92,8 @@ that does not read it, when its "Source" does not match its readers, and when a 
 | `AEOS_OPENROUTER_FREE_DAILY_LIMIT` | Settings field | `Settings` | `50` | Requests per UTC day for `:free` models; 1 to 1000 (1000 only after at least 10 credits were bought). The cap in force is the lower of this value and the limit the OpenRouter key endpoint reported at the last catalog refresh |
 | `AEOS_OPENROUTER_FREE_MAX_ACTIVE` | Settings field | `Settings` | `1` | Tasks running at once across every OpenRouter `:free` route (one account-wide rate limit), 1 to 2. A free route past it is skipped (`ROUTE_BUSY`) (ADR-0124) |
 | `AEOS_OPENROUTER_FREE_RPM_LIMIT` | Settings field | `Settings` | `20` | Requests per minute for `:free` models; 1 to 20 |
+| `AEOS_PAID_ESCALATION` | Settings field | `Settings` | `true` | ESCALATION of an INTERNAL task to a per-token paid route (OpenRouter credits) after 2 of its finished attempts on $0-marginal routes failed for quality (verifier FAIL, review findings or a REJECTED acceptance; never a quota, time-out, resource, lease or exit stop). While it applies the paid routes are tried first (after a quota stop on another route only that route may go first, ADR-0124). Under the §21 pilot cap of 2 attempts the second failure blocks the task (`NEEDS_DECISION`), so escalation applies to the attempt an owner retry with `extra_attempts` grants. `false` turns it off. PUBLIC tasks are never paid. The paid route still needs its ACTIVE decision with the owner's BUDGET decision, the TaskSpec `limits.max_cost_usd` and the GLOBAL budget. Not part of a route's configuration identity (ADR-0128) |
+| `AEOS_PAID_OVERFLOW` | Settings field | `Settings` | `true` | OVERFLOW of an INTERNAL task to a per-token paid route when every $0-marginal route eligible for it is busy (`ROUTE_BUSY`), out of its 5h allowance fit (`ALLOWANCE_FIT`) or cooling down, and at least one such route exists. `false` makes the task wait (`ROUTE_CAPACITY`) as before. PUBLIC tasks are never paid. Every admitted paid run is recorded (event `route.paid_admitted`, audit `routing.route.paid_admitted`) (ADR-0128) |
 | `AEOS_PLATFORM_REPO_SLUG` | Settings field | `Settings` | `fadhlillah-dli/dly-aeos` | `owner/name` of this platform repository, used by the Doctor repository and delivery checks and the research registry seed |
 | `AEOS_PORT` | Settings field | `Settings` | `8787` | Port of the control plane. `aeos serve --port` sets it for its own process |
 | `AEOS_PUSH_WITHOUT_FULL_SUITE` | script | `scripts/gates.py` | unset (a push needs a passing full-suite record) | A non-empty reason lets the pre-push hook (`scripts/gates.py --hook`) push a commit whose tree has no passing full-suite record from `scripts/run_tests.sh`; the `full-suite` guard is then SKIPPED with the reason printed, never PASS (LESSONS L8). Set it for one push only: `AEOS_PUSH_WITHOUT_FULL_SUITE='docs only' git push` in sh (macOS, Git Bash); in cmd `cmd /c "set "AEOS_PUSH_WITHOUT_FULL_SUITE=docs only" && git push"` (a bare `set` keeps it for every later push from that window); the PowerShell form is in `CONTRIBUTING.md`. On Windows the record comes from `scripts/run_tests.sh` run with Git Bash; a direct `python -m pytest` writes none |
@@ -818,6 +820,29 @@ Wave 7 additions:
   `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`; in
   the Control Center: Kesiapan -> the check -> **Tetapkan ambang pemilik**, PERSONAL session, entered as a percentage).
   Without it, measured failures are reported, never judged.
+
+## Outgoing model-request guard (ADR-0127)
+
+Owner request 2026-10-28: nothing sensitive leaves this host in a model request, so training-capable routes
+(OpenRouter `:free`, DeepSeek) and OpenCode Go can serve PUBLIC tasks. The broker scans every request before it is
+forwarded, on every route and pool, worker calls and feasibility probes alike. There is no setting to turn it off.
+
+| Question | Answer |
+|---|---|
+| Blocked | a credential shape that `aeos.core.redaction` knows (OpenRouter, Anthropic and OpenAI-style keys, GitHub tokens, AWS access key ids, Google keys and tokens, Vault/OpenBao tokens and labelled unseal/root material, Slack tokens, PEM private key blocks) and any secret value AEOS loaded at run time (provider keys, capability tokens, code-host tokens), anywhere in the request: system, user, assistant and tool messages, tool calls and their arguments, tool definitions; also right after a JSON escape (`\n`, `\t`, `\"`, `\u00e9`), a terminal colour code (`ESC[31m`, raw, JSON-escaped or written as text such as `\e[31m`), the OSC-8 hyperlink terminator (ESC + backslash) or any URL-encoded byte (`%3D`, `%2F`, `%40`, `%5C`) |
+| Not blocked | personal data such as e-mail addresses (code is full of them), generic `password = ...` or `Bearer <opaque>` text, a low-entropy secret AEOS never loaded, shapes the redaction module does not define yet, encoded or split secrets. Code and data that only look like a token pass: a short `s.`/`b.`/`r.` form followed by a member name (Go receivers: `s.` then `registerServiceWithHealthCheck`), `1//` floor division, `AIza` or `1//` inside base64 (an image data URI, a lockfile integrity hash). These are the residual risks of ADR-0127 |
+| What the worker sees | HTTP 403, code `SENSITIVE_CONTENT_BLOCKED`, a message naming only the detector kinds; nothing was sent and nothing is counted against the grant or a free-model limit |
+| What the run does | it is stopped at the next heartbeat (or when the worker exits) as FAILED with outcome code `SENSITIVE_CONTENT_BLOCKED`, even when a quota stop, a shutdown or a lost lease came later (no attempt refund); the task goes to REVIEW (attempt failed, diagnosis required) or FAILED when no attempt is left. An investigation task goes BLOCKED instead (the next hypothesis would be refused again): remove the credential from what the worker reads, then retry the task |
+| A probe | refused with `SENSITIVE_CONTENT_BLOCKED` before anything is sent or counted |
+
+How to read it: in the Control Center open the run (**Pekerjaan Live**, run detail). Its timeline shows "Permintaan
+model ditahan, tidak dikirim: berisi kredensial (kinds)" (event `run.model_call_blocked`), and its outcome code is
+`SENSITIVE_CONTENT_BLOCKED`. In **Riwayat, Audit & Pemulihan** > Audit, the record
+`broker.model_proxy.sensitive_blocked` (DENIED, target = the route key) lists `kinds` and `findings`: each finding is
+a detector kind with the offset and length of the match in the scanned request, never the text and nothing derived
+from it (an unkeyed hash of a short secret such as a password could be brute-forced). What to do: find where the worker read the credential (a key file, an environment file, a log, a fixture),
+move it out of the repository or the task's inputs, rotate it if it is real (AGENTS.md invariant 12), then let the
+task run again. A fixture that only looks like a key is assembled from parts at run time instead of written literally.
 
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 

@@ -3,9 +3,11 @@
 The owner's words (2026-10-28): "best models first, the others after; use LiveBench or other accountable sources; the
 best available models run in parallel, matched to each role's needs". ``service.select_route`` ranks the routes that
 pass every hard filter (tier -> eval -> the agent's ``preferred_routes`` position -> priority -> key) and then takes the
-first one this module does not SKIP for load. A skip is never a failure and never a paid route: the next ranked route is
-tried, and after a skip only a route with no marginal cost (free, a loopback LOCAL route, or a SUBSCRIPTION route within
-its plan) may be chosen; otherwise the task waits (``ROUTE_CAPACITY``).
+first one this module does not SKIP for load. A skip is never a failure: the next ranked route is tried, and after a
+skip only a route with no marginal cost (free, a loopback LOCAL route, or a SUBSCRIPTION route within its plan) may be
+chosen - or, since ADR-0128, a per-token paid route that ``paid.paid_admission`` admits for an INTERNAL task (OVERFLOW:
+every $0-marginal route is skipped or limited; ESCALATION: two quality failures); otherwise the task waits
+(``ROUTE_CAPACITY``).
 
 Skips (the reason code leads the rejection text; a reason never carries allowance figures, they span domains):
 
