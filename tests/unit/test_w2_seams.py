@@ -589,11 +589,11 @@ def test_review_quota_is_scoped_per_family_and_lifted_by_the_next_completed_revi
     out = review.review_run(db, w.run.id, actor="t")
     assert out.review.status == "WAITING_QUOTA" and w.run.quota_status == "WAITING_QUOTA"
     rows = list(db.scalars(select(QuotaState).where(QuotaState.provider == "claude-native")))
-    assert [(r.scope, r.state, r.source) for r in rows] == [("fable", "EXHAUSTED", "observed-limit")]
+    assert [(r.scope, r.state, r.source) for r in rows] == [("opus", "EXHAUSTED", "observed-limit")]
     FakeBridge(result=claude_result(review_payload())).install(monkeypatch)
     out = review.review_run(db, w.run.id, actor="t")
     assert out.review.status == "COMPLETED" and w.run.quota_status is None
-    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "opus"))
     assert q.state == "UNKNOWN" and q.source == "observed-successful-call"  # never "OK" for Max
     assert review.native_quota_scope("claude-opus-5-5") == "opus" and review.native_quota_scope(None) == "max"
 

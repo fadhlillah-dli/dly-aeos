@@ -53,7 +53,7 @@ class Plan(IdMixin, TimestampMixin, Base):
     state_reason: Mapped[str] = mapped_column(Text, default="")
     current_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     approved_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    policy_baseline: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # e.g. 4-stage Opus/Fable
+    policy_baseline: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # e.g. 4-stage Opus baseline
     # Pipeline checkpoint (stage to resume, cycle artefact ids, manual package) — quota/bridge
     # interruptions resume here instead of skipping a stage (§12, §50 "Fable Max quota habis").
     checkpoint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)

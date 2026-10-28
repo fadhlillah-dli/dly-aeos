@@ -142,7 +142,7 @@ export default function PlanDetailPage() {
       <ManualFallbackCard plan={plan} />
 
       <section aria-label="Tahap perencanaan">
-        <h2 className="mb-2 text-sm font-semibold">Empat tahap perencanaan (Opus → Fable → Opus → Fable)</h2>
+        <h2 className="mb-2 text-sm font-semibold">Empat tahap perencanaan (Opus → Opus → Opus → Opus, konteks terpisah per tahap)</h2>
         <StageTimeline stages={plan.stages} findings={plan.findings} verdict={plan.verdict} verdictEffective={plan.verdict_effective} />
       </section>
 

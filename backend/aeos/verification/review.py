@@ -31,7 +31,7 @@ from aeos import __version__
 from aeos.audit import service as audit
 from aeos.core.config import get_settings
 from aeos.core.enums import Capability, ExecutionState, Verdict
-from aeos.core.errors import AeosError, Blocked, Conflict, NotFound, ValidationFailed
+from aeos.core.errors import AeosError, Blocked, Conflict, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.core.redaction import redact, redact_text
 from aeos.events import service as events
@@ -61,7 +61,8 @@ SRE_ROLES = frozenset({"sre-operations-assistant", "platform-devsecops-engineer"
 SENSITIVE_CLASSES = frozenset({"CONFIDENTIAL", "RESTRICTED"})
 # §19 review budget: independent read-only reviews per run (all kinds, re-requests included)
 DEFAULT_MAX_REVIEWS_PER_RUN = 12
-DEFAULT_REVIEW_MODEL = "fable"
+DEFAULT_REVIEW_MODEL = "opus"  # ADR-0131 (owner decision 2026-10-28): Opus; the Claude Fable family is never requested
+REFUSAL_BASIS = "owner decision 2026-10-28, ADR-0131"
 PACKAGE_VERSION = "1"
 PACKAGER_IDENTITY = f"aeos-review-packager/{__version__}"
 DIFF_EXCERPT_CHARS = 60_000
@@ -457,6 +458,26 @@ def model_family(model: str | None) -> str | None:
     return hit.group(1) if hit else None
 
 
+def _refused_family(model: str | None) -> str | None:
+    from aeos.claude_bridge import facade as bridge
+
+    return bridge.refused_family(model)
+
+
+def refused_review_model(resolved: str | None, requested: str | None) -> str | None:
+    """ADR-0131: why a review answered by, or requested from, the Claude Fable family never counts (None = not
+    refused). Applies to records written before the decision too: such a review is requested again (opus)."""
+    fam = _refused_family(resolved)
+    if fam:
+        return (f"the review was answered by {resolved} (Claude {fam} family), which DLY AEOS never accepts "
+                f"({REFUSAL_BASIS}); request a new review, it uses opus")
+    fam = _refused_family(requested)
+    if fam:
+        return (f"the review was requested from {requested!r} (Claude {fam} family), which DLY AEOS never uses "
+                f"({REFUSAL_BASIS}); request a new review, it uses opus")
+    return None
+
+
 def _model_policy_problem(policy: dict[str, Any], resolved: str | None, requested: str | None = None) -> str | None:
     """Why the reviewer's model identity does not satisfy the review policy (None = proven and allowed).
 
@@ -464,6 +485,9 @@ def _model_policy_problem(policy: dict[str, Any], resolved: str | None, requeste
     UNKNOWN resolution (a bare JSON pasted by a person, a result without client provenance) or an answer
     from another family than the requested one never counts, whether or not ``allowed_models`` is set.
     """
+    refused = refused_review_model(resolved, requested)
+    if refused:
+        return refused
     allowed = policy.get("allowed_models")
     if not resolved or str(resolved).strip().upper() in ("UNKNOWN", "UNVERIFIED"):
         return ("resolved reviewer model is UNKNOWN: the Claude reviewer identity is not proven"
@@ -896,6 +920,13 @@ def collect_manual_review(session: Session, review_id: str, *, actor: str, actor
         raise NotFound("review not found")
     if waiting.status != "NEEDS_DECISION":
         raise Conflict("only reviews waiting for a manual result can be completed", code="REVIEW_NOT_WAITING")
+    fam = _refused_family(waiting.model_requested)
+    if fam:
+        # ADR-0131: a package written for Fable (before the decision) is never imported, whatever model answered it
+        raise PolicyDenied(
+            f"this review package was requested from {waiting.model_requested!r} (Claude {fam} family), which DLY AEOS "
+            f"never uses ({REFUSAL_BASIS}); its result is not imported. Request a new review for the run "
+            f"(aeos verify review {waiting.run_id}); it uses opus.", code="MODEL_FAMILY_REFUSED")
     run, _project, task = _load(session, waiting.run_id or "")
     if run.execution_status != ExecutionState.REVIEW.value:
         raise Conflict("the run is no longer in REVIEW; request a new review for the current attempt",

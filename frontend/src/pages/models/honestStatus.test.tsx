@@ -41,7 +41,7 @@ const STATUS = {
   bridge_status: "CONFIGURED",
   env_hygiene: { status: "OK", forbidden_present: [], running_inside_claude_session: false, note: "" },
   invocation: { argv_template: [], forbidden_flags: ["--bare"], prompt_via: "stdin", workspace: "" },
-  policy: { allowed_families: ["opus", "fable"], stages: {}, fallback: "NONE", mode: "DESIGN" },
+  policy: { allowed_families: ["opus"], stages: {}, fallback: "NONE", mode: "DESIGN" },
   models: [],
   last_capability_test: null,
   quota: { state: "UNKNOWN", source: "UNKNOWN", observed_at: null, resets_at: null, note: "Sisa kuota Max tidak tersedia secara resmi" },

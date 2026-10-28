@@ -278,14 +278,14 @@ NR_COVERED = {k: {"status": "COVERED", "note": "ok"} for k in (
 
 def make_review(db, world: World, report, *, verdict: str = "PASS-CONTROLLED", status: str = "COMPLETED",
                 mode: str = "LIVE", target_hash: str | None = None, kind: str = "CLAUDE",
-                non_regression: dict[str, Any] | None = None, model_resolved: str | None = "claude-fable-5-1"):
+                non_regression: dict[str, Any] | None = None, model_resolved: str | None = "claude-opus-5-5"):
     from aeos.models.evidence import ReviewRecord
 
     rec = ReviewRecord(target_type="worker_run", target_id=world.run.id,
                        target_hash=target_hash or report.environment["artifact_hash"], project_id=world.project.id,
                        domain=world.project.domain, run_id=world.run.id, task_id=world.task.id,
                        reviewer_kind=kind, verdict=verdict, status=status, mode=mode,
-                       model_requested="fable", model_resolved=model_resolved,
+                       model_requested="opus", model_resolved=model_resolved,
                        non_regression=non_regression if non_regression is not None else NR_COVERED)
     db.add(rec)
     db.commit()
@@ -310,7 +310,7 @@ def review_payload(verdict: str = "PASS-CONTROLLED", findings: list[dict[str, An
     }
 
 
-def claude_envelope(payload: dict[str, Any], model: str = "claude-fable-5-1") -> dict[str, Any]:
+def claude_envelope(payload: dict[str, Any], model: str = "claude-opus-5-5") -> dict[str, Any]:
     """The `claude -p --output-format json` result envelope of a manual package run (proves the model)."""
     import json
 
@@ -346,10 +346,10 @@ class FakeBridge:
 
 
 def claude_result(structured: dict[str, Any] | None, *, ok: bool = True, quota: bool = False, mode: str = "NATIVE",
-                  model: str | None = "claude-fable-5-1", error_code: str | None = None):
+                  model: str | None = "claude-opus-5-5", error_code: str | None = None):
     from aeos.claude_bridge.facade import ClaudeResult
 
-    return ClaudeResult(ok=ok, structured=structured, text="", model_requested="fable", model_resolved=model,
+    return ClaudeResult(ok=ok, structured=structured, text="", model_requested="opus", model_resolved=model,
                         engine_version="2.1.0", session_id="s1", usage={}, duration_ms=5, error_code=error_code,
                         quota_exhausted=quota, mode=mode)
 
