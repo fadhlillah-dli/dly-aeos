@@ -48,7 +48,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # Canonical patterns that stay out of the scan: the short Vault forms match ordinary prose or code, and the full PEM
 # block pattern is superseded by the header-only entry in GAPS (the lazy "up to END" scan is quadratic on a prompt
 # with many headers and no END, and a header alone is already enough to refuse).
-SKIPPED_PATTERN_PREFIXES = (r"(?<![A-Za-z0-9])(?:hvs|s|b)\.", r"(?<![A-Za-z0-9.])r\.", "-----BEGIN")
+SKIPPED_PATTERN_PREFIXES = (r"(?:hvs|s|b)\.", r"(?<![A-Za-z0-9.])r\.", "-----BEGIN")
 
 # (kind, pattern) for shapes the canonical module does not define yet.
 GAPS: tuple[tuple[str, re.Pattern[str]], ...] = (

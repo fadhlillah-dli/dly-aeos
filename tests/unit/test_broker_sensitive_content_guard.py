@@ -73,7 +73,8 @@ NEAR_MISSES = {
     "sha256_hex": hashlib.sha256(b"release artefact").hexdigest(),
     "uuid": str(uuid.UUID("6f1c2a9e-4b7d-4e3a-9c1f-2d8e5b7a0c34")),
     "email_in_code": 'AUTHOR = "Jane Doe <jane.doe@example.com>"  # maintainer',
-    "js_member": "this.handleSubmitButtonClickedEventNow(); lib.someLongFunctionNameForTheParser();",
+    # built from parts: the canonical short Vault pattern (no look-behind, so logs stay masked) matches these
+    "js_member": "this" + ".handleSubmitButtonClickedEventNow(); lib" + ".someLongFunctionNameForTheParser();",
     # Go receivers and single-letter variables: s, b and r followed by a long member name (review of 7b2ff87).
     # Built from parts: the raw canonical pattern matches these, and the repository scan of tracked files flags it.
     "go_receivers": ("func (s *Server) Start(ctx context.Context) error {\n\treturn s" + ".registerServiceWithHealthCheck"
@@ -138,10 +139,29 @@ def test_near_misses_are_not_findings(name):
     assert sensitive_content_findings({"messages": [{"role": "user", "content": NEAR_MISSES[name]}]}) == []
 
 
-def test_a_real_short_vault_token_is_still_found_after_a_separator():
+def test_a_real_short_vault_token_is_found_after_a_separator_and_glued_to_a_word():
     token = "s" + "." + "a1B2c3D4e5F6g7H8i9J0k1L2"
     assert [f.kind for f in find_high_confidence_secrets(f"VAULT_TOKEN={token}")] == ["vault_token_short"]
-    assert find_high_confidence_secrets(f"this{token[1:]}") == []  # glued to a word: a member access, not a token
+    # glued to a letter (differential review 2026-10-28): a random body is a token, not a member name
+    assert [f.kind for f in find_high_confidence_secrets(f"this{token[1:]}")] == ["vault_token_short"]
+    assert find_high_confidence_secrets("this" + ".handleSubmitButtonClickedEventNow") == []  # a member name
+
+
+def test_a_token_after_a_json_escape_or_an_encoded_separator_is_found():
+    """Differential review 2026-10-28: a tool result is often JSON text (``\\n`` before the token) or a URL
+    (``%3D`` before it); the escape is a boundary, never part of a word."""
+    vault = "hv" + "s." + "CAESIJlWh1Ad0nFpQ8ZqXyTb7cWo3kLmN4rS5tUvWxYz"
+    api_key = "AI" + "za" + "SyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+    refresh = "1/" + "/0g" + "Xk2Lm9Qp_7Rt-4Vw8Yz1Bc3De5Fg6Hj8Kl0Nm2Pq4St6Uv8Wx0Za"
+    anthropic = "sk-" + "ant-" + "api03-Zq7Lm2Np4Rs6Tv8Xb1Cd3Fg5Hj9Kw0Ya2Ue4"
+    for secret, kind in ((vault, "vault_token"), (api_key, "google_api_key"), (refresh, "google_refresh_token"),
+                         (anthropic, "anthropic_key")):
+        for content in (json.dumps({"log": "vault login ok\n" + secret}), json.dumps({"o": "a\t" + secret}),
+                        json.dumps({"o": 'said "' + secret + '"'}), json.dumps({"o": "é" + secret}),
+                        json.dumps(json.dumps({"o": "x\n" + secret})), "https://h/p?a%3Ftoken%3D" + secret,
+                        "https://h/p?a=1%26" + secret):
+            found = sensitive_content_findings({"messages": [{"role": "tool", "content": content}]})
+            assert {"kind": kind, "span_sha256": _sha(secret)} in found, (kind, content.replace(secret, "<secret>"))
 
 
 def _image_data_uri() -> str:

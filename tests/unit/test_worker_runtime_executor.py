@@ -448,6 +448,34 @@ def test_a_sensitive_refusal_after_the_last_heartbeat_still_fails_an_exit_zero_r
     assert run.outcome_code == "SENSITIVE_CONTENT_BLOCKED" and te.state != "DONE"
 
 
+@pytest.mark.parametrize("later_stop", ["QUOTA_EXHAUSTED", "CONTROLLER_SHUTDOWN", "LEASE_INVALID", "TIMEOUT"])
+def test_a_sensitive_refusal_takes_precedence_over_a_later_stop(settings, setup, monkeypatch, later_stop):
+    """Differential review 2026-10-28: a stop the monitor sets after the refusal (quota, shutdown, lost lease, time
+    limit) never hides it, and a quota stop's attempt refund never applies to it."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _sensitive_blocked_row(run_id)
+    real = executor._decide
+    monkeypatch.setattr(executor, "_decide", lambda *a, **kw: real(*a, **{**kw, "stop_reason": later_stop}))
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "FAILED" and run.outcome_code == "SENSITIVE_CONTENT_BLOCKED", (res, run.outcome_code)
+    assert te.state in ("REVIEW", "FAILED") and te.reason_code != later_stop and "credential" in te.reason
+    assert te.attempts_used == 1  # not given back
+
+
+def test_a_later_stop_without_a_sensitive_refusal_keeps_its_own_code(settings, setup, monkeypatch):
+    """Near miss: no refused request, so the quota stop stays a quota stop (BLOCKED, attempt refunded)."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    real = executor._decide
+    monkeypatch.setattr(executor, "_decide", lambda *a, **kw: real(*a, **{**kw, "stop_reason": "QUOTA_EXHAUSTED"}))
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "STOPPED" and run.outcome_code == "QUOTA_EXHAUSTED"
+    assert te.state == "BLOCKED" and te.reason_code == "QUOTA_EXHAUSTED"
+
+
 def test_start_blocked_without_sandbox_exception(settings, setup):
     make, _ = setup
     run_id, task_id = make("ok")

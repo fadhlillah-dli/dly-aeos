@@ -968,8 +968,11 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
         return run.execution_status  # someone else (cancel/reassign/reconcile) already decided
     scheduler.stop_run_resources(s, run, reason="run finished", lease_state="RELEASED")
     max_att = scheduler.max_attempts(task, te)
-    if stop_reason is None and _sensitive_blocked_count(s, run.id):
-        stop_reason = SENSITIVE_STOP  # refused after the last heartbeat: the run still fails closed (ADR-0127)
+    if stop_reason != SENSITIVE_STOP and _sensitive_blocked_count(s, run.id):
+        # ADR-0127: a refused model request decides the outcome whatever stopped the run afterwards (a quota stop, a
+        # controller shutdown, a lost lease, a time limit, refused after the last heartbeat): it fails closed and its
+        # attempt is never refunded as a quota stop would be
+        stop_reason = SENSITIVE_STOP
     if stop_reason in ("QUOTA_EXHAUSTED", "CONTROLLER_SHUTDOWN", "LEASE_INVALID", "STALE_ATTEMPT"):
         code = {"LEASE_INVALID": "LEASE_LOST", "STALE_ATTEMPT": "LEASE_LOST"}.get(stop_reason, stop_reason)
         scheduler.set_run_status(s, run, S.FAILED.value, reason=f"stopped: {stop_reason}", actor=ACTOR,

@@ -33,10 +33,11 @@ _NAMED_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("google_refresh_token", re.compile(r"1//[0-9A-Za-z_\-]{20,}")),  # Google refresh token
     # Vault/OpenBao service, batch, recovery tokens
     ("vault_token", re.compile(r"(?<![A-Za-z0-9])hv[sbr]\.[A-Za-z0-9_\-]{24,}")),
-    # Vault/OpenBao tokens (older and short forms). Not glued to a preceding letter or digit, so code such as
-    # ``this.handleSubmitButtonClickedEvent`` or ``lib.someLongFunctionNameHere`` is not a token (2026-10-28); a body
-    # that reads as an identifier (``s.registerServiceWithHealthCheck``) is skipped by the high-confidence scan.
-    ("vault_token_short", re.compile(r"(?<![A-Za-z0-9])(?:hvs|s|b)\.[A-Za-z0-9]{24,}")),
+    # Vault/OpenBao tokens (older and short forms). No look-behind on purpose: a token glued to a letter or digit (after
+    # a JSON-escaped newline, ``\\nhvs.``, or a URL-encoded ``%3D``) is still masked in logs and errors. The
+    # outgoing-content guard alone skips an ``s.``/``b.`` match whose body reads as an identifier (code member access);
+    # never ``hvs.`` (ADR-0127; tests/unit/test_redaction_never_weaker.py keeps this pattern from getting weaker).
+    ("vault_token_short", re.compile(r"(?:hvs|s|b)\.[A-Za-z0-9]{24,}")),
     ("openbao_recovery_token", re.compile(r"(?<![A-Za-z0-9.])r\.[A-Za-z0-9]{24,}")),  # OpenBao recovery token (short)
     # Vault/OpenBao `operator init` output. The label is required, so a bare base64 string (a lockfile
     # hash, a digest) never matches, nor does prose that only names an unseal key. ``\s*(?:\d+\s*)?:`` is the same
@@ -170,10 +171,28 @@ def _reads_as_identifier(body: str) -> bool:
     """True when *body* splits into camelCase or snake_case words of mean length 3.4 or more, as a member or variable
     name does (registerServiceWithHealthCheck 6.0, isInCurrentRuleReSyncSet 3.4; the shortest of 3,909 long member
     names measured in the frontend and Python dependencies). A random token body falls apart into one- and
-    two-character pieces: about 0.5% of random 24-character bodies, 0.06% of 40-character ones and none of 100
-    reach 3.4 (the ADR-0127 residual). Linear in the length of *body*."""
+    two-character pieces: about 0.5% of random 24-character bodies, 0.015% of 40-character ones and none of 100
+    reach 3.4 (measured 2026-10-28 on 200,000, 400,000 and 100,000 random bodies; the ADR-0127 residual). Linear in
+    the length of *body*."""
     words = _IDENTIFIER_WORD.findall(body)
     return bool(words) and sum(map(len, words)) >= _IDENTIFIER_MEAN_WORD_LENGTH * len(words)
+
+
+# An escape sequence in front of (or after) a token is a boundary, not part of a word: a JSON string escape (``\n``,
+# ``\t``, ``\"``, ``\u00e9``; a run of backslashes for JSON encoded twice) and a URL-encoded separator (``%3D``,
+# ``%26``, ``%3F``, a space, a quote, a comma, a colon, a line break; ``%25`` for encoded twice). Without it
+# ``...\nAIza...`` reads as glued to the base64 character ``n`` and ``\nsk-...`` fails the look-behind
+# (differential review of ADR-0127, 2026-10-28). No token pattern holds ``\`` or ``%``, so masking them never cuts a
+# token.
+_ESCAPE_BOUNDARY = re.compile(r"\\+(?:u[0-9A-Fa-f]{4}|[nrtbf\"'/])|%(?:25)*(?:0[9ADad]|2[02679Cc]|3[ABDFabdf])")
+
+
+def _boundary_view(text: str) -> str:
+    """*text* with every escape sequence of _ESCAPE_BOUNDARY replaced by as many spaces: the same length, so a span
+    found in the view is the same span of *text*. Linear."""
+    if "\\" not in text and "%" not in text:
+        return text
+    return _ESCAPE_BOUNDARY.sub(lambda m: " " * (m.end() - m.start()), text)
 
 
 def _glued_to_base64(text: str, start: int, end: int) -> bool:
@@ -208,6 +227,9 @@ def _iter_high_confidence(text: str) -> Iterator[SecretFinding]:
         while i != -1:
             yield SecretFinding(REGISTERED_SECRET, i, i + len(v))
             i = text.find(v, i + len(v))
+    # The token patterns run on the boundary view (same length, same spans): a token after an escaped newline or an
+    # encoded ``=`` is found, and its span still names the token in *text*.
+    text = _boundary_view(text)
     lowered: str | None = None
     for kind, pat in _NAMED_PATTERNS:
         if pat.groups:
