@@ -52,6 +52,9 @@ RULES (lesson ids in brackets)
 11. Diagnosis order [L14]. Input, then environment, then code. No background job without a
     deadline and a failure marker file; check the marker, not the silence. Run tests through
     scripts/run_tests.sh; zsh does not word-split a variable, so use an array, never 'set -- $var'.
+    Shell loops list their items explicitly ('for x in a b c'); a loop that needs word splitting runs
+    under bash -c '...' or splits with a zsh array (${=var}), never 'for x in $var'. Tests take
+    explicit paths, never a glob or a command substitution that can come back empty.
 12. CI state [L7, L18]. Never hand-write a CI wait loop: use scripts/ci_status.py --wait --deadline, and
     --required-only for a merge decision. A check list that is empty or pending is not green; name each
     required check. A job cancelled because no runner acquired it is INFRA: re-run it, do not debug code.
