@@ -470,7 +470,31 @@ Copy the route key and its config hash from the `routes list` output.
      again with `--budget-decision <new id>`. The TRIAL keeps the id of the BUDGET decision it was activated with, so
      a new BUDGET decision alone does not renew the route. See [1.15](#115-recurring-owner-actions).
 
-  **What AEOS does with a Go route** (ADR-0080 amendment 2026-10-26):
+  **What AEOS does with a Go route** (ADR-0080 amendment 2026-10-26; best-first selection, ADR-0124, your decision
+  of 2026-10-28):
+
+  * **Best first, Go first for PUBLIC.** Among the routes that pass every hard filter, AEOS ranks by evaluation score,
+    then by the agent's preferred routes (`route_policy.preferred_routes`; a preference only re-orders routes that are
+    already eligible), then by priority. For PUBLIC tasks the Go routes rank before the free OpenRouter routes, which
+    are the fallback (decision C'). INTERNAL tasks never use a `:free` route.
+  * **Load spreads to the next route, never to a paid one.** A Go route is skipped, and the next ranked route is tried,
+    when it is at its concurrency cap (`ROUTE_BUSY`: 1 task at once for a route with at most $30/month allowance, else 2;
+    at most 2 across all Go routes), when the task's estimated allowance does not fit what is left of its 5h window
+    (`ALLOWANCE_FIT`), or, for a PUBLIC task, when PUBLIC tasks have used their share of that window (`PUBLIC_SHARE`,
+    half by default). The estimate is this machine's own median for the route and the task's role after 3 finished
+    runs, before that the LiveBench 2026-10-25 cost of one long agentic task, else half the window, and never more
+    than the whole window (a Pro Go model whose LiveBench cost is above its window takes a task when its window is
+    empty); a running task holds its estimate until it ends. A task bound to an evaluation obeys the same limits and
+    waits for its route. After a skip only a route with no cost per call (Go within the plan, or free)
+    may take the task; otherwise it waits (`ROUTE_CAPACITY`). The global limit stays 2 tasks at once.
+  * **Cool-down.** A 429 or a 5xx from Go starts a cool-down of that route: 60 s, doubling on each repeat up to
+    30 minutes, or longer when Go's Retry-After says so; a later error never shortens a longer wait. New tasks skip the route meanwhile; a running task stays on
+    it. A task stopped at a quota moves to another Go or free route between attempts only when the wait is longer
+    than 30 minutes; otherwise it waits for its route.
+  * **Settings (`aeos.yaml`, optional).** `go_public_share`, `route_max_active`, `go_max_active_total`,
+    `openrouter_free_max_active` and `route_reselect_after_minutes` ([OPERATIONS.md](OPERATIONS.md), "Environment
+    variables"). They are not part of a route's configuration, so changing one never voids a TRIAL. Restart
+    `./aeos serve` after a change.
 
   * **No cost limit per task.** A TaskSpec needs no `max_cost_usd`. The marginal cost of each run is $0, and the
     run's cost cap is $0.
@@ -482,8 +506,9 @@ Copy the route key and its config hash from the `routes list` output.
   * **Windows.** 5 hours = 20%, week = 50%, month = 100% of the model's monthly allowance (glm-5.3-flash: $12 / $30 /
     $60). Only the 5-hour window blocks new tasks. The week and month windows are advisory (`WARN_EXHAUSTED`): AEOS
     cannot know when Go resets them, and with Extra Usage OFF going past them only gets refusals from Go, never a
-    charge. A refusal from Go is RATE_LIMITED (a quota wait, no fallback to another route) only if Go answers HTTP
-    429, which is NOT-PROVEN; any other status is UPSTREAM_ERROR and records no quota wait.
+    charge. A refusal from Go is RATE_LIMITED (a quota wait and a cool-down of the route; the running task keeps
+    its route) only if Go answers HTTP 429, which is NOT-PROVEN; a 5xx is UPSTREAM_ERROR and starts a cool-down; any
+    other status is UPSTREAM_ERROR and records no quota wait.
   * **Paid usage beyond the plan.** If Go reports a charge, or bills a call from another source than the plan
     (`billing_source` such as `balance`, i.e. Extra Usage ON), AEOS flags the call (`cost.subscription.beyond_plan`),
     refuses the run's next request and refuses the route for new tasks and probes. A reported charge also counts
@@ -492,6 +517,7 @@ Copy the route key and its config hash from the `routes list` output.
 
     | Code | Shown as | What to do |
     |---|---|---|
+    | `ROUTE_CAPACITY` | WAITING_QUOTA | Nothing: every Go or free route that may take the task is busy, cooling down or out of 5h allowance; it runs when one frees up. It never moves to a paid route. |
     | `SUBSCRIPTION_ALLOWANCE_EXHAUSTED` | WAITING_QUOTA | Nothing: the 5h window frees up as calls age out. |
     | `SUBSCRIPTION_ALLOWANCE_UNKNOWN` | WAITING_QUOTA | Nothing: a call in the 5h window could not be counted; it blocks for at most 5 hours. |
     | `SUBSCRIPTION_BEYOND_PLAN` | BLOCKED | Turn Extra Usage OFF on the Console's Go page, then activate the route again (step 5 with a valid BUDGET decision). A TRIAL newer than the flagged call clears it. If Go reported a charge, that charge also counts against the GLOBAL $0 hard stop: every route, free ones included, waits with BUDGET_EXCEEDED until the budget period ends or you record a GLOBAL budget that covers it (Biaya page); re-activation alone is not enough. |
@@ -524,9 +550,11 @@ Copy the route key and its config hash from the `routes list` output.
 * **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models (ids ending in
   `:free`) may serve worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes;
   CONFIDENTIAL never goes to a worker route. Other OpenRouter routes keep the rules above (a paid route needs a BUDGET
-  decision); among OpenRouter routes `set-pool` moves only `:free` routes. A free route ranks first for PUBLIC tasks. When the free tier is at its limit, the
-  task waits (`FREE_TIER_LIMIT_REACHED`, shown as WAITING_QUOTA); it never moves to a Go route or to any paid route. Do
-  these steps in order:
+  decision); among OpenRouter routes `set-pool` moves only `:free` routes. Since your decision of 2026-10-28
+  (decision C', ADR-0124) a free route is the fallback for PUBLIC tasks: the Go routes rank first, and a PUBLIC task
+  uses a free route when no Go route can take it (busy, cooling down, out of 5h allowance or past PUBLIC's share). When
+  the free tier is at its limit and no Go route can take the task, it waits (`FREE_TIER_LIMIT_REACHED`, shown as
+  WAITING_QUOTA); it never moves to a paid route. Do these steps in order:
   1. **Credits (once, on openrouter.ai).** Buy at least $10 of credits. This raises the free-model daily cap of the
      account from 50 to 1000 requests. The per-minute cap stays 20.
   2. **Privacy (once, on openrouter.ai).** In the privacy settings, enable the free endpoints that may train on inputs.
@@ -576,8 +604,8 @@ Copy the route key and its config hash from the `routes list` output.
      The line of the route must show `decision-c=PUBLIC-ONLY`. Copy its new hash. A move is refused
      (`FREE_WORKER_ROUTE_INELIGIBLE`) for a catalog price that is not exactly zero, an ended free period, data classes
      other than PUBLIC alone, or an OFFICE domain.
-  7. **Re-activate the WORKER configuration.** **A WORKER TRIAL is eligible for real PUBLIC worker tasks at once, ahead
-     of the Go routes.** If you want the probe (step 8) first, pause scheduling around it
+  7. **Re-activate the WORKER configuration.** **A WORKER TRIAL is eligible for real PUBLIC worker tasks at once (after
+     the Go routes, decision C').** If you want the probe (step 8) first, pause scheduling around it
      (`./aeos work pause --reason "OpenRouter probe"`, then `./aeos work resume`).
 
      ```bash
@@ -601,8 +629,10 @@ Copy the route key and its config hash from the `routes list` output.
     stopped at a quota does not use up an attempt; the task runs again after the reset. Your own use of the same account
     elsewhere is invisible to AEOS, so OpenRouter can refuse earlier; its 429 stays authoritative and is never a
     success.
-  * **No paid fallback.** A task never moves from the free route to a Go route or any other paid route. Over the limit
-    it waits, even if a Go route has allowance left.
+  * **No paid fallback.** A task never moves from the free route to a paid route. A Go route is no fallback of a
+    free route either (ADR-0041 decision C, point 5); Go ranks before the free routes for PUBLIC tasks instead
+    (decision C'), so a PUBLIC task reaches a free route only when no Go route can take it. Only one task runs on the
+    free routes at once (`openrouter_free_max_active`, one account-wide rate limit).
   * **Repricing.** `./aeos routes refresh` marks a repriced model `is_free=NO` (its TRIAL stops applying) and a dropped
     model MISSING. A call OpenRouter reports with a cost refuses the route until you re-activate it. The route keeps its
     WORKER pool; the catalog never moves it.

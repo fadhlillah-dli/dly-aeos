@@ -348,7 +348,8 @@ def route_eligibility(
         raise Forbidden("domain outside your scope")
     decision = service.eligible_routes(db, domain=domain, data_classification=classification, needs_tools=needs_tools,
                                        min_context=min_context, pool=pool, tools=tools)
-    ranked = service.rank(db, decision.eligible, role) if decision.eligible else []
+    ranked = (service.rank(db, decision.eligible, role, data_classification=classification)
+              if decision.eligible else [])
     # rejection reasons quote credential references: names private to another domain (the session's selected domain
     # wins over the queried one) or to a project the viewer cannot see are withheld (L12)
     active = getattr(principal, "active_domain", None)
