@@ -142,7 +142,19 @@ def unseal_from_keyring(settings: Settings, *, trigger: str, client: OpenBaoClie
     audit("openbao.unseal", "SUCCESS" if out.status == UNSEALED else "FAILED",
           {"source": "os-keyring", "trigger": trigger, "outcome": out.status, "keys_applied": out.keys_applied,
            "addr": logical_addr(settings.openbao_addr)}, prepare_db=trigger != "serve")
+    if out.status == UNSEALED:
+        signal_store_changed("OpenBao unsealed from the OS keyring", trigger=trigger)
     return out
+
+
+def signal_store_changed(reason: str, *, trigger: str = "cli") -> None:
+    """Tell the Doctor the store changed state (``secret:store``), so checks that saw it down re-run. Under ``aeos
+    serve`` (auto-unseal) only into a database already at the migration head, as the audit row above."""
+    if trigger == "serve" and audit_db_not_ready():
+        return
+    from aeos.secrets.readiness import store_state_changed
+
+    store_state_changed(reason, transition="unsealed")
 
 
 def unseal_at_start(settings: Settings) -> str | None:

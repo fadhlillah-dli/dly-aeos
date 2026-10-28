@@ -21,6 +21,9 @@ from tests.unit.test_routing_fakes import (
     install_fakes,
 )
 
+# routing keeps a route whose worker key is not stored out of eligibility: these tests store fake keys
+pytestmark = pytest.mark.usefixtures("worker_keys")
+
 DS = "opencode-zen/deepseek-v4.1-flash-free"
 GLM = "opencode-zen/glm-5.3-flash-free"
 GEMINI = "gemini/gemini-3.8-flash-free-tier"
@@ -252,7 +255,7 @@ def test_approved_route_eligible_and_selected(routes):
     assert sel.route.route_key == DS and "priority" in sel.reason
 
 
-def test_office_always_denied_by_default(routes, monkeypatch, absent_modules):
+def test_office_always_denied_by_default(routes, monkeypatch, absent_modules, worker_keys):
     absent_modules("aeos.policy.office")
     r = approve(routes, DS)
     # even if someone had added OFFICE to the route, policy decides — and it is missing here
@@ -274,6 +277,9 @@ def test_office_always_denied_by_default(routes, monkeypatch, absent_modules):
     reg.office["approved_data_classes"] = ["PUBLIC"]
     assert eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL").eligible == []
     reg.office["approved_data_classes"] = ["INTERNAL"]
+    d = eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL")  # the office key is not stored yet
+    assert d.eligible == [] and any("credential office/opencode-zen not stored" in x for x in d.rejected[DS])
+    worker_keys.put("office/opencode-zen", "fake-office-key-value", actor="test")
     assert eligible_routes(routes, domain="OFFICE", data_classification="INTERNAL").eligible == [DS]
 
 

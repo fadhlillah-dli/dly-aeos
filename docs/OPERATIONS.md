@@ -632,6 +632,23 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   Deployment target" / "Produksi — Deployment target": the https base URL and an optional health path (validated
   with the observer's rule). AEOS only GETs it (G6/G8, `aeos delivery observe-target`, `aeos docs screenshot`);
   deploying stays a human action. The GitHub Actions pipeline reference is "CI — GitHub Actions" on the same page.
+* **Route keys (2026-10-28):** routing rejects a remote route whose key (`mode_params.credential_ref`, or the default
+  OpenRouter worker keys) is not stored, with `credential <ref> not stored: aeos secrets set <ref>`; a sealed,
+  unreachable or unknown store rejects every keyed route (fail closed). It is a status lookup, only for a route
+  nothing else rejects and once per reference and eligibility call, never a value read and never a provider call;
+  loopback LOCAL and `claude-native` routes need no key. Doctor: `route.registry` names the active routes kept out ("Dikecualikan: kunci belum disimpan");
+  `route.worker_key` lists them as a non-blocking note while another route is eligible (both remedies: store the
+  key, or `aeos routes disable <key> --reason "..."`) and stays MISSING when no route is left. With no route left,
+  `route.registry` names the cause: a sealed or unreachable store gives UNKNOWN `SECRET_STORE_UNAVAILABLE` (restore
+  the store; no route needs activating), keyless active routes give the store-the-key remedy. What marks both
+  checks STALE (a result is never kept until its one-hour TTL): `secret:store`, sent by `aeos vault start`,
+  `aeos vault stop`, an unseal (OS keyring, the auto-unseal of `aeos serve`, or the prompt) and `aeos vault init`;
+  and storing or deleting a `workers/*` or `personal/openrouter` key (`secret:workers/*`,
+  `secret:personal/openrouter`). Each of these also emits one dashboard event, source `secrets`:
+  `secret.store_changed` (payload: the transition `started`, `stopped`, `unsealed` or `initialised`) or
+  `secret.presence_changed` (payload: the reference name only, never a value; an `office/` name only into the
+  OFFICE domain, a `projects/` name withheld). `route.activated`, `route.disabled`, `route.pool_set` and
+  `route.endpoint_set` are emitted once from the routing service, so the CLI and the API record the same event.
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111; WORKER too):** activate the free (or local, or flat-fee
   subscription) route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic

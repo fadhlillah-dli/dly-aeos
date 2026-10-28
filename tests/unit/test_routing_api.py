@@ -102,7 +102,8 @@ def test_viewer_cannot_activate_disable_or_refresh(client: AuthedClient, db):
     assert service.get_route(db, DS).status == "CANDIDATE"
 
 
-def test_admin_activation_flow_records_decision_audit_event(personal_client: AuthedClient, db, monkeypatch):
+def test_admin_activation_flow_records_decision_audit_event(personal_client: AuthedClient, db, monkeypatch,
+                                                            worker_keys):
     install_fakes(monkeypatch)
     _seed(db)
     h = service.get_route(db, DS).config_hash
@@ -227,7 +228,8 @@ def test_activation_with_same_classes_keeps_the_reviewed_hash(personal_client: A
     assert r.status_code == 200 and r.json()["route"]["config_hash"] != h
 
 
-def test_approved_activation_with_recorded_evaluation_over_the_api(personal_client: AuthedClient, db, monkeypatch):
+def test_approved_activation_with_recorded_evaluation_over_the_api(personal_client: AuthedClient, db, monkeypatch,
+                                                                  worker_keys):
     """§23 'diizinkan dan telah diuji' end to end over HTTP: TRIAL -> EvalRun on exactly that configuration
     (recorded by the trusted collector) -> APPROVED referencing it -> the route view shows the tested role and
     the rollback target; the eligibility endpoint ranks by the evaluated result."""
