@@ -189,11 +189,38 @@ def record_decision(
 # ---------------------------------------------------------------- readiness invalidation (§08, §50)
 
 
-def readiness_invalidators(decision: Decision) -> list[str]:
-    """Doctor invalidators a decision lifecycle change affects (only the checks that depend on it)."""
+PROPOSAL_TARGET = "change_proposal"
+# A TRIAL/PROMOTION on a ChangeProposal admits its catalog components (aeos.inventory.decisions); it says nothing
+# about model routes (a TRIAL on a model_route does).
+ADMISSION_DECISION_KINDS = frozenset({"TRIAL", "PROMOTION"})
+ADMISSION_INVALIDATOR = "inventory:admission"
+
+
+def _proposal_component_ids(session: Session, proposal_id: str) -> list[str]:
+    """Candidate and existing components of a ChangeProposal and of its parts (empty when it is unknown)."""
+    from aeos.models.research import ChangeProposal
+
+    p = session.get(ChangeProposal, proposal_id)
+    if p is None:
+        return []
+    ids = {*(p.candidate_component_ids or []), *(p.existing_component_ids or [])}
+    for child in session.scalars(select(ChangeProposal).where(ChangeProposal.parent_id == p.id)):
+        ids |= {*(child.candidate_component_ids or []), *(child.existing_component_ids or [])}
+    return sorted(str(i) for i in ids)
+
+
+def readiness_invalidators(decision: Decision, session: Session | None = None) -> list[str]:
+    """Doctor invalidators a decision lifecycle change affects (only the checks that depend on it).
+
+    A TRIAL/PROMOTION on a change_proposal changes component admission: ``component:<id>`` for each linked
+    component (with *session*) and ``inventory:admission``; never the route checks. An OFFICE proposal decision
+    adds none of them, because inventory admission for probing and its check count PERSONAL/platform decisions
+    only (§23). The next reconciliation (full run, Refresh of the component, or the poll loop when enabled)
+    probes a newly admitted component; no reconciliation is started from here."""
     from aeos.policy.office import is_office_policy_decision
 
     out: list[str] = []
+    proposal_admission = decision.target_type == PROPOSAL_TARGET and decision.kind in ADMISSION_DECISION_KINDS
     if decision.kind in catalog.SNAPSHOT_DECISION_KINDS:
         out.append("config:policy")
     if is_office_policy_decision(decision):
@@ -202,8 +229,13 @@ def readiness_invalidators(decision: Decision) -> list[str]:
         out.append("config:write_enablement")
     if decision.kind == "BUDGET":
         out.append("config:budget")
-    if decision.kind in ("ROUTE_ACTIVATION", "TRIAL") or decision.target_type == "model_route":
+    if (decision.kind == "ROUTE_ACTIVATION" or decision.target_type == "model_route"
+            or (decision.kind == "TRIAL" and not proposal_admission)):
         out += ["config:routes", "model:route"]
+    if proposal_admission and decision.domain != "OFFICE":
+        if session is not None:
+            out += [f"component:{cid}" for cid in _proposal_component_ids(session, decision.target_id)]
+        out.append(ADMISSION_INVALIDATOR)
     if decision.target_type == "worker_sandbox":
         out.append("config:sandbox")
     if decision.target_type == "secret_store":
@@ -235,7 +267,7 @@ def _notify_readiness(session: Session, decisions: list[Decision], *, reason: st
     Same transaction as the decision change; a missing doctor module means nothing was fresh."""
     invalidators: list[str] = []
     for d in decisions:
-        invs = readiness_invalidators(d)
+        invs = readiness_invalidators(d, session)
         if "model:route" in invs:
             invs.append(_route_pool_invalidator(session, d))
         invalidators += invs

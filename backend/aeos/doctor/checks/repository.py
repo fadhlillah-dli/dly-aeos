@@ -304,3 +304,34 @@ def repo_install_manifest(ctx: CheckContext) -> Outcome:
                                      evidence_to_collect="hash termuat = hash file"))
     return Outcome("VERIFIED", f"Manifest valid dan termuat ({evidence['components']} komponen).", evidence=evidence,
                    component_version=load.content_hash[:19])
+
+
+@check("inventory.admitted_unprobed", "REPOSITORY", "Komponen admitted tanpa probe (informasi)",
+       component_id="install-manifest", needs_db=True, ttl_seconds=3600, ok={"VERIFIED", "CONFIGURED"},
+       invalidators=("manifest", "inventory:admission"), severity_fail="LOW", scope={"domain": "PERSONAL"},
+       description="Komponen yang di-admit manusia (TRIAL_APPROVED/APPROVED, keputusan PERSONAL atau platform) "
+                   "tetapi probe manifest-nya none: rekonsiliasi tidak dapat mengamatinya, jadi instalasinya tetap "
+                   "UNKNOWN. Hanya informasi (CONFIGURED); tidak memblokir capability mana pun.")
+def inventory_admitted_unprobed(ctx: CheckContext) -> Outcome:
+    from sqlalchemy import select
+
+    from aeos.inventory.reconcile import admitted_components, is_probeable
+    from aeos.models.inventory import ComponentReference
+
+    if ctx.session is None:  # needs_db: the runner answers UNKNOWN before calling this
+        return Outcome("UNKNOWN", "Database belum tersedia.", error_code="DB_NOT_INITIALISED")
+    comps = {c.component_id: c for c in ctx.session.scalars(select(ComponentReference))}
+    admitted = admitted_components(ctx.session, comps)
+    unprobed = [{"component_id": cid, "reason": str((c.probe or {}).get("reason") or "tanpa probe")}
+                for cid, c in admitted.items() if not is_probeable(c)]
+    evidence: dict[str, Any] = {"admitted": len(admitted), "admitted_unprobed": unprobed}
+    if not unprobed:
+        return Outcome("VERIFIED", f"Semua {len(admitted)} komponen admitted punya probe (atau belum ada yang "
+                       "di-admit).", evidence=evidence)
+    ids = ", ".join(u["component_id"] for u in unprobed)
+    return Outcome("CONFIGURED", f"{len(unprobed)} komponen admitted tanpa probe; instalasinya tetap UNKNOWN: {ids}.",
+                   evidence=evidence, severity="INFO", remedy=Remedy(
+                       operation="Tambahkan probe portabel yang read-only lewat PR yang direview (protected path), "
+                                 "atau biarkan none dengan alasan yang jujur",
+                       target="install-manifest/manifest.yaml", privilege="reviewer manusia",
+                       evidence_to_collect="komponen muncul sebagai target rekonsiliasi dengan observasi instalasi"))

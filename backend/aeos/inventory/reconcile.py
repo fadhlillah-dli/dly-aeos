@@ -1,6 +1,8 @@
 """Auditable inventory reconciliation (§38 "Rekonsiliasi yang dapat diaudit").
 
-1. Take the desired manifest (loading it first if the DB has none) for the selected scope.
+1. Take the desired manifest (loading it first if the DB has none) for the selected scope. The full scope is
+   every REQUIRED/OPTIONAL component with a probe plus every component a human admitted (TRIAL_APPROVED/APPROVED,
+   PERSONAL or platform decisions only) that has a probe; DISCOVERED/UNDER_REVIEW candidates are never probed.
 2. Run the allowed, non-LLM, read-only probes: version commands with timeouts, loopback health URLs,
    scoped repository/lockfile/config reads. No machine-wide scans; no functional write tests.
 3. Store observations with source identity, timestamp, scope, resolved version, a redacted
@@ -75,6 +77,10 @@ DATA_BIN_BINARIES = frozenset({"bao"})
 NTSTATUS_ERROR_MIN = 0xC0000000
 NTSTATUS_ERROR_MAX = 0xCFFFFFFF
 CORE_REQUIREMENTS = frozenset({"REQUIRED", "OPTIONAL"})
+# Admitted catalog components (human TRIAL/PROMOTION decision) are probed beside the core set when they have a real
+# probe; DISCOVERED/UNDER_REVIEW candidates stay unprobed. Only PERSONAL/platform decisions count (§23).
+ADMITTED_STATES = frozenset({"TRIAL_APPROVED", "APPROVED"})
+ADMISSION_DOMAIN = "PERSONAL"
 DEFAULT_TTL = 3600
 DECLARATION_TTL = 86400
 
@@ -487,6 +493,32 @@ def core_targets(components: Iterable[ComponentReference]) -> list[ComponentRefe
             if c.tombstoned_at is None and c.requirement in CORE_REQUIREMENTS and is_probeable(c)]
 
 
+def _admission_visible(comp: ComponentReference) -> bool:
+    """Platform and PERSONAL-only components; an OFFICE-only component never enters the admitted set (§23)."""
+    domains = set((comp.scope or {}).get("domains") or ["PLATFORM"])
+    return "PLATFORM" in domains or ADMISSION_DOMAIN in domains
+
+
+def admitted_components(session: Session, comps: dict[str, ComponentReference]) -> dict[str, ComponentReference]:
+    """Components a human admitted (TRIAL_APPROVED/APPROVED), derived exactly as the inventory views derive
+    admission (``aeos.inventory.decisions.decision_states``) for the PERSONAL domain: PERSONAL and domain-less
+    decisions count, OFFICE decisions and OFFICE-only components never do. DISCOVERED/UNDER_REVIEW candidates are
+    not admitted. Probeable or not; the caller filters."""
+    from aeos.inventory.decisions import decision_states
+
+    live = {cid: c for cid, c in comps.items() if c.tombstoned_at is None and _admission_visible(c)}
+    if not live:
+        return {}
+    states = decision_states(session, live, domain=ADMISSION_DOMAIN)
+    return {cid: live[cid] for cid, st in sorted(states.items()) if st.admission in ADMITTED_STATES}
+
+
+def admitted_targets(session: Session, comps: dict[str, ComponentReference]) -> list[ComponentReference]:
+    """Admitted components with a real probe that the core set does not already cover."""
+    core = {c.component_id for c in core_targets(comps.values())}
+    return [c for cid, c in admitted_components(session, comps).items() if cid not in core and is_probeable(c)]
+
+
 # ---------------------------------------------------------------- managed-scope sources
 
 
@@ -798,9 +830,15 @@ def _reconcile(
             raise Conflict(f"component {component_id} is tombstoned; history only", code="COMPONENT_TOMBSTONED")
         targets = [comp]
         scope: dict[str, Any] = {"component_id": component_id}
+        # a scoped refresh never probes a catalog candidate that no human admitted (DISCOVERED/UNDER_REVIEW)
+        unadmitted = comp.requirement not in CORE_REQUIREMENTS and component_id not in admitted_components(
+            session, comps)
     else:
-        targets = core_targets(comps.values())
-        scope = {"set": "core", "requirements": sorted(CORE_REQUIREMENTS)}
+        admitted = admitted_targets(session, comps)
+        targets = [*core_targets(comps.values()), *admitted]
+        unadmitted = False
+        scope = {"set": "core", "requirements": sorted(CORE_REQUIREMENTS),
+                 "admitted": [c.component_id for c in admitted]}
     ctx = ReconcileContext(settings=settings, runner=runner or get_runner(), repo=repo or repo_root(), session=session)
     run = ReconciliationRun(trigger=trigger, actor=actor, scope=scope, status="RUNNING", manifest_hash=manifest_hash,
                             started_at=ctx.now)
@@ -816,6 +854,10 @@ def _reconcile(
         if not is_probeable(comp):
             component_status[cid] = {"status": "SKIPPED", "at": at,
                                      "reason": str((comp.probe or {}).get("reason") or "tanpa probe")}
+            continue
+        if unadmitted:
+            component_status[cid] = {"status": "SKIPPED", "at": at,
+                                     "reason": "kandidat belum di-admit (tanpa keputusan TRIAL/PROMOTION); tidak diprobe"}
             continue
         try:
             specs = probe_component(ctx, comp)
