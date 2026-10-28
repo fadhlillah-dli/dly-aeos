@@ -93,7 +93,7 @@ describe("Models & Routes: honest active status (R28)", () => {
     expect(screen.queryByTestId("route-valid-until")).toBeNull();
   });
 
-  it("falls back to the list when an older server sends no counts, and shows no date for an active route without one", async () => {
+  it("shows no date for an active route without an expiry", async () => {
     const noExpiry = { ...TRIAL, active_decision: { id: "d-1", kind: "TRIAL", expires_at: null } };
     mountWith([CAND1, noExpiry]);
     expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 1 dari 2 rute");
@@ -115,11 +115,31 @@ describe("Models & Routes: honest active status (R28)", () => {
     expect(rows[0]).toBe(rows.find((r) => within(r).queryByText("Candidate One"))); // not sorted first
   });
 
-  it("without counts (older server) the fallback also requires the decision", async () => {
+  it("counts a lapsed route as not active when the API sends no counts", async () => {
     const lapsed = { ...TRIAL, display_name: "Lapsed Trial", active_decision: null };
     mountWith([CAND1, lapsed]);
     expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 2 rute");
     expect(screen.queryByText("Aktif · TRIAL")).toBeNull();
+  });
+
+  // Round 2: the header must count the population the table shows. The API counts include SUPERVISOR routes; the
+  // table hides them. Bite fixture: 2 SUPERVISOR (one active) + 1 active TRIAL + 2 CANDIDATE -> "Aktif: 1 dari 3".
+  it("counts only the rows the table shows: 2 SUPERVISOR + 1 TRIAL + 2 CANDIDATE is Aktif: 1 dari 3", async () => {
+    const sup1 = route({ route_key: "claude/sup1", pool: "SUPERVISOR", display_name: "Supervisor One", status: "APPROVED", mode: "LIVE", active_decision: { id: "d-s", kind: "TRIAL", expires_at: null } });
+    const sup2 = route({ route_key: "claude/sup2", pool: "SUPERVISOR", display_name: "Supervisor Two" });
+    const cand2 = route({ route_key: "opencode-zen/c2", display_name: "Candidate Two", priority: 3 });
+    // API counts as the server sends them: all 5 routes, 2 approved (TRIAL + the active supervisor)
+    mountWith([sup1, sup2, CAND1, cand2, TRIAL], { total: 5, approved: 2 });
+    const summary = await screen.findByTestId("routes-active-summary");
+    expect(summary).toHaveTextContent("Aktif: 1 dari 3 rute (TRIAL/APPROVED) · sisanya katalog kandidat");
+    expect(screen.getAllByRole("row").slice(1)).toHaveLength(3); // header total = table rows
+  });
+
+  it("near miss: with no SUPERVISOR route the header equals the table (Aktif: 1 dari 3)", async () => {
+    const cand2 = route({ route_key: "opencode-zen/c2", display_name: "Candidate Two", priority: 3 });
+    mountWith([CAND1, cand2, TRIAL], { total: 3, approved: 1 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 1 dari 3 rute");
+    expect(screen.getAllByRole("row").slice(1)).toHaveLength(3);
   });
 
   it("flags an APPROVED route without an active decision in the drawer and shows no date", async () => {

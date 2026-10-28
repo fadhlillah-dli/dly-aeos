@@ -25,26 +25,24 @@ export default function ModelsPage() {
 
   // Live refresh is installed once for the whole app (lib/eventInvalidation.ts, in AppShell), not per page.
 
+  // The table never shows SUPERVISOR routes (they have their own section). The header counts exactly that population
+  // with the same isActiveRoute rule the rows use, so "Aktif: N dari M" can never mix pools; the API `counts` include
+  // SUPERVISOR routes and are therefore not used here.
+  const registry = useMemo(() => (routes.data?.items ?? []).filter((r) => r.pool !== "SUPERVISOR"), [routes.data]);
+  const total = registry.length;
+  const active = registry.filter(isActiveRoute).length;
+
   // Active routes (TRIAL/APPROVED) first, so what is switched on is not buried under 30+ catalogue rows; the API
   // order (pool, priority) is kept inside each group.
   const items = useMemo(
     () =>
-      (routes.data?.items ?? [])
-        .filter(
-          (r) =>
-            r.pool !== "SUPERVISOR" &&
-            (!pool || r.pool === pool) &&
-            (!status || r.status === status) &&
-            (!domain || r.eligible_domains.includes(domain)),
-        )
+      registry
+        .filter((r) => (!pool || r.pool === pool) && (!status || r.status === status) && (!domain || r.eligible_domains.includes(domain)))
         .map((r, i) => ({ r, i }))
         .sort((a, b) => Number(isActiveRoute(b.r)) - Number(isActiveRoute(a.r)) || a.i - b.i)
         .map(({ r }) => r),
-    [routes.data, pool, status, domain],
+    [registry, pool, status, domain],
   );
-  // From the API counts (computed on the server for every route); the list is only the fallback for an older server.
-  const total = routes.data?.counts?.total ?? routes.data?.items.length ?? 0;
-  const active = routes.data?.counts?.approved ?? (routes.data?.items ?? []).filter(isActiveRoute).length;
 
   const columns = [
     { header: "Pool", cell: (r: RouteItem) => <span className="text-xs">{POOL_LABELS[r.pool] ?? r.pool}</span> },
@@ -158,7 +156,7 @@ export default function ModelsPage() {
           selalu ditolak sampai otorisasi perusahaan tercatat; tidak ada fallback berbayar otomatis.
         </Notice>
         {routes.data && (
-          <p className="mt-3 text-sm font-medium" data-testid="routes-active-summary" title="Hitungan dari API (semua pool, termasuk pengawas Max)">
+          <p className="mt-3 text-sm font-medium" data-testid="routes-active-summary" title="Rute pekerja di tabel ini (pengawas Max dihitung di bagiannya sendiri)">
             Aktif: {active} dari {total} rute (TRIAL/APPROVED) · sisanya katalog kandidat
           </p>
         )}

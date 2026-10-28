@@ -97,7 +97,10 @@ def _code(admission: str, installation: str, requirement: str = "OPTIONAL") -> s
 @pytest.mark.parametrize("installation", ["UNKNOWN", "NOT_INSTALLED"])
 def test_approved_but_not_installed_asks_to_install_not_to_monitor(admission, installation):
     action = views.next_action(_comp(), _dims(admission, installation), [], {"status": "NO_PIN"})
-    assert action["code"] == "INSTALL_TRIAL" and action["label"] == "Trial disetujui: pasang lalu probe"
+    assert action["code"] == "INSTALL_TRIAL"
+    # the label follows the admission: only TRIAL_APPROVED is called a trial
+    expected = "Trial disetujui: pasang lalu probe" if admission == "TRIAL_APPROVED" else "Disetujui: pasang lalu probe"
+    assert action["label"] == expected
     assert action["command"] is None  # manual step: no auto-install (AGENTS.md invariant 8)
 
 
