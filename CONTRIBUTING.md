@@ -232,7 +232,7 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
 
 - **Backend shards.** On each host OS the full backend suite is split by test file: 3 shards on `windows-latest`
   (Windows jobs do not use the macOS slots), 2 on each macOS host (`macos-latest`, `macos-26-intel`). The jobs are
-  named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical --shard K/N`. Every shard is the same job
+  named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical -o faulthandler_timeout=300 --shard K/N` (a test over 5 minutes prints its traceback). Every shard is the same job
   and uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Static checks.** `static checks [G1] (ubuntu-latest)` runs ruff, mypy for `--platform darwin` and
   `--platform win32`, the secret scan, `shellcheck` over the shell scripts (`scripts/*.sh`,
