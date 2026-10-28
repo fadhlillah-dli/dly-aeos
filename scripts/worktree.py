@@ -19,8 +19,16 @@ folders cluttered the directory that holds the checkout):
 ``aeos-worktree-created`` into that worktree's git directory (it disappears with the worktree). It creates the
 folder ``<main checkout>-worktrees`` when it is missing, as a real directory, and refuses (exit 1, nothing
 created) when that folder is a symlink, junction or other reparse point, or exists as a file; it also refuses an
-existing destination, an existing branch, and a name that a legacy worktree (below) already uses.
+existing destination, an existing branch, a name that a legacy worktree (below) already uses, and a link at the
+new or the legacy path of the name.
 Use the main checkout's interpreter that ``add`` prints; do not create a ``.venv`` link in a worktree.
+
+Names and paths: a name is matched to the registered worktree AT its path (``same_place``), never through a link.
+A link at ``<main checkout>-worktrees/<name>`` or ``<main checkout>-wt-<name>`` is refused with its own message
+(delete only the link entry by hand); it is never resolved to the worktree it points at. Both paths exist: the same
+directory (``os.path.samefile``), so ``Old`` and ``old`` collide on a case-insensitive filesystem (the default on
+macOS and Windows) and stay distinct on a case-sensitive one. Both missing: the same path text, case folded on
+macOS and Windows.
 
 Legacy location: worktrees made before 2026-10-28 are siblings named ``<main checkout>-wt-<name>``. ``remove``
 still finds such a worktree when that path is a registered worktree, and refuses as ambiguous when a worktree of
@@ -35,7 +43,10 @@ old name):
 link inside moves as a link, its target is untouched) and the marker stays in the worktree's git directory.
 
 ``remove`` refuses (exit 1, nothing changed) when
-  * the name is ambiguous (a worktree of that name in the folder and in the legacy location),
+  * ``<main checkout>-worktrees`` is a link, or the folder path or the legacy path of the name is a link,
+  * the name is ambiguous (a worktree of that name in the folder and in the legacy location): move one of them
+    under another name with ``git worktree move`` and run ``remove`` again (never ``git worktree remove`` by
+    hand: it skips every check here and can follow a link),
   * the worktree has no marker (``--foreign`` to accept a worktree this tool did not create),
   * it holds a symlink, junction or other reparse point (``--unlink-links`` removes only those link entries,
     never what they point at, then scans again),
@@ -69,6 +80,7 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 SKIP_DIRS = frozenset({".git", "node_modules"})
 REPARSE_POINT = 0x400  # FILE_ATTRIBUTE_REPARSE_POINT
 MAX_LINES_SHOWN = 20
+FOLDS_CASE = sys.platform in ("darwin", "win32")  # default APFS and NTFS ignore case; normcase folds only on win32
 
 
 class ToolError(Exception):
@@ -188,6 +200,42 @@ def path_is_link(path: str | Path) -> bool:
     return sys.platform == "win32" and bool(getattr(st, "st_file_attributes", 0) & REPARSE_POINT)
 
 
+def path_key(path: str | Path) -> str:
+    """Path text made comparable without touching the disk: absolute, normcase, case folded on macOS and Windows
+    (``posixpath.normcase`` keeps the case, and their default filesystems ignore it)."""
+    key = os.path.normcase(os.path.abspath(path))
+    return key.casefold() if FOLDS_CASE else key
+
+
+def same_place(registered: str | Path, candidate: str | Path) -> bool:
+    """Whether the registered worktree path *registered* is the path *candidate*, never through a link.
+
+    A link at either path never matches (callers refuse a link at the candidate with its own message). Both
+    exist: the same directory (``os.path.samefile``), so a case variant matches on a case-insensitive filesystem
+    and a different directory never does. Both missing: the same path text (``path_key``). Only one exists:
+    different places.
+    """
+    if path_is_link(registered) or path_is_link(candidate):
+        return False
+    here, there = os.path.lexists(registered), os.path.lexists(candidate)
+    if here != there:
+        return False
+    if not here:
+        return path_key(registered) == path_key(candidate)
+    try:
+        return os.path.samefile(registered, candidate)
+    except OSError:
+        return path_key(registered) == path_key(candidate)
+
+
+def link_refusal(path: Path) -> str | None:
+    """A link where a worktree of the name would be: refused, never resolved to what it points at, never removed."""
+    if not path_is_link(path):
+        return None
+    return (f"{path} is a link, not a worktree: delete only the link entry by hand (rm, never rm -r; a Windows "
+            "junction with rmdir, never rmdir /s), then run this command again")
+
+
 def scan_links(root: Path | str) -> tuple[list[str], list[str]]:
     """(relative posix paths of links, directories that could not be read). Links are never entered."""
     base = str(root)
@@ -259,10 +307,11 @@ def legacy_path(main: Path, name: str) -> Path:
 
 
 def is_legacy_location(main: Path, path: str | Path) -> bool:
-    """A sibling of the main checkout named ``<main checkout>-wt-<something>`` (compared as written by git)."""
+    """A sibling of the main checkout named ``<main checkout>-wt-<something>`` (compared as written by git,
+    case folded where ``path_key`` folds it)."""
     p = Path(path)
-    return (os.path.normcase(str(p.parent)) == os.path.normcase(str(main.parent))
-            and os.path.normcase(p.name).startswith(os.path.normcase(f"{main.name}-wt-")))
+    prefix = path_key(main.parent / f"{main.name}-wt-")
+    return path_key(p.parent) == path_key(main.parent) and path_key(p).startswith(prefix)
 
 
 def folder_problem(folder: Path) -> str | None:
@@ -383,11 +432,13 @@ def cmd_add(repo: Path, name: str, branch: str, base: str | None) -> int:
     folder = worktrees_folder(main)
     dest = worktree_path(main, name)
     legacy = legacy_path(main, name)
-    refusal = folder_problem(folder)
+    refusal = folder_problem(folder) or link_refusal(dest)
     if refusal is None and (dest.exists() or os.path.lexists(dest)):
         refusal = f"{dest} already exists"
-    if refusal is None and any(same_path(e.path, legacy) for e in entries[1:]):
-        refusal = (f"a worktree named {name} already exists in the legacy location {legacy} (remove would be "
+    refusal = refusal or link_refusal(legacy)
+    old = next((e for e in entries[1:] if same_place(e.path, legacy)), None)
+    if refusal is None and old is not None:
+        refusal = (f"a worktree named {name} already exists in the legacy location {old.path} (remove would be "
                    "ambiguous): move it into the worktrees folder or pick another name")
     if refusal is None and ref_sha(main, f"refs/heads/{branch}") is not None:
         refusal = f"branch {branch} already exists (add makes a NEW branch)"
@@ -431,13 +482,23 @@ def cmd_remove(repo: Path, name: str, *, unlink_links: bool, foreign: bool, forc
     dest = worktree_path(main, name)
     legacy = legacy_path(main, name)
 
+    # A link is never resolved to a worktree: not the folder (it would alias every name below it), not either path.
+    refusal = (folder_problem(folder) if path_is_link(folder) else None) or link_refusal(dest) or link_refusal(legacy)
+    if refusal is not None:
+        say(f"refused: {refusal}")
+        say(f"WORKTREE REMOVE: REFUSED {name}")
+        return 1
+
     def registered(path: Path) -> Entry | None:
-        return next((e for e in entries[1:] if same_path(e.path, path) and not same_path(e.path, main)), None)
+        """The worktree registered AT *path* (``same_place``: its own path, never through a link)."""
+        return next((e for e in entries[1:] if same_place(e.path, path) and not same_place(e.path, main)), None)
 
     in_folder, in_legacy = registered(dest), registered(legacy)
     if in_folder is not None and in_legacy is not None:
-        say(f"refused: ambiguous name {name}: both {dest} and the legacy {legacy} are worktrees; move or remove "
-            "one by hand (git worktree move <old path> <new path>), then run remove again")
+        say(f"refused: ambiguous name {name}: both {in_folder.path} and the legacy {in_legacy.path} are worktrees; "
+            f"move one of them under another name, for example git worktree move {in_legacy.path} "
+            f"{folder / '<other name>'} (never git worktree remove: it skips these checks and can follow a link), "
+            "then run remove again")
         say(f"WORKTREE REMOVE: REFUSED {name}")
         return 1
     entry = in_folder or in_legacy

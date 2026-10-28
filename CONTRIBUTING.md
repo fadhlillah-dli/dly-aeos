@@ -315,13 +315,16 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   follow the link and delete the real environment. `list` shows every worktree with merged, pushed, marker and
   LINKS columns, and flags `legacy-location` on a worktree made before 2026-10-28 as a sibling
   `<main checkout>-wt-<name>`. `remove <name>` finds the worktree in the folder or, for those older ones, in the
-  legacy location (a name used in both places is refused as ambiguous), and refuses a worktree that holds a link,
-  has no marker (`--foreign`), has uncommitted changes, or whose branch is neither merged into origin/main nor
-  pushed (`--force`); `--unlink-links` removes only the link entries, then scans again. After a removal from the
-  folder it deletes the folder too once it is empty (`rmdir`, never a link). Merged and pushed come from the
-  remote-tracking refs of the last `git fetch`. To move an older worktree into the folder, create the folder and
-  give the full target path: `git worktree move <main checkout>-wt-<name> <main checkout>-worktrees/<name>`
-  (on an existing directory as target, git would nest the worktree under its old name).
+  legacy location (a name used in both places is refused as ambiguous: move one of them with `git worktree move`,
+  never `git worktree remove` by hand; a link at either path, or a `<main checkout>-worktrees` that is a link, is
+  refused and never followed; on macOS and Windows `Old` and `old` are the same name), and refuses a worktree that
+  holds a link, has no marker (`--foreign`), has uncommitted changes, or whose branch is neither merged into
+  origin/main nor pushed (`--force`); `--unlink-links` removes only the link entries, then scans again. After a
+  removal from the folder it deletes the folder too once it is empty (`rmdir`, never a link). Merged and pushed
+  come from the remote-tracking refs of the last `git fetch`. To move an older worktree into the folder, create
+  the folder and give the full target path:
+  `git worktree move <main checkout>-wt-<name> <main checkout>-worktrees/<name>` (on an existing directory as
+  target, git would nest the worktree under its old name).
 - **`scripts/ci_status.py`** gives one verdict for one exact commit: `--sha <40-hex>`, `--pr <n>`
   (`--expect-sha <sha>` exits 1 if the pull request points at another commit) or `--after-merge <n>` (the merge
   commit on `main`). It reads the check runs with `gh api` and the required contexts from the repository

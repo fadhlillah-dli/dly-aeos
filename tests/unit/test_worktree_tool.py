@@ -121,11 +121,28 @@ def branch_exists(repo, branch):
                           capture_output=True, text=True, check=False).returncode == 0
 
 
+WINERROR_PRIVILEGE_NOT_HELD = 1314  # Windows without Developer Mode or SeCreateSymbolicLinkPrivilege
+
+
+def host_cannot_symlink(exc, platform=sys.platform):
+    """Only these mean the HOST cannot create symlinks; every other error is a test or layout defect."""
+    if isinstance(exc, NotImplementedError):
+        return True
+    return (platform == "win32" and isinstance(exc, OSError)
+            and getattr(exc, "winerror", None) == WINERROR_PRIVILEGE_NOT_HELD)
+
+
 def make_symlink(target, link):
+    """Skip only on a host that truly cannot create symlinks. A missing parent (a worktree that is not where the
+    test expects it) or any other error fails loudly: a skip would hide a link-safety bite test as green."""
+    parent = Path(link).parent
+    assert parent.is_dir(), f"make_symlink: parent directory {parent} does not exist (layout changed?); not a skip"
     try:
         os.symlink(target, link, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("this host cannot create symlinks (needs privilege)")
+    except (OSError, NotImplementedError) as exc:
+        if host_cannot_symlink(exc):
+            pytest.skip(f"this host cannot create symlinks ({type(exc).__name__}: needs privilege or support)")
+        raise
 
 
 @pytest.fixture
@@ -140,6 +157,76 @@ def sentinel(tmp_path):
 
 def sentinel_intact(d):
     return (d / "lib" / "keep.txt").read_text(encoding="utf-8") == "precious\n" and (d / "pyvenv.cfg").is_file()
+
+
+def require_case_insensitive_fs(tmp_path):
+    probe = tmp_path / "case-probe"
+    probe.write_text("x\n", encoding="utf-8")
+    if not (tmp_path / "CASE-PROBE").exists():
+        pytest.skip("the temporary filesystem is case-sensitive: Old and old are different directories here")
+
+
+def registered_paths(repo):
+    return [line[len("worktree "):] for line in g(repo, "worktree", "list", "--porcelain").splitlines()
+            if line.startswith("worktree ")]
+
+
+LINK_REFUSAL = "is a link, not a worktree: delete only the link entry by hand (rm, never rm -r"
+
+
+# ------------------------------------------------------------------------------------------------ test helpers
+def without_skip(fn, *args):
+    """Call *fn*; a pytest skip raised by it fails the caller (a helper bite test must never become a skip)."""
+    try:
+        return fn(*args)
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"skipped instead of failing: {exc}")
+
+
+def test_make_symlink_fails_loudly_when_the_parent_directory_is_missing(tmp_path):
+    """Bite for the helper: a layout regression (the worktree is not where the test expects it) must turn the
+    link-safety bite tests red, never into skips that a suite run counts as green."""
+    link = tmp_path / "no-such-worktree" / ".venv"
+    with pytest.raises(AssertionError) as caught:
+        without_skip(make_symlink, tmp_path, link)
+    assert f"make_symlink: parent directory {link.parent} does not exist (layout changed?); not a skip" in str(
+        caught.value)
+    assert not os.path.lexists(link)
+
+
+def test_make_symlink_reraises_errors_that_do_not_mean_the_host_lacks_symlinks(tmp_path, monkeypatch):
+    def refuse(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "symlink", refuse)
+    with pytest.raises(PermissionError):
+        without_skip(make_symlink, tmp_path, tmp_path / "link")
+    # near misses: only a missing OS feature, or the Windows privilege error, is a real "cannot" and skips
+    assert host_cannot_symlink(NotImplementedError())
+
+    class PrivilegeNotHeld(OSError):
+        winerror = WINERROR_PRIVILEGE_NOT_HELD
+
+    assert host_cannot_symlink(PrivilegeNotHeld(1, "privilege"), platform="win32")
+    assert not host_cannot_symlink(PrivilegeNotHeld(1, "privilege"), platform="darwin")
+    assert not host_cannot_symlink(FileNotFoundError(2, "missing"), platform="win32")
+    assert not host_cannot_symlink(PermissionError(13, "denied"), platform="win32")
+
+    def unsupported(*_args, **_kwargs):
+        raise NotImplementedError("no symlinks here")
+
+    monkeypatch.setattr(os, "symlink", unsupported)
+    with pytest.raises(pytest.skip.Exception, match="this host cannot create symlinks"):
+        make_symlink(tmp_path, tmp_path / "link")
+
+
+def test_make_symlink_near_miss_into_an_existing_directory_creates_the_link(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    make_symlink(target, tmp_path / "link")  # skips only on a host that truly cannot create symlinks
+    assert os.path.islink(tmp_path / "link")
+    with pytest.raises(FileExistsError):  # a second link at the same path is an error, not a skip
+        without_skip(make_symlink, target, tmp_path / "link")
 
 
 # ------------------------------------------------------------------------------------------------ add
@@ -203,6 +290,42 @@ def test_add_refuses_a_name_that_a_legacy_worktree_already_uses(repo, capsys):
     assert not branch_exists(repo, "feat/new-old")
     # near miss: another name is free
     assert run(repo, capsys, "add", "new", "feat/new")[0] == 0
+
+
+def test_add_refuses_a_case_variant_of_a_legacy_name_on_a_case_insensitive_filesystem(repo, capsys, tmp_path):
+    """On the default macOS APFS (and NTFS) main-wt-Old IS main-wt-old: a guard that compares path text with the
+    case kept would accept 'add Old' and make 'remove old' silently pick one of the two."""
+    require_case_insensitive_fs(tmp_path)
+    add_legacy(repo, "old", "feat/old")
+    code, out = run(repo, capsys, "add", "Old", "feat/Old-new")
+    assert code == 1, out
+    assert f"refused: a worktree named Old already exists in the legacy location {legacy_dir(repo, 'old')}" in out
+    assert out.splitlines()[-1] == "WORKTREE ADD: REFUSED Old"
+    assert not os.path.lexists(wt_folder(repo)) and not branch_exists(repo, "feat/Old-new")
+    # near miss: a name that differs in more than case is free
+    code, out = run(repo, capsys, "add", "other", "feat/other")
+    assert code == 0, out
+
+
+def test_add_refuses_a_link_at_the_folder_path_or_the_legacy_path_of_the_name(repo, capsys, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    make_symlink(elsewhere, legacy_dir(repo, "lnk"))
+    code, out = run(repo, capsys, "add", "lnk", "feat/lnk")
+    assert code == 1, out
+    assert f"refused: {legacy_dir(repo, 'lnk')} {LINK_REFUSAL}" in out
+    assert out.splitlines()[-1] == "WORKTREE ADD: REFUSED lnk"
+    assert not os.path.lexists(wt_folder(repo)) and not branch_exists(repo, "feat/lnk")
+    wt_folder(repo).mkdir()
+    make_symlink(elsewhere, wt_dir(repo, "inner"))
+    code, out = run(repo, capsys, "add", "inner", "feat/inner")
+    assert code == 1, out
+    assert f"refused: {wt_dir(repo, 'inner')} {LINK_REFUSAL}" in out
+    assert os.path.islink(wt_dir(repo, "inner")) and list(elsewhere.iterdir()) == []
+    assert not branch_exists(repo, "feat/inner")
+    # near miss: a name with no link at either path is accepted next to them
+    code, out = run(repo, capsys, "add", "plain", "feat/plain")
+    assert code == 0, out
 
 
 def test_add_removes_the_folder_it_created_when_git_refuses(repo, capsys):
@@ -508,7 +631,11 @@ def test_remove_refuses_a_name_that_exists_in_the_folder_and_the_legacy_location
     old = add_legacy(repo, "dup", "feat/dup-old")
     code, out = run(repo, capsys, "remove", "dup")
     assert code == 1, out
-    assert (f"refused: ambiguous name dup: both {wt_dir(repo, 'dup')} and the legacy {old} are worktrees") in out
+    assert (f"refused: ambiguous name dup: both {wt_dir(repo, 'dup')} and the legacy {old} are worktrees; "
+            f"move one of them under another name, for example git worktree move {old} "
+            f"{wt_folder(repo) / '<other name>'} (never git worktree remove: it skips these checks and can follow "
+            "a link), then run remove again") in out
+    assert "or remove" not in out  # never advise a manual removal: it skips the link scan (LESSONS L4)
     assert out.splitlines()[-1] == "WORKTREE REMOVE: REFUSED dup"
     assert wt_dir(repo, "dup").is_dir() and old.is_dir()
     # near miss: once the legacy one is moved under another name, both names resolve
@@ -516,6 +643,98 @@ def test_remove_refuses_a_name_that_exists_in_the_folder_and_the_legacy_location
     assert run(repo, capsys, "remove", "dup")[0] == 0
     assert run(repo, capsys, "remove", "dup-old")[0] == 0
     assert not os.path.lexists(wt_folder(repo))
+
+
+def test_remove_refuses_a_case_variant_ambiguity_on_a_case_insensitive_filesystem(repo, capsys, tmp_path):
+    require_case_insensitive_fs(tmp_path)
+    old = add_legacy(repo, "old", "feat/old")
+    upper = wt_dir(repo, "Old")  # made by hand: the tool itself refuses this name now
+    g(repo, "worktree", "add", "--no-track", "-b", "feat/upper-old", str(upper), "origin/main")
+    (Path(g(upper, "rev-parse", "--absolute-git-dir")) / wt_tool.MARKER).write_text("x\n", encoding="utf-8")
+    code, out = run(repo, capsys, "remove", "old")
+    assert code == 1, out
+    assert f"refused: ambiguous name old: both {upper} and the legacy {old} are worktrees" in out
+    assert out.splitlines()[-1] == "WORKTREE REMOVE: REFUSED old"
+    assert upper.is_dir() and old.is_dir() and len(registered_paths(repo)) == 3
+    # near miss: once the legacy one is moved under another name, 'old' names the folder worktree Old
+    g(repo, "worktree", "move", str(old), str(wt_dir(repo, "old-legacy")))
+    code, out = run(repo, capsys, "remove", "old")
+    assert code == 0, out
+    assert f"removed: {upper}" in out and "(legacy location)" not in out
+    assert wt_dir(repo, "old-legacy").is_dir()
+
+
+def test_remove_refuses_a_link_at_the_legacy_path_to_a_folder_worktree_and_leaves_both(repo, capsys):
+    """A compatibility link main-wt-keep -> main-worktrees/keep left after a move is not a second worktree: it is
+    refused with its own message (not as ambiguous) and neither the link nor the worktree is touched."""
+    assert run(repo, capsys, "add", "keep", "feat/keep")[0] == 0
+    link = legacy_dir(repo, "keep")
+    make_symlink(wt_dir(repo, "keep"), link)
+    code, out = run(repo, capsys, "remove", "keep")
+    assert code == 1, out
+    assert f"refused: {link} {LINK_REFUSAL}" in out and "ambiguous" not in out
+    assert out.splitlines()[-1] == "WORKTREE REMOVE: REFUSED keep"
+    assert os.path.islink(link) and (wt_dir(repo, "keep") / "README.md").is_file()
+    assert str(wt_dir(repo, "keep")) in registered_paths(repo)
+    # near miss: with the link entry deleted by hand, the one worktree is removed
+    os.unlink(link)
+    code, out = run(repo, capsys, "remove", "keep")
+    assert code == 0, out
+    assert f"removed: {wt_dir(repo, 'keep')}" in out and "(legacy location)" not in out
+
+
+def test_remove_never_resolves_a_name_through_a_link_to_another_worktree(repo, capsys):
+    assert run(repo, capsys, "add", "other", "feat/other")[0] == 0
+    other = wt_dir(repo, "other")
+    make_symlink(other, legacy_dir(repo, "ghost"))
+    code, out = run(repo, capsys, "remove", "ghost")
+    assert code == 1, out
+    assert f"refused: {legacy_dir(repo, 'ghost')} {LINK_REFUSAL}" in out
+    make_symlink(other, wt_dir(repo, "ghost2"))
+    code, out = run(repo, capsys, "remove", "ghost2")
+    assert code == 1, out
+    assert f"refused: {wt_dir(repo, 'ghost2')} {LINK_REFUSAL}" in out
+    assert (other / "README.md").is_file() and str(other) in registered_paths(repo)
+    assert branch_exists(repo, "feat/other")
+    # near miss: the worktree's own name still removes it (the stray link entry keeps the folder)
+    code, out = run(repo, capsys, "remove", "other")
+    assert code == 0, out
+    assert f"kept folder: {wt_folder(repo)} (1 entry left)" in out and os.path.islink(wt_dir(repo, "ghost2"))
+
+
+def test_remove_refuses_while_the_worktrees_folder_is_a_link(repo, capsys):
+    """A folder link would alias every name below it: main-worktrees -> <parent> makes the folder path of the
+    name main-wt-x the legacy worktree x."""
+    legacy = add_legacy(repo, "x", "feat/x")
+    make_symlink(repo.parent, wt_folder(repo))
+    code, out = run(repo, capsys, "remove", "main-wt-x")
+    assert code == 1, out
+    assert (f"refused: {wt_folder(repo)} is a symlink, junction or reparse point; the worktrees folder must be "
+            "a real directory") in out
+    assert out.splitlines()[-1] == "WORKTREE REMOVE: REFUSED main-wt-x"
+    assert legacy.is_dir() and str(legacy) in registered_paths(repo)
+    # near miss: with the folder link deleted by hand, the legacy worktree is removed by its own name
+    os.unlink(wt_folder(repo))
+    code, out = run(repo, capsys, "remove", "x")
+    assert code == 0, out
+    assert f"removed: {legacy} (legacy location)" in out
+
+
+def test_same_place_matches_a_registered_path_by_itself_never_through_a_link(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    other = tmp_path / "other"
+    other.mkdir()
+    assert wt_tool.same_place(real, real) and wt_tool.same_place(str(real), real)
+    assert not wt_tool.same_place(real, other)
+    assert not wt_tool.same_place(real, tmp_path / "missing")  # one exists, the other does not
+    # both missing: the path text decides, case folded only where the default filesystem ignores case
+    assert wt_tool.same_place(tmp_path / "gone", tmp_path / "gone")
+    assert wt_tool.same_place(tmp_path / "gone", str(tmp_path / "y" / ".." / "gone"))  # text is normalised
+    assert wt_tool.same_place(tmp_path / "gone", tmp_path / "Gone") == (sys.platform in ("darwin", "win32"))
+    assert not wt_tool.same_place(tmp_path / "gone", tmp_path / "gone2")
+    make_symlink(real, tmp_path / "alias")
+    assert not wt_tool.same_place(real, tmp_path / "alias") and not wt_tool.same_place(tmp_path / "alias", real)
 
 
 # ------------------------------------------------------------------------------------------------ list
