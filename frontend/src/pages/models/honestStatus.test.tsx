@@ -244,6 +244,30 @@ describe("Models & Routes: a route the router cannot authenticate is not active 
     expect(remedy).toHaveTextContent("aeos vault unseal");
   });
 
+  it("bite: an OFFICE-only active route in a PERSONAL session is not 'tidak dapat dipakai' and offers no remedy", async () => {
+    const office = { ...keyless, route_key: "opencode-zen/office", display_name: "Office Trial", eligible_domains: ["OFFICE"],
+      credential: { state: "NOT_ELIGIBLE_IN_DOMAIN", ref: null, domain: "PERSONAL",
+        reason: "route not eligible in PERSONAL (eligible_domains ['OFFICE']): the router never serves it to a task of this domain; its key is checked only in a session of an eligible domain" } };
+    mountWith([office, CAND1], { total: 2, approved: 0 });
+    expect(await screen.findByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 2 rute");
+    expect(screen.getByText("TRIAL · aktif hanya di domain lain")).toBeInTheDocument();
+    expect(screen.queryByTestId("route-credential-blocked")).toBeNull();
+    expect(screen.queryByText(/tidak dapat dipakai/)).toBeNull();
+    fireEvent.click(screen.getByText("Office Trial"));
+    await screen.findByRole("dialog", { name: /Detail rute opencode-zen\/office/ });
+    expect(screen.queryByTestId("route-credential-remedy")).toBeNull();
+    expect(screen.queryByText(/aeos secrets set/)).toBeNull();
+  });
+
+  it("a WITHHELD project reference shows neither its name nor a remedy", async () => {
+    const hidden = { ...keyless, display_name: "Project Trial", credential: { state: "WITHHELD", ref: null, domain: "PERSONAL",
+      reason: "credential reference private to a project not visible in this session: name and key status withheld" } };
+    mountWith([hidden], { total: 1, approved: 0 });
+    expect(await screen.findByText("TRIAL · status kunci tidak ditampilkan")).toBeInTheDocument();
+    expect(screen.queryByTestId("route-credential-blocked")).toBeNull();
+    expect(screen.getByTestId("routes-active-summary")).toHaveTextContent("Aktif: 0 dari 1 rute");
+  });
+
   it("fails closed on an older server that sends no credential block", async () => {
     const { credential: _drop, ...noBlock } = TRIAL as Record<string, unknown>;
     void _drop;

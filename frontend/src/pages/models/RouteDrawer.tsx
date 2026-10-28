@@ -274,6 +274,8 @@ function credentialCell(r: RouteItem): ReactNode {
     NOT_NEEDED: ["NOT_APPLICABLE", "Tidak perlu kunci"],
     MISSING: ["MISSING", "Belum tersedia"],
     UNAVAILABLE: ["UNKNOWN", "Tidak dapat diperiksa (vault terkunci/tidak terjangkau)"],
+    NOT_ELIGIBLE_IN_DOMAIN: ["NOT_APPLICABLE", "Tidak diperiksa: rute tidak berlaku di domain sesi ini"],
+    WITHHELD: ["UNKNOWN", "Disembunyikan: referensi proyek di luar cakupan Anda"],
   };
   const [status, text] = label[c.state] ?? ["UNKNOWN", c.state];
   return (

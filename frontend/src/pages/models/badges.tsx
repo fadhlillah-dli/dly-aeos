@@ -36,10 +36,25 @@ export function isLapsedRoute(r: Pick<RouteItem, "status" | "active_decision">):
   return (r.status === "TRIAL" || r.status === "APPROVED") && !r.active_decision;
 }
 
+/** Activated (TRIAL/APPROVED with an ACTIVE decision) but the key cannot be judged from this session: the route is not
+ * eligible in the session's domain (NOT_ELIGIBLE_IN_DOMAIN: the router never serves it here and its key is checked only
+ * in a session of its own domain), or its reference is private to a project outside the viewer's scope (WITHHELD).
+ * Neither "usable" nor "unusable": a neutral badge, no remedy, not counted as active in this session. */
+export function isCredentialElsewhereRoute(r: RouteState): boolean {
+  const state = r.credential?.state;
+  return (
+    (r.status === "TRIAL" || r.status === "APPROVED") &&
+    !!r.active_decision &&
+    (state === "NOT_ELIGIBLE_IN_DOMAIN" || state === "WITHHELD")
+  );
+}
+
 /** Activated (TRIAL/APPROVED with an ACTIVE decision) but the router cannot authenticate it: the key is not stored,
  * the store is sealed, or the credential path is not configured. A warning, never green, never counted as active. */
 export function isCredentialBlockedRoute(r: RouteState): boolean {
-  return (r.status === "TRIAL" || r.status === "APPROVED") && !!r.active_decision && !credentialUsable(r);
+  return (
+    (r.status === "TRIAL" || r.status === "APPROVED") && !!r.active_decision && !credentialUsable(r) && !isCredentialElsewhereRoute(r)
+  );
 }
 
 /** Why an activated route cannot be used, in the owner's words (badge label suffix). */
@@ -71,6 +86,20 @@ export function RouteStatusBadge({ route }: { route: RouteState }) {
         label={`${route.status} · keputusan kedaluwarsa/tidak berlaku`}
         title={`${route.status}: tidak ada keputusan ACTIVE untuk konfigurasi saat ini; router menolak rute ini`}
       />
+    );
+  if (isCredentialElsewhereRoute(route))
+    return (
+      <span data-testid="route-credential-elsewhere">
+        <StatusBadge
+          status={route.credential?.state === "WITHHELD" ? "UNKNOWN" : "NOT_APPLICABLE"}
+          label={
+            route.credential?.state === "WITHHELD"
+              ? `${route.status} · status kunci tidak ditampilkan`
+              : `${route.status} · aktif hanya di domain lain`
+          }
+          title={`${route.credential?.reason ?? ""}; tidak dihitung aktif di sesi ini`}
+        />
+      </span>
     );
   if (isCredentialBlockedRoute(route))
     return (

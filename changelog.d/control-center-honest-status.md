@@ -22,8 +22,12 @@
   ACTIVE decision but no stored key was green "Aktif · TRIAL", counted and sorted first while Doctor
   `CAN_RUN_WORKER` was BLOCKED. `/api/routes` items carry a `credential` block (`state` PRESENT, MISSING, UNAVAILABLE
   or NOT_NEEDED, `ref`, `reason`, `domain`) from the routing service's own credential rules, one secret-store status
-  lookup per reference and list call (metadata only, never a value, never a provider call; an OFFICE session never
-  looks up a PERSONAL reference); `counts.approved` and the Models page count a route as active only with PRESENT or
+  lookup per reference and list call (metadata only, never a value, never a provider call). The block is evaluated in
+  the session's domain and only for a route eligible there: otherwise it is `NOT_ELIGIBLE_IN_DOMAIN` with nothing
+  looked up (an OFFICE-only route in a PERSONAL session reads "TRIAL · aktif hanya di domain lain", not "tidak dapat
+  dipakai", and no remedy). A reference name private to another domain (`office/` outside OFFICE) or to a project the
+  viewer cannot see is never quoted (a path problem keeps its reason with the name replaced; an otherwise usable
+  `projects/` reference is `WITHHELD`: neither its name nor its status); `counts.approved` and the Models page count a route as active only with PRESENT or
   NOT_NEEDED and otherwise show "Aktif, tidak dapat dipakai: kunci belum disimpan" (or "... vault terkunci"), not
   sorted first, with `aeos secrets set <ref>` (or `aeos vault unseal`) in the drawer. `secret.presence_changed` and
   `secret.store_changed` (source `secrets`) now refresh routes, route detail and Readiness; the Models page refetches

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query
@@ -18,6 +19,7 @@ from aeos.events.service import emit
 from aeos.identity.facade import Principal
 from aeos.models.cost import QuotaState, UsageLedgerEntry
 from aeos.models.decisions import Decision
+from aeos.models.portfolio import Project
 from aeos.models.routing import ModelRoute
 from aeos.routing import catalog, free_tier, service
 
@@ -191,9 +193,10 @@ def _subscription_view(session: Session, r: ModelRoute, principal: Principal) ->
 
 
 def _credential_domain(r: ModelRoute, principal: Principal) -> str:
-    """The domain the credential block is evaluated for: the session's selected domain (the router only serves the
-    domain a task carries, and another domain's secret references are never looked up from this session); with no
-    selected domain, the first of the route's domains the principal may access (PERSONAL when none is listed)."""
+    """The domain the credential block is evaluated for: the session's selected domain (another domain's secret
+    references are never looked up from this session; a route not eligible in it is reported NOT_ELIGIBLE_IN_DOMAIN,
+    since the router never serves it to this domain's tasks); with no selected domain, the first of the route's
+    domains the principal may access (PERSONAL when none is listed)."""
     active = getattr(principal, "active_domain", None)
     if active is not None:
         return Domain(active).value
@@ -204,8 +207,23 @@ def _credential_domain(r: ModelRoute, principal: Principal) -> str:
     return Domain.PERSONAL.value
 
 
-def _credential_block(r: ModelRoute, principal: Principal, states: dict[str, str] | None) -> dict[str, Any]:
-    return service.credential_view(r, domain=_credential_domain(r, principal), states=states)
+def _project_visible(session: Session, principal: Principal, domain: str) -> Callable[[str], bool]:
+    """Whether a ``projects/<project>/`` reference may be quoted to *principal* in *domain*: the project exists (by id
+    or key), belongs to *domain* and is inside the principal's project scope."""
+    def visible(project: str) -> bool:
+        p = session.scalars(select(Project).where(or_(Project.id == project, Project.project_key == project))).first()
+        if p is None or p.domain != domain:
+            return False
+        can = getattr(principal, "can_access_project", None)
+        return bool(callable(can) and can(p.id, domain))
+    return visible
+
+
+def _credential_block(session: Session, r: ModelRoute, principal: Principal,
+                      states: dict[str, str] | None) -> dict[str, Any]:
+    domain = _credential_domain(r, principal)
+    return service.credential_view(r, domain=domain, states=states,
+                                   project_visible=_project_visible(session, principal, domain))
 
 
 def _counts_as_active(item: dict[str, Any]) -> bool:
@@ -243,7 +261,7 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "active_decision": _active_decision_view(session, r),
         # metadata only (stored or not, never the value; no provider call): the router rejects a route whose key is
         # not stored or whose store cannot answer, so the dashboard must not show it as usable
-        "credential": _credential_block(r, principal, credential_states),
+        "credential": _credential_block(session, r, principal, credential_states),
         "quota": ({"state": "EXHAUSTED", "scope": q.scope, "resets_at": _iso(q.resets_at), "source": q.source}
                   if q else {"state": "UNKNOWN_OR_OK", "note": "tidak ada observasi kuota habis"}),
         "source_refs": r.source_refs, "notes": r.notes,

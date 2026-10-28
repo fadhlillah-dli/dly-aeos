@@ -140,7 +140,10 @@ export interface RouteItem {
   quota: { state: string; scope?: string; resets_at?: string | null; source?: string; note?: string };
   /** What the router's credential rules say for the session's domain (metadata only: stored or not, never the value).
    * Only PRESENT (key stored) and NOT_NEEDED (local, loopback, native) let the router use the route; MISSING names the
-   * reference to store (`aeos secrets set <ref>`) or a path problem; UNAVAILABLE = the store is sealed/unreachable.
+   * reference to store (`aeos secrets set <ref>`) or a path problem; UNAVAILABLE = the store is sealed/unreachable;
+   * NOT_ELIGIBLE_IN_DOMAIN = the route does not serve the session's domain (nothing looked up); WITHHELD = the reference
+   * is private to a project outside the viewer's scope (name and status not shown). A name private to another domain
+   * or project is never sent (ref null).
    * Absent on older servers: then a route is never shown as active (fail closed). */
   credential?: RouteCredential;
   source_refs: string[];
@@ -175,7 +178,7 @@ export interface RouteItem {
 }
 
 export interface RouteCredential {
-  state: "PRESENT" | "MISSING" | "UNAVAILABLE" | "NOT_NEEDED" | string;
+  state: "PRESENT" | "MISSING" | "UNAVAILABLE" | "NOT_NEEDED" | "NOT_ELIGIBLE_IN_DOMAIN" | "WITHHELD" | string;
   ref: string | null;
   reason: string | null;
   domain: string;

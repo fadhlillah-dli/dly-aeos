@@ -556,7 +556,9 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   `route.endpoint_set` are emitted once from the routing service, so the CLI and the API record the same event.
   `GET /api/routes` and `GET /api/routes/<key>` carry a `credential` block per route (`state` PRESENT, MISSING,
   UNAVAILABLE or NOT_NEEDED, `ref`, `reason`, `domain`: the session's domain), built from the same rules with one
-  status lookup per reference and list call (metadata only); `counts.approved` and the Models page count a route as
+  status lookup per reference and list call (metadata only). A route not eligible in the session's domain is
+  `NOT_ELIGIBLE_IN_DOMAIN` (nothing looked up); an `office/` name outside OFFICE or a `projects/` name of a project the
+  viewer cannot see is never quoted (`WITHHELD` when the path is otherwise usable); `counts.approved` and the Models page count a route as
   active only with PRESENT or NOT_NEEDED. The Control Center refreshes routes and Readiness on `secret.*` events and
   the Models page refetches once at the nearest decision expiry (`decision.expired` is emitted only when the server
   next reconciles expiries).

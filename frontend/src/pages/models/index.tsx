@@ -178,7 +178,7 @@ export default function ModelsPage() {
             data-testid="routes-active-summary"
             title={
               "Semua rute pekerja di registry (pengawas Max dihitung di bagiannya sendiri); aktif = TRIAL/APPROVED dengan " +
-              "keputusan ACTIVE dan kunci tersimpan (atau tanpa kunci)" +
+              "keputusan ACTIVE dan kunci tersimpan (atau tanpa kunci) di domain sesi ini" +
               (filtered ? ". Angka ini mengabaikan filter; 'ditampilkan' = baris tabel untuk filter ini" : "")
             }
           >
