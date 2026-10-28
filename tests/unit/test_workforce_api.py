@@ -352,3 +352,33 @@ def test_admission_drops_subscription_figures_for_a_principal_who_cannot_see_eve
     assert sub["windows"] is None and sub["spend_hidden"] is True and sub["state"] == "EXHAUSTED"
     assert not {"problems", "warnings", "beyond_plan", "beyond_plan_usd"} & set(sub)
     assert "used_usd" not in str(sub) and "$" not in " ".join(m for _, m in scoped["waits"])
+
+
+def test_admission_drops_route_capacity_figures_for_a_principal_who_cannot_see_every_domain(personal_client, db,
+                                                                                             fakes, monkeypatch):
+    """ADR-0124: the selected route's capacity answer (active tasks, allowance fit, the hold) counts every domain's runs,
+    so a project-scoped principal sees only the route and its cap (L12: one domain's load never shows in another view)."""
+    from aeos.models.identity import User
+    from aeos.workforce import integrations
+
+    p = make_project(db)
+    plan, pv, specs = make_plan(db, p, [{"task_key": "a"}])
+    fakes.approved[plan.id] = pv.id
+    route = make_route(db, key="worker.cap")
+    fakes.route_key = route.route_key
+    seed_and_enable_implementer(db)
+    process_sandbox_exception(db)
+    scheduler.ensure_executions(db, pv.id, actor="t")
+    scheduler.refresh_readiness(db, pv.id)
+    db.commit()
+    figures = {"route_key": route.route_key, "cap": 2, "active_on_route": 1, "hold": {"usd": "1.63", "basis": "PRIOR"},
+               "allowance_fit": {"used_usd": "9.00", "remaining_usd": "3.00", "fits": True}}
+    monkeypatch.setattr(integrations, "route_capacity", lambda session, task, rt: dict(figures))
+    full = personal_client.get(f"/api/tasks/{specs[0].id}/admission").json()
+    assert full["answers"]["route_capacity"]["allowance_fit"]["used_usd"] == "9.00"
+    owner = db.query(User).filter(User.username == "owner").one()
+    owner.project_scope = [p.id]
+    db.commit()
+    scoped = personal_client.get(f"/api/tasks/{specs[0].id}/admission").json()["answers"]["route_capacity"]
+    assert scoped["figures_hidden"] is True and scoped["cap"] == 2
+    assert not {"allowance_fit", "active_on_route", "hold"} & set(scoped) and "9.00" not in str(scoped)
