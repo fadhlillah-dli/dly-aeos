@@ -425,8 +425,8 @@ test runs only on Windows.
 
 #### Claude Code hooks
 
-The committed `.claude/settings.json` registers two Claude Code hooks for anyone who works on this repository with
-Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). Both are fail-open: whatever goes wrong inside
+The committed `.claude/settings.json` registers three Claude Code hooks for anyone who works on this repository with
+Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). All are fail-open: whatever goes wrong inside
 a hook (a missing `python3`, bad input, an exception, a timeout), the session or the prompt goes on unchanged.
 
 - **SessionStart** runs `scripts/claude_hooks/session_facts.py`, which runs `scripts/preflight.py --facts` with the
@@ -443,6 +443,8 @@ a hook (a missing `python3`, bad input, an exception, a timeout), the session or
   a secret seen in chat is burned). A block keeps the secret from the model; Claude Code may still keep the typed text
   in its local prompt history, which is another reason to rotate. Ordinary prose, git SHAs, UUIDs, digests and
   placeholders such as `<your-token>` pass.
+- **PreToolUse** (matcher `Bash`) runs `scripts/claude_hooks/zsh_wordsplit_guard.py` (stdlib only, zsh sessions only):
+  it denies, with the fix, `set -- $var`, `for x in $var` and a bare-glob `$(...)` fed to pytest (LESSONS L14).
 
 To switch them off for yourself, put `"disableAllHooks": true` in `.claude/settings.local.json` (not committed): it
 turns off every hook of the session, not one of them. For a single run use
