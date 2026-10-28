@@ -539,8 +539,9 @@ def test_a_native_review_records_the_binding_the_gate_reads(db, reviewed_world, 
 
 
 def test_a_native_fable_review_never_opens_publication(db, monkeypatch):
-    """A review requested from Fable (the default before the Opus switch of the stage models) is recorded as a
-    PASS, but it never publishes (owner rule 2026-10-28)."""
+    """A review requested from and answered by Fable never publishes (owner rule 2026-10-28). Since ADR-0131 the review
+    path itself records it as FAILED (the gate then refuses NOT_COMPLETED); a COMPLETED Fable record from any other
+    path is refused by the gate's own Opus allow-list (``test_a_fable_pass_bound_to_the_head_is_refused``)."""
     FakeWorkforce().install(monkeypatch)
     monkeypatch.setattr(review, "DEFAULT_REVIEW_MODEL", "fable")
     w = make_world(db)
@@ -548,9 +549,9 @@ def test_a_native_fable_review_never_opens_publication(db, monkeypatch):
     install_doctor(monkeypatch)
     FakeBridge(result=claude_result(review_payload(), model="claude-fable-5-1")).install(monkeypatch)
     out = review.review_run(db, w.run.id, actor="t")
-    assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED"
+    assert out.review.status == "FAILED" and out.review.verdict == "NOT-PROVEN"
     res = gate.publication_review(db, w.run, w.run.head_commit)
-    assert not res.allowed and res.reason == "MODEL" and OPUS_ONLY in res.message
+    assert not res.allowed and res.reason == "NOT_COMPLETED"
 
 
 def test_the_package_lists_the_binary_files_and_the_gate_refuses_them(db, monkeypatch):

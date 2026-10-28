@@ -57,9 +57,9 @@
    review requested, so a Fable request never validates itself (owner rule 2026-10-28: the checkpoint review is Opus,
    never Fable); the identity must also satisfy the review policy (`_model_policy_problem`, the check acceptance
    makes: UNKNOWN or another family than requested never counts; `allowed_models` applies). The latest review
-   decides: a FAIL after a PASS of the same head refuses. Until the Claude bridge stage models switch the default
-   review request to Opus (another branch), a review requested from the Fable default is recorded but never
-   publishes.
+   decides: a FAIL after a PASS of the same head refuses. Since ADR-0131 the review is requested from Opus and a
+   Fable answer is recorded as FAILED; the gate's Opus allow-list stays as its own check for a record from any
+   other path.
 3. **History (amendment 2026-10-28, blind review).** The reviewer sees the net diff `base..head`; worker-made
    commits in between (only possible with a shell) could add content and delete it again, invisible in that diff but
    carried to the remote by the history. Two fixes were weighed: (a) the broker refuses unless the pushed head is one

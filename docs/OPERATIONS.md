@@ -858,7 +858,7 @@ right to commit, push, let alone merge, as the architecture says.
 * **The gate.** Before every push and every PR of a run, the broker checks the run's latest Claude checkpoint review
   (`aeos verify review <run id>`, or the manual package collected with `aeos verify collect-review <review id>`): it
   must be COMPLETED, not MOCK, a PASS that its own HIGH/CRITICAL findings do not contradict, answered by an **Opus**
-  model (owner rule 2026-10-28: never Fable; a Fable review is recorded but never publishes) that also satisfies the
+  model (owner rule 2026-10-28: never Fable, ADR-0131) that also satisfies the
   review policy, of a package that showed the whole diff (the reviewer sees at most 60,000 characters), and bound to
   exactly the head being published (the head named by the review's checkpoint package). This comes after the
   run-state, runtime-head and quarantine checks (a quarantined patch still needs your release decision too) and before
