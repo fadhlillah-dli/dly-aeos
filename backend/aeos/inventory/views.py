@@ -260,9 +260,10 @@ def dimension_values(comp: ComponentReference, latest: dict[tuple[str, str], Com
 
 
 def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift: list[dict[str, Any]],
-                version: dict[str, Any]) -> dict[str, Any]:
+                version: dict[str, Any], *, unadmitted: bool = False) -> dict[str, Any]:
     """The one next step a human can take (§35 "tindakan berikutnya"), derived deterministically from the
-    separate dimensions, drift and coverage; it never runs anything itself."""
+    separate dimensions, drift and coverage; it never runs anything itself. *unadmitted* (see
+    ``dimension_values``): reconcile and Refresh skip the component, so neither is offered for it."""
     classes = {d["drift_class"] for d in drift}
     inst = dims["installation"]
     life = dims["lifecycle_final"]["value"]
@@ -279,9 +280,9 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
                    f"/proposals?component={comp.component_id}")
     if "planned-but-missing" in classes:
         return act("INSTALL_MANUALLY", "Pasang sesuai remedy Readiness (manual, tanpa auto-install)", link="/readiness")
-    if is_probeable(comp) and inst["observation_id"] is None:
+    if not unadmitted and is_probeable(comp) and inst["observation_id"] is None:
         return act("RUN_RECONCILE", "Jalankan aeos inventory reconcile", "aeos inventory reconcile")
-    if inst.get("stale"):
+    if not unadmitted and inst.get("stale"):
         return act("REFRESH", "Segarkan observasi (kedaluwarsa)", "aeos inventory reconcile")
     if "enabled-but-unverified" in classes:
         return act("RUN_FUNCTIONAL_DOCTOR", "Jalankan aeos doctor --functional", "aeos doctor --functional",
@@ -359,7 +360,7 @@ def component_row(comp: ComponentReference, latest: dict[tuple[str, str], Compon
         "dimensions": dims,
         "drift": [{"drift_class": d["drift_class"], "label": d["label"], "severity": d["severity"]}
                   for d in comp_drift],
-        "next_action": next_action(comp, dims, comp_drift, version),
+        "next_action": next_action(comp, dims, comp_drift, version, unadmitted=unadmitted),
         "tombstoned_at": _iso(comp.tombstoned_at), "mode": comp.mode,
     }
     if advanced:
@@ -987,10 +988,10 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
     basis = config_basis(session, {component_id: comp}, latest, now, domain=domain).get(component_id, [])
     state = decision_states(session, {component_id: comp}, domain=domain)[component_id]
     usage, _edges, _runs = rt.collect(session, domain=domain, now=now, project_ids=allowed_project_ids)
+    unadmitted = component_id in unadmitted_probeable(session, {component_id: comp}, domain=domain)
     dims = dimension_values(comp, latest, now, state=state, basis=basis, usage_fact=usage.get(component_id),
                             write_enabled=component_id in write_enabled_components(session, domain),
-                            unadmitted=component_id in unadmitted_probeable(session, {component_id: comp},
-                                                                            domain=domain))
+                            unadmitted=unadmitted)
     rels = component_relations(session, component_id, domain=domain, page_size=500,
                                allowed_project_ids=allowed_project_ids)
     checks = latest_checks_for(session, component_id, domain)
@@ -1085,7 +1086,7 @@ def component_detail(session: Session, component_id: str, *, domain: str | None,
         "lifecycle": dims,
         "admission": {"status": dims["admission"]["value"], "decision_refs": state.decision_refs,
                       "scope": state.scope, "capability_tests": _admission_tests(session, comp, latest, now)},
-        "next_action": next_action(comp, dims, drift, version),
+        "next_action": next_action(comp, dims, drift, version, unadmitted=unadmitted),
         "config_lens": {"present": bool(basis), "basis": basis,
                         "note": "Konfigurasi berlaku hanya dengan dasar eksplisit; nilai default bukan enablement."},
         "access": {**(comp.access or {}), "expiry": _access_expiry(comp, domain),

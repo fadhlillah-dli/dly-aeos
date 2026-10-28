@@ -8,6 +8,9 @@
   in no capability).
 * A TRIAL/PROMOTION on a change_proposal invalidates ``component:<id>`` of its components and no route check; a
   TRIAL on a model_route keeps ``config:routes`` / ``model:route``.
+* A binary probe entry with ``version_args: []`` is presence only (serena, goose, promptfoo, toolhive): their
+  version call writes state or reaches the network, so the binary is located and never run.
+* A candidate nobody admitted is never offered RUN_RECONCILE or REFRESH as its next action.
 
 Every probe runs against the fake runner: no test starts a real binary on the host.
 """
@@ -82,23 +85,30 @@ def _probed(runner) -> set[str]:
     return {Path(c["argv"][0]).name for c in runner.calls}
 
 
+def _inst_obs(db, cid: str) -> ComponentObservation:
+    return db.scalar(select(ComponentObservation).where(ComponentObservation.component_id == cid,
+                                                        ComponentObservation.dimension == "installation")
+                     .order_by(ComponentObservation.observed_at.desc()))
+
+
 # ---------------------------------------------------------------- reconcile targets
 
 
 def test_trial_approved_component_with_a_binary_probe_is_a_reconcile_target(seeded, owner, settings, repo):
-    _decide(seeded, owner, _proposal(seeded, candidates=["serena"]), "TRIAL")
+    _decide(seeded, owner, _proposal(seeded, candidates=["context7"]), "TRIAL")
     seeded.commit()
     runner = _runner()
+    runner.add_binary("pi", "0.9.1\n")
     run = reconcile(seeded, settings, runner=runner, repo=repo)
     seeded.commit()
-    assert "serena" in run.component_status, "TRIAL_APPROVED serena with a binary probe is not a reconcile target"
-    assert run.component_status["serena"]["status"] == "OK"
-    assert run.scope["admitted"] == ["serena"]
-    obs = seeded.scalar(select(ComponentObservation).where(ComponentObservation.component_id == "serena",
-                                                           ComponentObservation.dimension == "installation"))
-    assert obs.status == "INSTALLED" and obs.observed_version == "2.0.0" and obs.operation_ref == "serena --version"
-    assert "serena" in _probed(runner)
-    assert "context7-mcp" not in _probed(runner)  # a candidate without a decision stays unprobed
+    assert "context7" in run.component_status, "TRIAL_APPROVED context7 with a binary probe is not a reconcile target"
+    assert run.component_status["context7"]["status"] == "OK"
+    assert run.scope["admitted"] == ["context7"]
+    obs = _inst_obs(seeded, "context7")
+    assert obs.status == "INSTALLED" and obs.observed_version == "4.3.0"
+    assert obs.operation_ref == "context7-mcp --version"
+    assert "context7-mcp" in _probed(runner)
+    assert "pi" not in _probed(runner)  # a candidate without a decision stays unprobed
 
 
 def test_promotion_admits_too(seeded, owner, settings, repo):
@@ -138,7 +148,7 @@ def test_scoped_refresh_of_an_admitted_candidate_probes_it(seeded, owner, settin
 
 def test_office_decisions_and_office_only_components_never_become_targets(seeded, owner, settings, repo):
     # OFFICE proposal TRIAL on a platform candidate: not counted for probing (§23)
-    _decide(seeded, owner, _proposal(seeded, candidates=["serena"], domain="OFFICE"), "TRIAL", domain="OFFICE")
+    _decide(seeded, owner, _proposal(seeded, candidates=["context7"], domain="OFFICE"), "TRIAL", domain="OFFICE")
     # an OFFICE-only component with a probe, admitted by a PERSONAL decision, is still never a target
     jira = seeded.get(ComponentReference, "jira")
     jira.requirement = "CANDIDATE"  # outside the core set: only admission could make it a target
@@ -149,7 +159,7 @@ def test_office_decisions_and_office_only_components_never_become_targets(seeded
     runner.add_binary("jira-cli", "1.0.0\n")
     run = reconcile(seeded, settings, runner=runner, repo=repo)
     seeded.commit()
-    assert not {"serena", "jira-cli"} & _probed(runner)
+    assert not {"context7-mcp", "jira-cli"} & _probed(runner)
     assert run.scope.get("admitted", []) == []
     blob = json.dumps({"scope": run.scope, "summary": run.summary, "status": run.component_status})
     assert not [c for c in OFFICE_ONLY if f'"{c}"' in blob]
@@ -189,14 +199,14 @@ def _admitted_check(settings, db):
 
 def test_admitted_component_without_a_probe_is_listed_as_configured(seeded, owner, settings):
     assert _admitted_check(settings, seeded).status == "VERIFIED"
-    _decide(seeded, owner, _proposal(seeded, candidates=["goose", "serena"]), "TRIAL")
+    _decide(seeded, owner, _proposal(seeded, candidates=["hermes", "serena"]), "TRIAL")
     seeded.commit()
     res = _admitted_check(settings, seeded)
     assert res.status == "CONFIGURED" and res.severity == "INFO"
     listed = res.observed_evidence["admitted_unprobed"]
-    assert [u["component_id"] for u in listed] == ["goose"]  # serena has a binary probe
+    assert [u["component_id"] for u in listed] == ["hermes"]  # serena has a (presence-only) binary probe
     assert listed[0]["reason"].startswith("Tidak diprobe")
-    assert "goose" in res.summary
+    assert "hermes" in res.summary
 
 
 def test_admitted_unprobed_check_blocks_no_capability():
@@ -264,7 +274,8 @@ def test_recorded_proposal_trial_stales_the_admission_check(seeded, owner, setti
 # ---------------------------------------------------------------- views: only what reconcile can cover is a gap
 
 # the catalog candidates whose manifest probe is a real binary probe (reconcile probes them only once admitted)
-PROBED_CANDIDATES = {"pi", "serena", "context7", "codebase-memory-mcp", "rtk", "ccusage", "temporal", "copier"}
+PROBED_CANDIDATES = {"pi", "serena", "context7", "codebase-memory-mcp", "rtk", "ccusage", "temporal", "copier",
+                     "goose", "promptfoo", "toolhive"}
 
 
 def _coverage(db, domain="PERSONAL"):
@@ -347,3 +358,128 @@ def test_a_personal_trial_does_not_change_the_office_coverage(seeded, owner, set
         view[0].pop("last_full_reconciled_at", None)
         view[1].pop("at", None)
     assert before == after, "a PERSONAL TRIAL changed the OFFICE coverage or installation view"
+
+
+# ---------------------------------------------------------------- presence-only binary probes
+
+# component -> the binary its presence-only probe looks up (the version call writes state or reaches the network)
+PRESENCE_ONLY = {"serena": "serena", "goose": "goose", "promptfoo": "promptfoo", "toolhive": "thv"}
+
+
+@pytest.mark.parametrize("cid", sorted(PRESENCE_ONLY))
+def test_presence_only_probe_reports_installed_without_running_the_binary(seeded, owner, settings, repo, cid):
+    from aeos.inventory.reconcile import PRESENCE_ONLY_REASON
+
+    binary = PRESENCE_ONLY[cid]
+    _decide(seeded, owner, _proposal(seeded, candidates=[cid]), "TRIAL")
+    seeded.commit()
+    runner = base_runner()
+    runner.add_binary(binary, "9.9.9\n")  # a version the probe must never read
+    run = reconcile(seeded, settings, component_id=cid, runner=runner, repo=repo)
+    seeded.commit()
+    assert runner.calls == [], f"presence-only probe of {cid} started a process: {runner.calls}"
+    assert binary in runner.which_calls
+    assert run.component_status[cid]["status"] == "OK"
+    obs = _inst_obs(seeded, cid)
+    assert obs.status == "INSTALLED" and obs.observed_version is None, (obs.status, obs.observed_version)
+    assert obs.operation_ref == f"which {binary}"
+    assert obs.detail["reason"] == PRESENCE_ONLY_REASON
+    assert obs.detail["version_status"] == "UNKNOWN"
+    assert _installation(seeded, cid)["reason"] == PRESENCE_ONLY_REASON
+
+
+@pytest.mark.parametrize("cid", sorted(PRESENCE_ONLY))
+def test_presence_only_probe_reports_not_installed_when_absent(seeded, owner, settings, repo, cid):
+    _decide(seeded, owner, _proposal(seeded, candidates=[cid]), "TRIAL")
+    seeded.commit()
+    runner = base_runner()
+    reconcile(seeded, settings, component_id=cid, runner=runner, repo=repo)
+    seeded.commit()
+    assert runner.calls == [], f"presence-only probe of {cid} started a process: {runner.calls}"
+    obs = _inst_obs(seeded, cid)
+    assert obs.status == "NOT_INSTALLED" and obs.observed_version is None
+    assert obs.detail["missing"] == [PRESENCE_ONLY[cid]]
+
+
+def test_presence_only_entry_beside_a_version_entry_runs_only_the_version_call(seeded, owner, settings, repo):
+    """Near miss: an entry with version_args still runs (exactly once) and resolves its version."""
+    comp = seeded.get(ComponentReference, "temporal")
+    comp.probe = {"type": "binary", "binaries": [{"name": "temporal-server", "version_args": ["--version"]},
+                                                 {"name": "tdbg", "version_args": []}]}
+    _decide(seeded, owner, _proposal(seeded, candidates=["temporal"]), "TRIAL")
+    seeded.commit()
+    runner = base_runner()
+    runner.add_binary("temporal-server", "temporal version 1.25.0\n")
+    runner.add_binary("tdbg", "1.25.0\n")
+    reconcile(seeded, settings, component_id="temporal", runner=runner, repo=repo)
+    seeded.commit()
+    assert [Path(c["argv"][0]).name for c in runner.calls] == ["temporal-server"]
+    obs = _inst_obs(seeded, "temporal")
+    assert obs.status == "INSTALLED" and obs.observed_version == "temporal-server 1.25.0"
+    assert obs.detail["version_status"] == "UNKNOWN"  # tdbg's version is not read
+
+
+def test_manifest_presence_only_entries_are_exactly_the_tools_with_a_stateful_version_call(seeded):
+    got = {c.component_id: [b["name"] for b in (c.probe or {}).get("binaries") or [] if not b.get("version_args")]
+           for c in seeded.scalars(select(ComponentReference))}
+    assert {cid: names for cid, names in got.items() if names} == {cid: [b] for cid, b in PRESENCE_ONLY.items()}
+
+
+# ---------------------------------------------------------------- next action: never a reconcile it cannot do
+
+
+def _next(db, cid, domain="PERSONAL"):
+    from aeos.inventory import views
+
+    return views.component_detail(db, cid, domain=domain)["next_action"]["code"]
+
+
+def _row_next(db, cid, domain="PERSONAL"):
+    from aeos.inventory import views
+
+    rows = views.list_components(db, domain=domain, q=cid, page_size=200)["items"]
+    return next(r for r in rows if r["component_id"] == cid)["next_action"]["code"]
+
+
+def test_unadmitted_candidate_with_a_probe_is_reviewed_not_reconciled(seeded):
+    for cid in ("serena", "context7"):
+        assert _next(seeded, cid) == "REVIEW_CANDIDATE", (
+            f"{cid} (no admission) asks for a reconcile that skips it: {_next(seeded, cid)}")
+        assert _row_next(seeded, cid) == "REVIEW_CANDIDATE", f"list row of {cid}: {_row_next(seeded, cid)}"
+
+
+def test_an_admitted_component_not_yet_probed_still_gets_run_reconcile(seeded, owner):
+    """Near miss: reconcile covers an admitted candidate, so RUN_RECONCILE is satisfiable for it."""
+    _decide(seeded, owner, _proposal(seeded, candidates=["serena"]), "TRIAL")
+    seeded.commit()
+    assert _next(seeded, "serena") == "RUN_RECONCILE"
+    assert _row_next(seeded, "serena") == "RUN_RECONCILE"
+
+
+def test_a_rejected_candidate_with_a_stale_observation_is_not_offered_refresh(seeded, owner, settings, repo,
+                                                                               monkeypatch):
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+    from aeos.inventory import views
+
+    p = _proposal(seeded, candidates=["context7"])
+    _decide(seeded, owner, p, "TRIAL")
+    seeded.commit()
+    reconcile(seeded, settings, runner=_runner(), repo=repo)
+    seeded.commit()
+    later = utcnow() + timedelta(days=3)  # past every probe TTL
+    monkeypatch.setattr(views, "utcnow", lambda: later)
+    assert _next(seeded, "context7") == "REFRESH"  # near miss: still admitted, a Refresh probes it
+    _decide(seeded, owner, p, "REJECTION")
+    seeded.commit()
+    code = _next(seeded, "context7")
+    assert code not in ("RUN_RECONCILE", "REFRESH"), f"a rejected candidate is offered {code}, which reconcile skips"
+
+
+def test_a_personal_trial_does_not_change_the_office_next_action(seeded, owner):
+    before = _next(seeded, "serena", "OFFICE")
+    _decide(seeded, owner, _proposal(seeded, candidates=["serena"]), "TRIAL")
+    seeded.commit()
+    assert _next(seeded, "serena") == "RUN_RECONCILE"  # the PERSONAL view did change
+    assert _next(seeded, "serena", "OFFICE") == before == "REVIEW_CANDIDATE"

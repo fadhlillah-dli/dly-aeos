@@ -3,7 +3,8 @@
 1. Take the desired manifest (loading it first if the DB has none) for the selected scope. The full scope is
    every REQUIRED/OPTIONAL component with a probe plus every component a human admitted (TRIAL_APPROVED/APPROVED,
    PERSONAL or platform decisions only) that has a probe; DISCOVERED/UNDER_REVIEW candidates are never probed.
-2. Run the allowed, non-LLM, read-only probes: version commands with timeouts, loopback health URLs,
+2. Run the allowed, non-LLM, read-only probes: version commands with timeouts (or a lookup only, never a run, for
+   a binary whose version call writes state or reaches the network), loopback health URLs,
    scoped repository/lockfile/config reads. No machine-wide scans; no functional write tests.
 3. Store observations with source identity, timestamp, scope, resolved version, a redacted
    operation reference and an expiry.
@@ -83,6 +84,8 @@ ADMITTED_STATES = frozenset({"TRIAL_APPROVED", "APPROVED"})
 ADMISSION_DOMAIN = "PERSONAL"
 DEFAULT_TTL = 3600
 DECLARATION_TTL = 86400
+# A binary probe entry with ``version_args: []`` is presence only: located, never run, version UNKNOWN.
+PRESENCE_ONLY_REASON = "versi tidak dicek: perintah versinya menulis state atau mengakses jaringan"
 
 # Managed-scope sources and the registered component that owns what they declare.
 SOURCE_OWNERS = {
@@ -173,7 +176,14 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             if rejected_path:
                 rejected[name] = ctx.logical(rejected_path) or rejected_path
             continue
-        argv = [path, *b.get("version_args", [])]
+        if not b.get("version_args"):
+            # presence only (``version_args: []``): the tool's version call writes state or reaches the network,
+            # so the binary is never run; it is located on PATH/settings only and its version stays UNKNOWN
+            found.append({"name": name, "lookup": lookup, "location": ctx.logical(path), "version": None,
+                          "exit_code": None, "error": None, "output": None, "operation_ref": f"which {name}",
+                          "presence_only": True, "digest": file_digest(path)})
+            continue
+        argv = [path, *b["version_args"]]
         rr = ctx.runner.run(argv, timeout=timeout, env=env, cwd=ctx.probe_cwd)
         did_not_run = _did_not_run(rr)
         if did_not_run:
@@ -185,7 +195,7 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             "name": name, "lookup": lookup, "location": ctx.logical(path), "version": version,
             "exit_code": rr.returncode, "error": rr.error,
             "output": clean_output(rr.stdout or rr.stderr, 160) if version is None else None,
-            "operation_ref": " ".join([name, *b.get("version_args", [])]),
+            "operation_ref": " ".join([name, *b["version_args"]]),
             # §37: the installed executable is its own identity (distinct from source repo / release asset):
             # a replaced binary that prints the same --version is visible as a changed digest.
             # (also for a located binary that did not run: the file's hash is a fact, but it is no identity of a
@@ -208,7 +218,8 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
                               f"{f['name']} ({f['error'] or 'exit ' + str(f['exit_code'])})"
                               for f in found if f["name"] in failed)))
     elif found:
-        versions = [f"{f['name']} {f['version']}" if len(found) > 1 else f["version"] for f in found]
+        # a binary without a version (presence only, or unparsed) adds nothing, never the text "None"
+        versions = [f"{f['name']} {f['version']}" if len(found) > 1 and f["version"] else f["version"] for f in found]
         version = "; ".join(v for v in versions if v) or None
         digests = [f["digest"] for f in found if f.get("digest") and f["digest"] != "TOO_LARGE"]
         identity = (digests[0] if len(found) == 1 else "; ".join(f"{f['name']} {f['digest']}" for f in found)) \
@@ -219,6 +230,7 @@ def _probe_binary(ctx: ReconcileContext, comp: ComponentReference, probe: dict[s
             version_status="RESOLVED" if all(f["version"] for f in found) else "UNKNOWN",
             digest_status="OBSERVED" if identity else "UNKNOWN",
             distribution_verified=False,
+            reason=PRESENCE_ONLY_REASON if any(f.get("presence_only") for f in found) else None,
         ))
     health = probe.get("health")
     if health:

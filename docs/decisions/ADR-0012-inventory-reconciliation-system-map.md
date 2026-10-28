@@ -23,10 +23,15 @@ edges, and immutable ArchitectureSnapshots for render/diff/audit.
    decisions only, never an OFFICE-only component) that has a probe; it lists them as `scope.admitted`. A scoped
    refresh of a DISCOVERED/UNDER_REVIEW candidate is SKIPPED. Coverage and the installation dimension use the
    same scope: a candidate with a probe that no human admitted (as seen from the viewing domain) is a not-probed
-   candidate, never a NEVER_PROBED or STALE_OBSERVATIONS gap. A version command that writes state or calls the
-   network is not a probe: such a component keeps probe `none` with the reason, and the Doctor check
-   `inventory.admitted_unprobed` lists admitted components without a probe (CONFIGURED, informational, in no
-   capability). Host-specific probe locations (a venv outside PATH) have no configuration mechanism yet.
+   candidate, never a NEVER_PROBED or STALE_OBSERVATIONS gap, and its next action is never RUN_RECONCILE or
+   REFRESH. A version command that writes state or calls the network is never run: such a binary probe entry
+   has `version_args: []` (presence only), so the binary is located by the shared lookup rule
+   (`aeos.core.binaries`) without starting a process and is INSTALLED with its version UNKNOWN and the reason, or NOT_INSTALLED when absent
+   (`serena`, `goose`, `promptfoo`, `thv`). The Doctor check `inventory.admitted_unprobed` lists admitted
+   components without a probe (CONFIGURED, informational, in no capability). A binary probe already takes a
+   host-specific location from `aeos.yaml`: `settings_override` names a Settings field (as for `claude_binary`,
+   `opencode_binary`, `openbao_binary`) that `_locate_binary` resolves before PATH. The gap for user-space
+   tools outside PATH (a venv, for example `litellm`) is that no Settings field exists for them yet.
 2. **Managed scope** reads are limited to named repository files: `pyproject.toml`,
    `requirements.lock`, `frontend/package-lock.json`, `.github/workflows/*`, `.vscode/extensions.json`
    and MCP/agent configs a non-bare session would load (`.mcp.json`, `.claude/settings.json`,
