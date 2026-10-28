@@ -394,13 +394,15 @@ Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the ve
   It copies the live database with sqlite3's online backup from a read-only connection into a new temporary data
   dir (with a copy of `aeos.yaml`), reads which secret references exist from the real `aeos secrets status` (names
   and expiry, never a value) and gives the dry run an in-memory store that reports exactly those as present, with
-  dummy values. The dry-run process has the null keyring, OpenBao at a closed loopback port, and refuses every TCP
+  dummy values. A real store that cannot be read (OpenBao sealed or stopped) is `OWNER_DRYRUN: FAIL` before anything
+  is copied: start or unseal it and run again. The dry-run process has the null keyring, OpenBao at a closed loopback port, and refuses every TCP
   connect to a non-loopback address and to the loopback ports of the real OpenBao and Control Center. It creates a
   temporary SUPER_ADMIN in the copy (`--user NAME`, default `dryrun-admin`), runs the script against the real app
   through a TestClient with the `--answer` values in order (a prompt with no answer left fails the run), and runs
   the Doctor without `--functional` before and after. It prints the capability table (before -> after) and every
-  check whose status changed. A capability that got worse (READY < DEGRADED < UNKNOWN < BLOCKED) ends with
-  `OWNER_DRYRUN: DEGRADED` (exit 1); `--accept-degrade 'reason'` accepts it with a stated reason (exit 0, the last
+  check whose status changed. A capability that got worse (READY < DEGRADED < UNKNOWN < BLOCKED), or one whose
+  gating check (critical, required or project tier, or a FAILED guard) newly fails under an unchanged status such as
+  `BLOCKED -> BLOCKED`, ends with `OWNER_DRYRUN: DEGRADED` (exit 1); `--accept-degrade 'reason'` accepts it with a stated reason (exit 0, the last
   line says `OWNER_DRYRUN: DEGRADED-ACCEPTED`, never OK). Otherwise `OWNER_DRYRUN: OK` (exit 0); a harness or script
   failure, or a copy that is not at this checkout's migration head, is `OWNER_DRYRUN: FAIL` (exit 2). The temporary
   dir is removed in every case. Show the capability diff together with the commands before they reach the owner

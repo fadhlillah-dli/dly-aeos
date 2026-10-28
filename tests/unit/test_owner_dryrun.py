@@ -5,8 +5,9 @@ CAN_RUN_WORKER BLOCKED. The harness mirrors which secrets exist and compares the
 after. Hermetic: the 'live' database is a synthetic one in tmp, the presence set is a fake (the real
 ``aeos secrets status`` never runs here), the SecretGuard of tests/conftest.py stays on, and the owner scripts are
 tiny fakes written into tmp. Bite tests: a script that disables the only keyed WORKER route is red with
-"CAN_RUN_WORKER: READY -> BLOCKED" (exit 1); the same with --accept-degrade exits 0 and prints the reason; a script
-that changes nothing relevant is green (OWNER_DRYRUN: OK); a script without run() and a prompt without an answer
+"CAN_RUN_WORKER: READY -> BLOCKED" (exit 1), and also when the gate was already BLOCKED (a critical check that newly
+fails); the same with --accept-degrade exits 0 and prints the reason; a script that changes nothing relevant is
+green (OWNER_DRYRUN: OK); a script without run(), a prompt without an answer and an unavailable real secret store
 fail (exit 2) with their message. The live file is byte-identical afterwards and the temporary dir is gone.
 """
 
@@ -215,6 +216,33 @@ def test_without_the_credential_in_the_real_store_the_gate_is_not_ready_before(l
     row = _cap_row(out, "CAN_RUN_WORKER")
     assert row[1] == "BLOCKED", out
     assert code == 0 and "route.worker_key" not in out.split("Checks whose status changed")[1].split("OWNER_DRYRUN")[0]
+
+
+@USES
+def test_a_gating_check_that_newly_fails_under_an_already_blocked_capability_is_red(live, tmp_path, capsys):
+    """Review finding: BLOCKED -> BLOCKED hid route.registry CONFIGURED -> MISSING. The copy may be BLOCKED where the
+    real system is READY, so a critical check that newly fails is a regression even when the status stays."""
+    live["state"]["present"] = {}
+    code = od.main([_script(tmp_path, "disable", DISABLE), "--answer", "JA"])
+    out = capsys.readouterr().out
+    assert code == 1, out
+    assert "CAN_RUN_WORKER: BLOCKED -> BLOCKED (gating check newly failing: route.registry CONFIGURED -> MISSING" in out
+    assert _cap_row(out, "CAN_RUN_WORKER")[1:4] == ["BLOCKED", "BLOCKED", "WORSE"], out
+    assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: DEGRADED"
+    _untouched(live)
+
+
+@USES
+def test_an_unavailable_real_store_fails_before_anything_is_copied(live, tmp_path, capsys, monkeypatch):
+    """Review finding: with OpenBao sealed or stopped the dry run had no store and ended OK. It is FAIL now."""
+    monkeypatch.setattr(od, "probe_presence", lambda: od.Presence(backend="none", available=False))
+    code = od.main([_script(tmp_path, "disable", DISABLE), "--answer", "JA"])
+    out = capsys.readouterr().out
+    assert code == 2, out
+    assert "the real secret store is unavailable (backend none): the dry run cannot see which credentials" in out
+    assert "Doctor before" not in out and "disable 200" not in out
+    assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: FAIL"
+    _untouched(live)
 
 
 @USES

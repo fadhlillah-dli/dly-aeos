@@ -18,18 +18,23 @@ What it does:
    of the dry run is the temporary one (``AEOS_DATA_DIR``). The live file is only read.
 2. Reads which secret references are PRESENT with the real ``aeos secrets status --include-office`` in a child
    process (metadata only, never a value). In the dry run every secret access goes to an in-memory mirror that
-   reports exactly those references as present, with dummy values. The dry-run process itself has the null keyring
+   reports exactly those references as present, with dummy values. A real store that cannot be read (sealed or
+   stopped OpenBao: backend none, or a reference UNKNOWN) fails the dry run before anything is copied: without the
+   presence the result says nothing about the real system. The dry-run process itself has the null keyring
    backend, OpenBao at a closed loopback port, and refuses every TCP connect to a non-loopback address and to the
    loopback ports of the real OpenBao and the real Control Center, so no provider call and no live write can happen.
 3. Creates a temporary SUPER_ADMIN in the copy and calls ``run(client, username, password, ask)`` with a TestClient
    of the real app; ``ask`` returns the ``--answer`` values in order. A prompt with no answer left fails the run.
 4. Runs the Doctor (non-functional checks only: no Claude call, no quota, no network probe) before and after, and
-   prints the capability table (before -> after) and every check whose status changed.
+   prints the capability table (before -> after) and every check whose status changed. A gating check (critical or
+   required tier, a project check, a FAILED guard) of a capability that newly fails also counts as worse, even when
+   the capability was already BLOCKED before (``CAN_RUN_WORKER: BLOCKED -> BLOCKED``): the real system may be
+   READY where the copy is not.
 
 Exit codes and the last line: 0 ``OWNER_DRYRUN: OK``; 1 ``OWNER_DRYRUN: DEGRADED`` when a capability got worse
-(READY < DEGRADED < UNKNOWN < BLOCKED; NOT_APPLICABLE counts as READY); 0 ``OWNER_DRYRUN: DEGRADED-ACCEPTED`` when
-``--accept-degrade REASON`` was given (the reason is printed; never OK); 2 ``OWNER_DRYRUN: FAIL`` when the harness
-or the script failed. The temporary data dir is removed in every case. ASCII output.
+(READY < DEGRADED < UNKNOWN < BLOCKED; NOT_APPLICABLE counts as READY) or one of its gating checks newly fails; 0 ``OWNER_DRYRUN: DEGRADED-ACCEPTED`` when
+``--accept-degrade REASON`` was given (the reason is printed; never OK); 2 ``OWNER_DRYRUN: FAIL`` when the harness,
+the script or the presence probe failed (an unavailable real secret store included). The temporary data dir is removed in every case. ASCII output.
 
 Run it with the project interpreter (``.venv/bin/python``) from the checkout whose code the server runs: the copy
 must be at that checkout's migration head, otherwise the run fails (the API of another version is no evidence).
@@ -140,7 +145,7 @@ def _when(text: str) -> datetime | None:
 
 def parse_presence(text: str) -> Presence:
     """Parse the output of ``aeos secrets status --include-office``. A store that is unavailable (backend none, or
-    every reference UNKNOWN) is mirrored as unavailable: the dry run then has no secret store, like the real one."""
+    a reference UNKNOWN) is returned as unavailable with no references; ``dry_run`` refuses to run on it."""
     store = None
     rows: list[tuple[str, str, str]] = []
     for line in text.splitlines():
@@ -378,7 +383,7 @@ def isolated(data_dir: Path, config: Path, presence: Presence, denied_ports: set
             config_mod.reset_settings_cache()
             provider_mod.reset_provider_cache()
             clear_probe_cache()
-            provider_mod.set_provider_override(PresenceMirror(presence) if presence.available else None)
+            provider_mod.set_provider_override(PresenceMirror(presence))
             settings = config_mod.get_settings()
             if settings.data_dir.resolve() != data_dir.resolve():
                 raise HarnessError("the dry-run settings do not point at the temporary data dir")
@@ -465,6 +470,20 @@ def create_dryrun_admin(username: str, password: str) -> None:
 class Snapshot:
     capabilities: dict[str, tuple[str, str]]  # capability -> (status, first reason)
     checks: dict[str, tuple[str, str]]  # check id (+ project) -> (status, summary)
+    gating: dict[str, dict[str, str]] = field(default_factory=dict)  # capability -> failing gating check -> status
+
+
+def gating_failures(entries: Sequence[dict[str, Any]]) -> dict[str, str]:
+    """The checks of one capability that hold it back (capabilities.evaluate): a not-ok check of the critical,
+    required or project tier, or a guard check that FAILED. Advisory checks and guard notes never gate."""
+    out: dict[str, str] = {}
+    for c in entries:
+        if c.get("ok"):
+            continue
+        tier, eff = c.get("tier"), str(c.get("effective_status") or "UNKNOWN")
+        if tier in ("critical", "required", "project") or (tier == "guard" and eff == "FAILED"):
+            out[str(c.get("check_id"))] = eff
+    return out
 
 
 def doctor_snapshot(settings: Any) -> Snapshot:
@@ -485,25 +504,38 @@ def doctor_snapshot(settings: Any) -> Snapshot:
         pid = (r.scope or {}).get("project_id")
         checks[r.check_id + (f" @project {str(pid)[:8]}" if pid else "")] = (r.status, r.summary or "")
     caps = {c["capability"]: (c["status"], (c["reasons"] or [""])[0]) for c in matrix}
-    return Snapshot(caps, checks)
+    gating = {c["capability"]: gating_failures(c.get("checks") or []) for c in matrix}
+    return Snapshot(caps, checks, gating)
 
 
 def worse(before: str, after: str) -> bool:
     return RANK.get(after, 2) > RANK.get(before, 2)
 
 
+def newly_failing(before: Snapshot, after: Snapshot, cap: str) -> dict[str, str]:
+    """Gating checks of ``cap`` that fail after the script and did not fail before."""
+    was = before.gating.get(cap, {})
+    return {cid: st for cid, st in after.gating.get(cap, {}).items() if cid not in was}
+
+
 def print_diff(before: Snapshot, after: Snapshot) -> list[str]:
-    """Print the capability table and the changed checks; return the capabilities that got worse."""
+    """Print the capability table and the changed checks; return the capabilities that got worse: a worse status,
+    or a gating check that newly fails under an unchanged status (BLOCKED -> BLOCKED hides a regression)."""
     from aeos.inventory.asciitext import table
 
     rows, degraded = [], []
+    regressed: dict[str, dict[str, str]] = {}
     for cap in list(dict.fromkeys([*before.capabilities, *after.capabilities])):
         b = before.capabilities.get(cap, ("UNKNOWN", ""))[0]
         a, reason = after.capabilities.get(cap, ("UNKNOWN", ""))
         change = "WORSE" if worse(b, a) else ("better" if worse(a, b) else ("changed" if a != b else ""))
+        fresh = newly_failing(before, after, cap)
+        if change == "" and fresh:
+            change, reason = "WORSE", "newly failing: " + ", ".join(sorted(fresh))
+            regressed[cap] = fresh
         if change == "WORSE":
             degraded.append(cap)
-        rows.append([cap, b, a, change, reason if a != b else ""])
+        rows.append([cap, b, a, change, reason if a != b or cap in regressed else ""])
     say("")
     say("Capabilities (before -> after), Doctor without --functional on the copy:")
     say(table(["CAPABILITY", "BEFORE", "AFTER", "CHANGE", "REASON AFTER"], rows, max_width=60))
@@ -518,7 +550,11 @@ def print_diff(before: Snapshot, after: Snapshot) -> list[str]:
     else:
         say("Checks whose status changed: none")
     for cap in degraded:
-        say(f"{cap}: {before.capabilities.get(cap, ('UNKNOWN', ''))[0]} -> {after.capabilities[cap][0]}")
+        line = f"{cap}: {before.capabilities.get(cap, ('UNKNOWN', ''))[0]} -> {after.capabilities[cap][0]}"
+        if cap in regressed:
+            line += " (gating check newly failing: " + ", ".join(
+                f"{cid} {before.checks.get(cid, ('-', ''))[0]} -> {st}" for cid, st in sorted(regressed[cap].items())) + ")"
+        say(line)
     return degraded
 
 
@@ -561,12 +597,15 @@ def dry_run(script: Path, *, answers: Sequence[str], user: str, accept_degrade: 
     say(f"script: {script.name}")
     say(f"live data dir: {data_dir_label(live)} (read only; copied with sqlite3 backup, mode=ro)")
     presence = probe_presence()
-    if presence.available:
-        say(f"secrets: {len(presence.present)} present, {len(presence.missing)} missing, {len(presence.no_access)} "
-            f"no access in the real store (backend {presence.backend}; names only, no value read)")
-        say("  present: " + (", ".join(sorted(presence.present)) or "none"))
-    else:
-        say(f"secrets: the real store is unavailable (backend {presence.backend}); the dry run has no store either")
+    if not presence.available:
+        # Without the presence the copy cannot show what the script does on the real system (a WORKER route whose
+        # credential exists there is BLOCKED here before and after, so nothing would look worse).
+        raise HarnessError(f"the real secret store is unavailable (backend {presence.backend}): the dry run cannot "
+                           "see which credentials exist, so its verdict would say nothing about the real system. "
+                           "Start or unseal OpenBao ('aeos vault status --verify'), then run the dry run again")
+    say(f"secrets: {len(presence.present)} present, {len(presence.missing)} missing, {len(presence.no_access)} "
+        f"no access in the real store (backend {presence.backend}; names only, no value read)")
+    say("  present: " + (", ".join(sorted(presence.present)) or "none"))
     tmp = Path(tempfile.mkdtemp(prefix="aeos-owner-dryrun-"))
     try:
         data_dir, config = tmp / "data", tmp / "aeos.yaml"
