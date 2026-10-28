@@ -60,10 +60,11 @@
 6. **Linear and bounded.** The scan is linear in the payload (bodies are capped at 8 MB): literal pre-checks before
    patterns that the regex engine cannot search by prefix, the PEM block pattern bounded by the last END marker, and
    the labelled unseal-key pattern written without nested whitespace quantifiers. A 2.5 MB request took 0.13 s of
-   CPU on the owner's Mac (arm64) and 0.54 s on the Intel macOS CI runner (2026-10-28), and adversarial 2 MB inputs
-   that backtracked quadratically before (minutes) take well under a second. The test asserts linear growth (four
-   times the input costs at most eight times the CPU; a quadratic scan costs sixteen) and a 3 s cap, not a fixed
-   time, which would measure the machine (LESSONS L15).
+   CPU on the owner's Mac (arm64) and 0.54 s on the Intel macOS CI runner (2026-10-28). Adversarial 2 MB inputs that
+   backtracked quadratically before (minutes) took 0.02-0.41 s on arm64 and up to 5.7 s on that runner under load
+   (load average 35); the scan runs in the broker's thread pool, not on the event loop. The tests assert linear
+   growth only (four times the input costs at most eight times the CPU, measured alternately; a quadratic scan costs
+   sixteen), never a fixed time: a fixed bound, even a 3 s cap, measured the machine and failed there (LESSONS L15).
 7. **Fewer false positives in the guard, never weaker redaction.** The patterns of `aeos.core.redaction` are the
    ones log and error redaction, the repository secret scan and the Claude prompt guard use; this ADR does not narrow
    them (amendment, decision A). Only the high-confidence scan (this guard) skips, after review of the first build:
@@ -144,7 +145,7 @@ B. **Escapes are boundaries for the guard.** A token after `\n`, `\t`, `\"`, `\u
    by spaces, so the span still names the token in the request. Before, `AIza` and `1//` after an escaped newline or
    `ESC[31m` read as glued to the base64 character `n` or `m`. A backslash run is matched from its first backslash
    only and possessively (the terminator's backslashes in pairs, also possessively), so the view stays linear (a
-   20,000-backslash run took 1.3 s in the first build; 2 MB runs of textual escapes and terminators are measured in the
+   20,000-backslash run took 1.3 s in the first build; 1 MB runs of textual escapes and terminators are measured in the
    test). Code identifiers, base64
    image data (also URL-encoded) and lockfile `sha512-` hashes stay unflagged, also JSON-encoded (the near misses of
    the test).

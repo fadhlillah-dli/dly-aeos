@@ -213,17 +213,27 @@ def test_no_setting_can_turn_the_guard_off():
     assert named == [], f"a setting that could switch the outgoing-content guard: {named}"
 
 
-# ------------------------------------------------------------------------------------- performance (linear, bounded)
+# ------------------------------------------------------------------------------------- performance (linear)
 # CPU time of this process, not wall time: under a loaded full-suite run (load average 12-40, xdist workers) the
 # wall clock also counts the time the process waits for a core, which made these tests fail with correct code
 # (review of 2026-10-28, LESSONS L15: a flaky test is a timing assumption to fix, never a re-run).
-def _best_of(n: int, fn) -> float:
-    best = float("inf")
-    for _ in range(n):
-        t0 = time.process_time()
-        fn()
-        best = min(best, time.process_time() - t0)
-    return best
+# No test here asserts a fixed time. On 2026-10-28 the same code took 0.13 s on the owner's Mac (arm64) and 0.54 s on
+# the Intel macOS CI runner for a 2.5 MB request, and 0.41 s against 5.7 s for 2 MB of percent escapes under load:
+# a fixed bound, even a "generous" 3 s cap, measures the machine and its load, not the scan.
+def _cpu(fn) -> float:
+    t0 = time.process_time()
+    fn()
+    return time.process_time() - t0
+
+
+def _quarter_and_full(fn, quarter, full, rounds: int = 2) -> tuple[float, float]:
+    """The CPU time of *fn* on the quarter and on the full input, the best of *rounds* runs each, measured
+    alternately so that a burst of load cannot fall on one size only."""
+    small = took = float("inf")
+    for _ in range(rounds):
+        small = min(small, _cpu(lambda: fn(quarter)))
+        took = min(took, _cpu(lambda: fn(full)))
+    return small, took
 
 
 def _load() -> str:
@@ -249,15 +259,13 @@ def test_a_2mb_request_is_scanned_in_linear_time():
     quarter, full = _request(325), _request(1300)
     size = len(outgoing_text(full))
     assert size >= 2_000_000
-    small = _best_of(3, lambda: sensitive_content_findings(quarter))
-    took = _best_of(2, lambda: sensitive_content_findings(full))
-    assert took < 3.0, f"{size} chars took {took:.3f}s of CPU ({_load()})"
+    small, took = _quarter_and_full(sensitive_content_findings, quarter, full)
     assert _grows_linearly(small, took), (f"not linear - a quarter of the request {small:.3f}s, {size} chars "
                                           f"{took:.3f}s of CPU ({_load()})")
 
 
 def _adversarial(shape: str, k: float) -> str:
-    """The shape at scale *k* (k=1 is about 2 MB); every run length scales with k."""
+    """The shape at scale *k* (k=1 is about 2 MB, the test uses 0.25 to 1 MB); every run length scales with k."""
     def n(x: int) -> int:
         return max(1, int(x * k))
 
@@ -278,17 +286,16 @@ def _adversarial(shape: str, k: float) -> str:
                                    "backslash_run", "colour_codes_without_final_byte", "percent_escape_runs",
                                    "textual_escape_runs", "string_terminator_runs", "cut_view_tails",
                                    "encoded_escape_runs"])
-def test_adversarial_2mb_inputs_stay_linear(shape):
+def test_adversarial_inputs_stay_linear(shape):
     """Inputs that made the patterns backtrack quadratically before ADR-0127 (minutes at 2 MB); a run of backslashes
     made the escape-boundary view quadratic (1.3 s at 20,000, review of 2026-10-28); the two boundary views (greedy
     and cut) stay linear when every escape has a tail that could begin a token.
 
-    Linearity is measured, not assumed from a wall-clock bound (`_grows_linearly`), plus a generous absolute CPU cap
-    that only a pathological regression reaches."""
-    quarter, full = _adversarial(shape, 0.25), _adversarial(shape, 1.0)
-    small = _best_of(2, lambda: find_high_confidence_secrets(quarter))
-    took = _best_of(1, lambda: find_high_confidence_secrets(full))
-    assert took < 3.0, f"{shape}: {len(full)} chars took {took:.3f}s of CPU ({_load()})"
+    Linearity is measured (`_grows_linearly`), not assumed from a fixed bound. A quadratic regression still fails,
+    inside the CI job's time limit: the patterns before ADR-0127 took minutes at 2 MB, so about a quarter of that at
+    the 1 MB used here."""
+    quarter, full = _adversarial(shape, 0.125), _adversarial(shape, 0.5)
+    small, took = _quarter_and_full(find_high_confidence_secrets, quarter, full)
     assert _grows_linearly(small, took), (f"{shape}: not linear - {len(quarter)} chars {small:.3f}s, {len(full)} "
                                           f"chars {took:.3f}s of CPU ({_load()})")
 
@@ -307,10 +314,10 @@ def test_bite_the_linearity_check_catches_a_quadratic_scan():
         return s.count("\x00")
 
     quarter, full = "a" * 8_000, "a" * 32_000
-    small, took = _best_of(3, lambda: quadratic(quarter)), _best_of(1, lambda: quadratic(full))
+    small, took = _quarter_and_full(quadratic, quarter, full)
     assert not _grows_linearly(small, took), (f"a quadratic scan passed: {small:.3f}s for {len(quarter)} chars, "
                                               f"{took:.3f}s for {len(full)} ({_load()})")
-    assert _grows_linearly(_best_of(3, lambda: linear(quarter)), _best_of(1, lambda: linear(full)))
+    assert _grows_linearly(*_quarter_and_full(linear, quarter, full))
 
 
 # ------------------------------------------------------------------------------------- the proxy, :free route
