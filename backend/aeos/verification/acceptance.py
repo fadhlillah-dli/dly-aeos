@@ -39,6 +39,7 @@ from aeos.verification.review import (
     NON_REGRESSION_SCOPE,
     _model_policy_problem,
     latest_review,
+    refused_review_model,
     required_reviews,
 )
 from aeos.verification.verifier import current_config_hash, latest_report, report_refs, report_view
@@ -97,9 +98,15 @@ def _verdict_problems(rec: ReviewRecord, label: str, *, artifact_hash: str, docs
         out.append(f"a MOCK {label} can never produce acceptance")
     # §15: only a review whose Claude model identity is proven (and allowed) counts — defence in depth for
     # records written before the reviewer-identity rule or by another path.
-    identity = _model_policy_problem(policy or {}, rec.model_resolved, rec.model_requested or DEFAULT_REVIEW_MODEL)
-    if identity:
-        out.append(f"{label}: review model identity not proven ({identity})")
+    refused = refused_review_model(rec.model_resolved, rec.model_requested)
+    if refused:
+        # ADR-0131: a review completed by (or requested from) Fable, before the decision included, never counts
+        out.append(f"{label}: not counted for acceptance: {refused}")
+    else:
+        identity = _model_policy_problem(policy or {}, rec.model_resolved,
+                                         rec.model_requested or DEFAULT_REVIEW_MODEL)
+        if identity:
+            out.append(f"{label}: review model identity not proven ({identity})")
     if rec.verdict in ACCEPTABLE_VERDICTS:
         return out
     if rec.verdict == "PASS-STATIC":

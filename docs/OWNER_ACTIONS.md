@@ -126,9 +126,11 @@ Lost password: `./aeos admin recover <username>`.
 
 Running `claude` the first time asks you to sign in with your Claude Max account; then type `/exit`.
 `claude auth status` must show `loggedIn true`, authMethod `claude.ai` and subscriptionType `max`. The `echo`
-must print `<not set>`; remove any `ANTHROPIC_API_KEY` export from `~/.zshrc` and `~/.zprofile`. The `fable` bridge
-test must resolve inside the Fable family, with no MODEL_POLICY_MISMATCH. `doctor --functional` is the Claude
-capability test and uses a little Max quota.
+must print `<not set>`; remove any `ANTHROPIC_API_KEY` export from `~/.zshrc` and `~/.zprofile`. The `opus` bridge
+test must resolve inside the Opus family, with no MODEL_POLICY_MISMATCH. Every planning and review stage uses Opus;
+DLY AEOS never requests a Claude Fable model (owner decision 2026-10-28,
+[ADR-0131](decisions/ADR-0131-opus-only-claude-stages.md)), so there is no `fable` bridge test: the bridge refuses
+it (MODEL_FAMILY_REFUSED). `doctor --functional` is the Claude capability test and uses a little Max quota.
 
 ```bash
 brew install --cask claude-code
@@ -136,14 +138,14 @@ claude
 claude auth status
 echo "${ANTHROPIC_API_KEY:-<not set>}"
 ./aeos bridge test --model opus
-./aeos bridge test --model fable
 ./aeos bridge status
 ./aeos doctor --functional
 ```
 
 You can run the same capability test from the Control Center: *Model & Rute* (`/models`) → *Pengawas* →
-*Uji kemampuan*. If `fable` keeps resolving outside the Fable family, that is a DECISION: choose another
-supervisor through a recorded POLICY decision ([2.12](#212-smaller-open-decisions)). Never switch silently.
+*Uji kemampuan*. If `opus` keeps resolving outside the Opus family, that is a DECISION: choose another
+supervisor (never Fable) through a recorded POLICY decision ([2.12](#212-smaller-open-decisions)). Never switch
+silently.
 
 ### 1.5 Commit identity in the local `aeos.yaml` [per machine]
 
@@ -1142,8 +1144,8 @@ Each item below is recorded either as an ADR, through the builder, or with the c
     probed (LOCAL through `./aeos routes set-endpoint <local route_key> --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "<why>"`).
   * (D) Proxy anyway: `./aeos routes activate ... --accept-client-terms --client-terms-note "<what you read>"`. Still
     possible per free Zen route. Decision A leaves the Zen client restriction UNDECIDED.
-* **Supervisor model.** If Fable resolves to another family (1.4), choose another supervisor, or pin a stage
-  model with
+* **Supervisor model.** If Opus resolves to another family (1.4), choose another supervisor (never Fable,
+  ADR-0131), or pin a stage model of the Opus family with
   `./aeos policy decide --kind POLICY --stage-model <STAGE>=<exact-model-id> --eval-run <id> --rollback-target <old> --domain PERSONAL --as <admin> --rationale "<why>"`,
   or on *Keputusan* with the preset that starts "Pin model supervisor per tahap perencanaan". Also decide whether a
   supervisor version change must stop planning until it is evaluated.

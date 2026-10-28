@@ -112,7 +112,7 @@ VS Code + clone ──> aeos doctor (no LLM) ──> aeos serve on 127.0.0.1:878
                                                │
    domain PERSONAL | OFFICE (human choice) ────┤
                                                ▼
- intake + context ─> planning (Claude Code native: Opus plan / Fable review) ─> human approval (hash-bound)
+ intake + context ─> planning (Claude Code native: Opus plan + Opus review) ─> human approval (hash-bound)
                                                ▼
  publisher (Google Docs / GitHub Issues; Confluence / Jira for OFFICE) ─> scheduler + model routing
                                                ▼

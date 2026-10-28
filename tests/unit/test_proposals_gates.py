@@ -103,7 +103,7 @@ def test_claude_metadata_never_contains_free_text_names(db, policy, monkeypatch)
         seen["prompt"] = req.prompt
         return ClaudeResult(ok=True, structured={"review": {"summary": "s"}, "verify": {"claims": []},
                                                  "verdict": "NOT-PROVEN", "recommendation": "DEFER", "rationale": "r"},
-                            text="", model_requested="fable", model_resolved=None, engine_version=None,
+                            text="", model_requested="opus", model_resolved=None, engine_version=None,
                             session_id=None, usage={}, duration_ms=1)
 
     fake = types.ModuleType("aeos.claude_bridge.bridge")
@@ -165,7 +165,7 @@ def test_claude_quota_exhausted_review_waits_and_is_not_a_verdict(db, policy, mo
     QUOTA_WAIT (no verdict/recommendation), and the owner decision still needs the bound hashes."""
 
     def run_structured(req):
-        return ClaudeResult(ok=False, structured=None, text="", model_requested="fable", model_resolved=None,
+        return ClaudeResult(ok=False, structured=None, text="", model_requested="opus", model_resolved=None,
                             engine_version=None, session_id=None, usage={}, duration_ms=1,
                             error_code="QUOTA_EXHAUSTED", quota_exhausted=True)
 
@@ -196,7 +196,7 @@ def test_claude_review_reused_on_same_metadata_hash_and_stale_after_change(db, p
         calls.append(req.prompt)
         return ClaudeResult(ok=True, structured={"review": {"summary": "s"}, "verify": {"claims": []},
                                                  "verdict": "NOT-PROVEN", "recommendation": "DEFER", "rationale": "r"},
-                            text="", model_requested="fable", model_resolved=None, engine_version=None,
+                            text="", model_requested="opus", model_resolved=None, engine_version=None,
                             session_id=None, usage={}, duration_ms=1)
 
     fake = types.ModuleType("aeos.claude_bridge.bridge")

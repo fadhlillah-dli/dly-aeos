@@ -54,13 +54,14 @@ def status_cmd(as_json: bool = typer.Option(False, "--json", help="Print JSON"))
 
 
 @app.command("test")
-def test_cmd(model: str = typer.Option("opus", help="Supervisor alias to probe: opus or fable")) -> None:
+def test_cmd(model: str = typer.Option("opus", help="Supervisor alias to probe: opus (Fable is never requested, "
+                                                    "ADR-0131)")) -> None:
     """Run the capability test: binary, auth, env hygiene and ONE tiny structured call (uses Max quota)."""
     from aeos.claude_bridge import bridge
     from aeos.cli import ensure_database
 
-    if model not in {"opus", "fable"}:
-        raise typer.BadParameter("model must be opus or fable")
+    if model != "opus":
+        raise typer.BadParameter("model must be opus (the Claude Fable family is never requested, ADR-0131)")
     ensure_database()
     out = bridge.capability_test(model, actor="cli")
     for step in out["steps"]:

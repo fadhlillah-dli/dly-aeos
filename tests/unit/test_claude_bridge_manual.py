@@ -10,7 +10,7 @@ import pytest
 from aeos.claude_bridge.facade import ClaudeRequest, read_manual_result, write_manual_package
 from aeos.core.enums import Domain
 from aeos.core.errors import Conflict, NotFound, PolicyDenied, ValidationFailed
-from tests.unit.test_claude_bridge_parsing import FABLE_FALLBACK, OPUS_OK, SCHEMA
+from tests.unit.test_claude_bridge_parsing import FABLE_ANSWER, OPUS_OK, SCHEMA
 from tests.unit.test_claude_bridge_run import make_project
 from tests.unit.test_routing_fakes import install_fakes
 
@@ -51,10 +51,12 @@ def test_raw_claude_json_result_roundtrip(settings, tmp_path):
 
 
 def test_raw_result_still_subject_to_model_policy(settings, tmp_path):
-    pkg = write_manual_package(_req(tmp_path, model="fable"), package_id="pkg-fable")
-    (pkg / "result.json").write_text(json.dumps(FABLE_FALLBACK), encoding="utf-16")  # PS 5.1 '>' redirection
+    """ADR-0131: an opus package whose pasted result was answered by a Fable model is rejected (fail closed)."""
+    pkg = write_manual_package(_req(tmp_path, model="opus"), package_id="pkg-fable")
+    (pkg / "result.json").write_text(json.dumps(FABLE_ANSWER), encoding="utf-16")  # PS 5.1 '>' redirection
     res = read_manual_result("pkg-fable")
     assert res and not res.ok and res.error_code == "MODEL_POLICY_MISMATCH" and res.structured is None
+    assert res.model_resolved == "claude-fable-5-1"
 
 
 def test_bare_object_accepted_with_unverified_identity(settings, tmp_path):

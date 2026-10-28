@@ -44,6 +44,11 @@ FABLE_FALLBACK = {
     "type": "result", "duration_ms": 5291,
 }
 
+# An opus request answered by a Fable model (ADR-0131: a Fable answer is identified, then rejected by family).
+FABLE_ANSWER = copy.deepcopy(OPUS_OK)
+FABLE_ANSWER["modelUsage"] = {"claude-fable-5-1": dict(OPUS_OK["modelUsage"]["claude-opus-5-5"],
+                                                       canonicalModel="claude-fable-5-1")}
+
 # Real `claude auth status` (identifying fields replaced).
 AUTH_MAX = {"loggedIn": True, "authMethod": "claude.ai", "apiProvider": "firstParty", "analyticsDisabled": False,
             "email": "owner@example.com", "orgId": "org-redacted", "orgName": "redacted", "subscriptionType": "max"}

@@ -96,7 +96,7 @@ export function DecisionPanel({ plan, version, catalog }: { plan: PlanDetail; ve
         />
         {reviewedOther && (
           <Notice tone="warn">
-            Versi v{version.version} belum melalui review akhir (Fable).{" "}
+            Versi v{version.version} belum melalui review akhir (Final Planning Reviewer).{" "}
             {plan.verdict_version_id ? "Verdict yang tampil berlaku untuk versi lain." : "Belum ada verdict untuk versi ini."} Anda tetap berwenang memutuskan;
             keputusan mencatat versi mana yang terakhir direview.
             <label className="mt-2 flex items-center gap-2">

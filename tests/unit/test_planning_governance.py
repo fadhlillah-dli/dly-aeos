@@ -449,7 +449,8 @@ def test_planning_calls_bind_the_claude_code_version_to_the_supervisor_route(db,
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.expire_all()
     opus, fable = routing.get_route(db, "claude-native/opus"), routing.get_route(db, "claude-native/fable")
-    assert opus.harness_version == fable.harness_version == "2.1.301 (fake)"
+    assert opus.harness_version == "2.1.301 (fake)"
+    assert fable.harness_version is None  # ADR-0131: no stage requests fable, so its route is never observed
     assert opus.mode_params["effort"] == "CLI_DEFAULT"  # planning passes no --effort
     assert opus.config_hash == routing.compute_config_hash(opus)
 
@@ -511,13 +512,13 @@ def _stage_model_decision(db, owner, *, gates=None, models=None):
 
 def test_configured_opus_version_is_requested_and_a_drift_hard_stops(db, owner, monkeypatch, tmp_path):
     """§15 "Opus family, versi terkonfigurasi": an evaluated owner decision pins the planner model id."""
-    _stage_model_decision(db, owner, models={"PRIMARY_PLANNING": "claude-opus-5-5", "CHALLENGE_REVIEW": "claude-opus-5-5"})
+    _stage_model_decision(db, owner, models={"PRIMARY_PLANNING": "claude-opus-5-5", "CHALLENGE_REVIEW": "claude-fable-5-1"})
     bridge = FakeBridge(monkeypatch, tmp_path, models={"PRIMARY_PLANNING": "claude-opus-5-5"})
     plan = _plan(db, owner)
     stages = {s["stage"]: s for s in plan.policy_baseline["stages"]}
     assert stages["PRIMARY_PLANNING"]["model"] == "claude-opus-5-5" and stages["PRIMARY_PLANNING"]["configured"]
-    assert stages["CHALLENGE_REVIEW"]["model"] == "fable"  # another family is never accepted for a Fable stage
-    assert plan.policy_baseline["stage_model_decision"]["rejected"] == {"CHALLENGE_REVIEW": "claude-opus-5-5"}
+    assert stages["CHALLENGE_REVIEW"]["model"] == "opus"  # ADR-0131: a Fable pin is never accepted for an Opus stage
+    assert plan.policy_baseline["stage_model_decision"]["rejected"] == {"CHALLENGE_REVIEW": "claude-fable-5-1"}
     service.run_pipeline(db, plan.id, actor=owner.id)
     assert bridge.calls[0].model == "claude-opus-5-5" and plan.state == "READY_FOR_HUMAN_REVIEW"
     drift = FakeBridge(monkeypatch, tmp_path, models={"PRIMARY_PLANNING": "claude-opus-5-6"})
@@ -531,7 +532,7 @@ def test_configured_opus_version_is_requested_and_a_drift_hard_stops(db, owner, 
 def test_unevaluated_stage_model_change_is_ignored(db, owner):
     _stage_model_decision(db, owner, gates={"security": "PASS", "authority": "NOT_RUN", "evidence": "PASS"})
     plan = _plan(db, owner)
-    assert [s["model"] for s in plan.policy_baseline["stages"]] == ["opus", "fable", "opus", "fable"]
+    assert [s["model"] for s in plan.policy_baseline["stages"]] == ["opus", "opus", "opus", "opus"]
     assert "ignored" in plan.policy_baseline["stage_model_decision"]
 
 
