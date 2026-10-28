@@ -227,12 +227,17 @@ def test_a_2mb_request_is_scanned_well_within_200ms():
     assert took < 0.2, f"{size} chars took {took:.3f}s ({_load()})"
 
 
-@pytest.mark.parametrize("shape", ["unseal_label_then_spaces", "pem_headers_without_end", "token_prefix_runs"])
+@pytest.mark.parametrize("shape", ["unseal_label_then_spaces", "pem_headers_without_end", "token_prefix_runs",
+                                   "backslash_run", "colour_codes_without_final_byte", "percent_escape_runs"])
 def test_adversarial_2mb_inputs_stay_linear(shape):
-    """Inputs that made the patterns backtrack quadratically before ADR-0127 (minutes at 2 MB)."""
+    """Inputs that made the patterns backtrack quadratically before ADR-0127 (minutes at 2 MB); a run of backslashes
+    made the escape-boundary view quadratic (1.3 s at 20,000, review of 2026-10-28)."""
     text = {"unseal_label_then_spaces": "unseal key" + " " * 2_000_000,
             "pem_headers_without_end": "-----BEGIN " + "PRIVATE KEY-----\n" * 75_000,
-            "token_prefix_runs": ("sk-" + "s." + "r." + "hvs.") * 200_000}[shape]
+            "token_prefix_runs": ("sk-" + "s." + "r." + "hvs.") * 200_000,
+            "backslash_run": "\\" * 2_000_000 + "x",
+            "colour_codes_without_final_byte": ("\x1b[" + "1;" * 50 + "\\u001b[" + "2;" * 50) * 9_000,
+            "percent_escape_runs": "%25" * 600_000 + "%" + "%2" * 100_000}[shape]
     took = _best_of(1, lambda: find_high_confidence_secrets(text))
     assert took < 1.0, f"{shape}: {len(text)} chars took {took:.3f}s ({_load()})"
 

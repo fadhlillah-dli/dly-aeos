@@ -62,6 +62,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 | L23 | 2026-10-28 | After git pull the server kept serving a Control Center bundle built two days earlier (five frontend commits missing); the Doctor only checked that frontend/dist/index.html existed and stayed VERIFIED | correctness | 1 | test | backend/aeos/operations/freshness.py + tests/unit/test_ui_freshness.py | no | Pulling and serving go through one command that rebuilds and restarts by itself |
 | L24 | 2026-10-28 | Two pull requests, each green on its own CI, broke main together: the second one's CI had run before the first merged (#42 added Doctor freshness checks that run git; #43 added a test guard that refuses any host process during owner dry-run tests); the after-merge check caught it on 3ba0dec | process | 1 | written-rule | - | no | Main requires branches to be up to date before merging, or a merge queue tests the combined tree |
 | L25 | 2026-10-28 | A change to the secret patterns for a new guard weakened log redaction (tokens after an escaped newline were no longer masked); caught by a blind differential review before merge | secret | 1 | test | tests/unit/test_redaction_never_weaker.py | no | The shared redaction patterns are generated from a versioned corpus that only grows, and each consumer narrows only its own view |
+| L26 | 2026-10-28 | A workflow report quoted synthetic test secrets; the owner's prompt guard blocked the completion notification and the owner saw a secret alert | process | 1 | written-rule | - | yes | Agent reports, logs and chat pass through a tool that refuses secret-shaped strings before anyone sees them |
 
 ## Rules (one line each; the incident is in table 1)
 
@@ -90,6 +91,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 * L23 After a `git pull` that changed `frontend/` or `backend/`, restart `aeos serve`; it rebuilds a stale, missing or unverified UI bundle once when that is safe (into `frontend/dist.next`, swapped in after success). The Doctor (`runtime.frontend_fresh`, `runtime.code_drift`) and `/api/health` `ui_build` report what is still stale.
 * L24 Before merging a pull request whose CI ran on an older main, merge the current main into the branch, run the full suite on the merged tree and push, so CI runs on what will land; the after-merge check stays.
 * L25 A change made for one consumer of `aeos.core.redaction` (a guard, a scanner) narrows only that consumer's own scan, not the shared patterns that logs, errors, the secret scan and the prompt guard use; `tests/unit/test_redaction_never_weaker.py` names the pattern and the context of any case the change drops.
+* L26 Agents and tools never print a secret-shaped string, a synthetic one included, in a report, a log or chat: refer to a case by its name (corpus variant, pattern, context). Test corpora build secrets from parts at run time (as the attribution samples do, L9), so the files themselves hold no literal secret shape.
 
 ## Table 2 - Proven methods
 

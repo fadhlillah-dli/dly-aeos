@@ -33,9 +33,9 @@
 2. **What is scanned.** Every string of the forwarded payload, at any depth, keys and values: the contents of
    system, user, assistant and tool messages (also content parts), tool calls and their `arguments` (decoded as JSON
    too, so a JSON escape does not hide a token), tool definitions, stop sequences, response schemas. An escape
-   sequence in a string (a JSON escape such as `\n`, `\t`, `\"` or `\u00e9`, also JSON encoded twice, and a
-   URL-encoded separator such as `%3D`, `%26` or `%3F`) is a boundary before or after a token (amendment, decision
-   B).
+   sequence in a string (a JSON escape such as `\n`, `\t`, `\"` or `\u00e9`, also JSON encoded twice, a terminal
+   colour code such as `ESC[31m`, raw or JSON-escaped, and any URL-encoded byte such as `%3D`, `%2F`, `%40` or `%5C`)
+   is a boundary before or after a token (amendment, decision B).
 3. **What is detected.** `aeos.core.redaction.find_high_confidence_secrets`: the token-shaped patterns (OpenRouter,
    Anthropic and OpenAI-style keys, GitHub tokens, AWS access key ids, Google keys and tokens, Vault/OpenBao tokens and
    labelled unseal/root material, Slack tokens, PEM private key blocks) and every secret value AEOS registered at run
@@ -85,21 +85,29 @@ A. **Redaction is never weakened for the guard.** The first build added a look-b
    catching a token glued to a letter or digit, for example a Vault token after a JSON-escaped newline in a worker log
    (143 cases origin/main caught). The pattern is restored exactly. The identifier exception lives only in the
    guard's high-confidence scan, only for `s.`, `b.` and `r.` with an identifier-shaped body, never for `hvs.`.
-   `tests/unit/test_redaction_never_weaker.py` (LESSONS L25) is the permanent differential: a committed corpus of
-   every pattern origin/main had, in plain, glued, JSON-escaped, URL-encoded, data URI, JSON string and multi-line
-   contexts; a pattern change that drops a case is red with the pattern and the context named.
-B. **Escapes are boundaries for the guard.** A token after `\n`, `\t`, `\"`, `\u00e9` (also JSON encoded twice) or
-   after `%3D`, `%26`, `%3F` and similar URL-encoded separators is found: the guard scans a same-length view in which
-   each escape sequence is replaced by spaces, so the span still names the token in the request. Before, `AIza` and
-   `1//` after an escaped newline read as glued to the base64 character `n`. Code identifiers, base64 image data and
-   lockfile `sha512-` hashes stay unflagged, also JSON-encoded (the near misses of the test).
+   `tests/unit/test_redaction_never_weaker.py` (LESSONS L25) is the permanent differential: a corpus of every pattern
+   origin/main had, in plain, glued, JSON-escaped, URL-encoded, colour-coded, data URI, JSON string and multi-line
+   contexts. Each sample is assembled at run time from every character its pattern's class allows, with long bodies
+   (L26: the file holds no literal secret shape). A pattern change that drops a case, or masks only part of a secret
+   (any 8-character piece survives, as when a character class is narrowed), is red with the pattern and the context
+   named, never the value.
+B. **Escapes are boundaries for the guard.** A token after `\n`, `\t`, `\"`, `\u00e9` (also JSON encoded twice),
+   after a terminal colour code (raw or JSON-escaped) or after any URL-encoded byte (`%3D`, `%2F`, `%40`, `%2B`,
+   `%5C`, also encoded twice) is found: the guard scans a same-length view in which each escape sequence is replaced
+   by spaces, so the span still names the token in the request. Before, `AIza` and `1//` after an escaped newline or
+   `ESC[31m` read as glued to the base64 character `n` or `m`. A backslash run is matched from its first backslash
+   only, so the view stays linear (a 20,000-backslash run took 1.3 s in the first build). Code identifiers, base64
+   image data (also URL-encoded) and lockfile `sha512-` hashes stay unflagged, also JSON-encoded (the near misses of
+   the test).
 C. **Investigation runs.** `SENSITIVE_CONTENT_BLOCKED` is a recognised stop reason of an investigation run: the run
    keeps that outcome code (not `EXIT_NONZERO`), the hypothesis is not counted as investigated, and the next
    hypothesis is not queued (the same content would be refused again). The task goes BLOCKED with reason code
    `SENSITIVE_CONTENT_BLOCKED` and a readable reason; only an owner retry clears it, never a tick.
 D. **Precedence.** A refused request decides the run's outcome even when a later stop (quota exhausted, controller
    shutdown, lost lease, time limit) was set by the monitor: the run fails with `SENSITIVE_CONTENT_BLOCKED` and its
-   attempt is never refunded as a quota stop's would be.
+   attempt is never refunded as a quota stop's would be. When the lease was lost and the reconciler already moved the
+   task (BLOCKED, `LEASE_LOST_PROCESS_ALIVE`), the task keeps that state and the run still records the code (the
+   first build raised a conflict on every retry and left the run RUNNING with an unknown outcome).
 
 Evidence: E2, unit tests on macOS arm64 (the differential corpus, the escape contexts through the broker's
 `sensitive_content_findings`, the investigation and precedence tests with red fixtures on the first build).
@@ -115,9 +123,14 @@ NOT-PROVEN on Windows and macOS Intel until CI runs.
   its END marker. Adding a shape to `aeos.core.redaction` extends this guard automatically.
 * **Encoded or split secrets** (base64, hex, a key spread over two messages, text inside an image): not decoded.
 * **Token lookalike rules** (decision 7): about 0.5% of random 24-character `s.`/`b.`/`r.` token bodies (0.015% at 40
-  characters, none at 100; measured on 200,000, 400,000 and 100,000 random bodies) read as an identifier and pass, and a Google key or refresh token written directly against
-  a base64 character (for example inside a URL path after `/`) passes. A token AEOS loaded itself is still caught as a
-  registered value whatever its shape.
+  characters, none at 100; measured on 200,000, 400,000 and 100,000 random bodies) read as an identifier and pass, and
+  a Google key or refresh token written directly against a base64 character (for example inside a URL path after a
+  literal `/`; an encoded `%2F` or a colour code before it is a boundary) passes. A token AEOS loaded itself is still
+  caught as a registered value whatever its shape.
+* **Log redaction of glued tokens (unchanged from before this ADR)**: `redact_text` misses a look-behind shape (`sk-`,
+  `hv[sbr].`, `r.`, the unseal-key label) written directly after a letter, digit or escape, and masks a glued `hvs.`
+  or `hvb.` token only up to its first `_` or `-` (the short pattern), leaving the rest readable in a log. The
+  never-weaker test records these as origin/main's misses; the outgoing guard finds them after an escape.
 * **The span hash** of a low-entropy registered value could confirm a guess by someone who can read the local audit
   trail; token shapes are high entropy. The hash never leaves the host.
 * **Prompt data that is not a secret but is still private** (business data in a PUBLIC task): the task's data class

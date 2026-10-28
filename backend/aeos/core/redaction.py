@@ -179,18 +179,22 @@ def _reads_as_identifier(body: str) -> bool:
 
 
 # An escape sequence in front of (or after) a token is a boundary, not part of a word: a JSON string escape (``\n``,
-# ``\t``, ``\"``, ``\u00e9``; a run of backslashes for JSON encoded twice) and a URL-encoded separator (``%3D``,
-# ``%26``, ``%3F``, a space, a quote, a comma, a colon, a line break; ``%25`` for encoded twice). Without it
-# ``...\nAIza...`` reads as glued to the base64 character ``n`` and ``\nsk-...`` fails the look-behind
-# (differential review of ADR-0127, 2026-10-28). No token pattern holds ``\`` or ``%``, so masking them never cuts a
-# token.
-_ESCAPE_BOUNDARY = re.compile(r"\\+(?:u[0-9A-Fa-f]{4}|[nrtbf\"'/])|%(?:25)*(?:0[9ADad]|2[02679Cc]|3[ABDFabdf])")
+# ``\t``, ``\"``, ``\u00e9``; a run of backslashes for JSON encoded twice), a terminal colour or cursor code (an ANSI
+# CSI sequence such as ``ESC[31m``, raw or JSON-escaped as ``\u001b[31m``) and any URL-encoded byte (``%3D``, ``%2F``,
+# ``%40``, ``%2B``, ``%5C``; ``%25`` for encoded twice). Without it ``...\nAIza...`` or ``ESC[31mAIza...`` reads as glued
+# to the base64 character ``n`` or ``m`` and ``\nsk-...`` fails the look-behind (differential reviews of ADR-0127,
+# 2026-10-28). No token pattern holds ``\``, ``%`` or ``ESC``, so masking them never cuts a token. A backslash run is
+# matched only from its first backslash and possessively, so a long run costs linear time, not quadratic.
+_ANSI_CSI = r"\[[0-?]*[ -/]*[@-~]"
+_ESCAPE_BOUNDARY = re.compile(r"(?<!\\)\\++(?:u001[bB]" + _ANSI_CSI + r"|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
+                              r"|\x1b(?:" + _ANSI_CSI + r")?"
+                              r"|%(?:25)*[0-9A-Fa-f]{2}")
 
 
 def _boundary_view(text: str) -> str:
     """*text* with every escape sequence of _ESCAPE_BOUNDARY replaced by as many spaces: the same length, so a span
     found in the view is the same span of *text*. Linear."""
-    if "\\" not in text and "%" not in text:
+    if "\\" not in text and "%" not in text and "\x1b" not in text:
         return text
     return _ESCAPE_BOUNDARY.sub(lambda m: " " * (m.end() - m.start()), text)
 
