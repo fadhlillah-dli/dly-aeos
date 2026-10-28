@@ -519,6 +519,25 @@ def admitted_targets(session: Session, comps: dict[str, ComponentReference]) -> 
     return [c for cid, c in admitted_components(session, comps).items() if cid not in core and is_probeable(c)]
 
 
+def unadmitted_probeable(session: Session, comps: dict[str, ComponentReference], *, domain: str | None) -> set[str]:
+    """Live catalog components that have a real probe but that reconcile never probes, as seen from *domain*:
+    no human admitted them (no TRIAL/PROMOTION, or a later REJECTION/revocation). The views use it so a coverage
+    gap or an installation reason never asks for a reconcile that cannot cover the component. A component counts
+    as admitted only when reconcile admits it (PERSONAL decisions) AND the viewing domain sees that admission, so
+    a PERSONAL decision never changes an OFFICE or domain-less view (§23)."""
+    from aeos.inventory.decisions import decision_states
+
+    cands = {cid: c for cid, c in comps.items()
+             if c.tombstoned_at is None and c.requirement not in CORE_REQUIREMENTS and is_probeable(c)}
+    if not cands:
+        return set()
+    admitted = admitted_components(session, cands)
+    if admitted and domain != ADMISSION_DOMAIN:
+        seen = decision_states(session, admitted, domain=domain)
+        admitted = {cid: c for cid, c in admitted.items() if seen[cid].admission in ADMITTED_STATES}
+    return set(cands) - set(admitted)
+
+
 # ---------------------------------------------------------------- managed-scope sources
 
 

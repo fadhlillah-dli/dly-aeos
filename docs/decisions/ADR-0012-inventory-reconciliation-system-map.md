@@ -21,7 +21,9 @@ edges, and immutable ArchitectureSnapshots for render/diff/audit.
    reconciliation probes the REQUIRED/OPTIONAL components with a probe plus every component a human admitted
    (TRIAL_APPROVED/APPROVED, derived from the Decision registry as the views derive it, PERSONAL or platform
    decisions only, never an OFFICE-only component) that has a probe; it lists them as `scope.admitted`. A scoped
-   refresh of a DISCOVERED/UNDER_REVIEW candidate is SKIPPED. A version command that writes state or calls the
+   refresh of a DISCOVERED/UNDER_REVIEW candidate is SKIPPED. Coverage and the installation dimension use the
+   same scope: a candidate with a probe that no human admitted (as seen from the viewing domain) is a not-probed
+   candidate, never a NEVER_PROBED or STALE_OBSERVATIONS gap. A version command that writes state or calls the
    network is not a probe: such a component keeps probe `none` with the reason, and the Doctor check
    `inventory.admitted_unprobed` lists admitted components without a probe (CONFIGURED, informational, in no
    capability). Host-specific probe locations (a venv outside PATH) have no configuration mechanism yet.

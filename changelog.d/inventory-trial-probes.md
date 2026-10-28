@@ -5,7 +5,10 @@
   installation UNKNOWN after the install and Refresh could not change it. A full run now also probes every component
   that a human admitted (TRIAL_APPROVED/APPROVED, derived from the Decision registry as the views derive it, PERSONAL
   or platform decisions only, never an OFFICE-only component) and lists them as `scope.admitted`; the poll loop follows
-  the same set. A scoped refresh of a DISCOVERED/UNDER_REVIEW candidate is SKIPPED. The InstallManifest gives `pi`,
+  the same set. A scoped refresh of a DISCOVERED/UNDER_REVIEW candidate is SKIPPED, and the views count a candidate
+  with a probe that no human admitted (or whose trial was rejected or revoked) as a not-probed candidate, not as a
+  NEVER_PROBED or STALE_OBSERVATIONS gap, and its installation reason says it is not admitted instead of asking for a
+  reconcile that cannot cover it. The InstallManifest gives `pi`,
   `serena`, `context7` (`context7-mcp`), `codebase-memory-mcp`, `rtk`, `ccusage`, `copier` and `temporal`
   (`temporal-server`, `tdbg`) a `--version` binary probe, checked read-only on macOS arm64 (no file written in an
   empty home, no network needed). `goose`, `promptfoo` and `toolhive` keep probe `none` with the reason (their version

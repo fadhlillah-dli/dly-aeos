@@ -259,3 +259,91 @@ def test_recorded_proposal_trial_stales_the_admission_check(seeded, owner, setti
     _decide(seeded, owner, _proposal(seeded, candidates=["goose"]), "TRIAL")
     seeded.commit()
     assert latest_results(seeded)["inventory.admitted_unprobed"].status == "STALE"
+
+
+# ---------------------------------------------------------------- views: only what reconcile can cover is a gap
+
+# the catalog candidates whose manifest probe is a real binary probe (reconcile probes them only once admitted)
+PROBED_CANDIDATES = {"pi", "serena", "context7", "codebase-memory-mcp", "rtk", "ccusage", "temporal", "copier"}
+
+
+def _coverage(db, domain="PERSONAL"):
+    from aeos.inventory import views
+
+    return views.coverage(db, domain=domain, compact=True)
+
+
+def _installation(db, cid, domain="PERSONAL"):
+    from aeos.inventory import views
+
+    return views.component_detail(db, cid, domain=domain)["lifecycle"]["installation"]
+
+
+def test_manifest_candidates_with_a_probe_are_the_expected_set(seeded):
+    from aeos.inventory.reconcile import CORE_REQUIREMENTS, is_probeable
+
+    got = {c.component_id for c in seeded.scalars(select(ComponentReference))
+           if c.requirement not in CORE_REQUIREMENTS and is_probeable(c)}
+    assert got == PROBED_CANDIDATES
+
+
+def test_unadmitted_candidates_with_a_probe_are_no_never_probed_gap(seeded, settings, repo):
+    reconcile(seeded, settings, runner=_runner(), repo=repo)
+    seeded.commit()
+    cov = _coverage(seeded)
+    codes = {g["code"]: g["message"] for g in cov["gaps"]}
+    assert "NEVER_PROBED" not in codes, "candidates no human admitted are reported as never probed: " + str(
+        codes.get("NEVER_PROBED"))
+    assert cov["totals"]["never_probed"] == 0
+    assert cov["totals"]["not_probed_candidates"] >= len(PROBED_CANDIDATES)
+    inst = _installation(seeded, "pi")
+    assert inst["value"] == "UNKNOWN" and "belum di-admit" in inst["reason"], inst
+    assert "jalankan aeos inventory reconcile" not in inst["reason"]
+
+
+def test_an_admitted_candidate_not_yet_probed_is_a_never_probed_gap(seeded, owner, settings, repo):
+    """Near miss: a TRIAL_APPROVED candidate is one reconcile covers, so 'never probed' is honest for it."""
+    reconcile(seeded, settings, runner=_runner(), repo=repo)
+    _decide(seeded, owner, _proposal(seeded, candidates=["serena"]), "TRIAL")
+    seeded.commit()
+    cov = _coverage(seeded)
+    assert cov["totals"]["never_probed"] == 1
+    assert "1 komponen yang dapat diprobe belum pernah diprobe" in {g["code"]: g["message"] for g in cov["gaps"]}[
+        "NEVER_PROBED"]
+    assert _installation(seeded, "serena")["reason"] == "belum diprobe; jalankan aeos inventory reconcile"
+
+
+def test_a_rejected_trial_leaves_no_stale_gap_reconcile_cannot_refresh(seeded, owner, settings, repo, monkeypatch):
+    from datetime import timedelta
+
+    from aeos.core.timeutil import utcnow
+    from aeos.inventory import views
+
+    p = _proposal(seeded, candidates=["serena"])
+    _decide(seeded, owner, p, "TRIAL")
+    seeded.commit()
+    reconcile(seeded, settings, runner=_runner(), repo=repo)
+    seeded.commit()
+    later = utcnow() + timedelta(days=3)  # past every probe TTL
+    monkeypatch.setattr(views, "utcnow", lambda: later)
+    admitted_stale = _coverage(seeded)["totals"]["stale_only"]  # near miss: serena is still admitted, so it counts
+    _decide(seeded, owner, p, "REJECTION")
+    seeded.commit()
+    rejected_stale = _coverage(seeded)["totals"]["stale_only"]
+    assert rejected_stale == admitted_stale - 1, "a REJECTED candidate still counts as a refreshable stale component"
+
+
+def test_a_personal_trial_does_not_change_the_office_coverage(seeded, owner, settings, repo):
+    reconcile(seeded, settings, runner=_runner(), repo=repo)
+    seeded.commit()
+    before = (_coverage(seeded, "OFFICE"), _installation(seeded, "serena", "OFFICE"))
+    personal_before = _coverage(seeded)["totals"]["never_probed"]
+    _decide(seeded, owner, _proposal(seeded, candidates=["serena"]), "TRIAL")
+    seeded.commit()
+    assert _coverage(seeded)["totals"]["never_probed"] == personal_before + 1  # the PERSONAL view did change
+    after = (_coverage(seeded, "OFFICE"), _installation(seeded, "serena", "OFFICE"))
+    for view in (before, after):
+        view[0].pop("last_reconciled_at", None)
+        view[0].pop("last_full_reconciled_at", None)
+        view[1].pop("at", None)
+    assert before == after, "a PERSONAL TRIAL changed the OFFICE coverage or installation view"
