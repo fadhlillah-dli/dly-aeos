@@ -80,6 +80,7 @@ def test_output_cap_enforced_while_worker_runs(tmp_path: Path, monkeypatch):
     started = time.monotonic()
     out = parser.run_parser(src, "text", max_output_bytes=10_000, timeout=30)
     assert out.status == "FAILED" and out.error_code == "PARSE_OUTPUT_TOO_LARGE"
+    # timing-cap: 20 s vs a measured 1.3 s (15x); without the output cap the run ends at the 30 s timeout
     assert time.monotonic() - started < 20
 
 

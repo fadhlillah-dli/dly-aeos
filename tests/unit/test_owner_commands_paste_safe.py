@@ -300,7 +300,8 @@ def test_fence_regex_is_linear_on_hostile_prefixes(hostile: str) -> None:
 
     start = time.perf_counter()
     assert FENCE.match(hostile) is None
-    assert time.perf_counter() - start < 0.5
+    # timing-cap: 5 s vs a measured 15 us; the old regex doubled per repeat (0.2 s at 20 repeats, 40 here)
+    assert time.perf_counter() - start < 5.0
 
 
 # ------------------------------------------- bite tests: delete after an unproven copy (data-loss class)

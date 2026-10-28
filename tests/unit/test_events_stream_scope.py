@@ -95,6 +95,7 @@ def test_domain_switch_elsewhere_ends_the_stream(personal_client: Any, fast_stre
     worker.join(5)
     assert '"type": "ready"' in body
     assert "test.after_switch" not in body, "PERSONAL event delivered to a session that switched to OFFICE"
+    # timing-cap: the 8 s safety stop vs a measured 0.4 s end (20x); without the fix it ends only there
     assert elapsed < SAFETY_SECONDS, "stream kept running after the session scope changed"
 
 
@@ -103,6 +104,7 @@ def test_logout_ends_the_stream(personal_client: Any, fast_stream: dict[str, flo
     body, elapsed = _stream(personal_client, fast_stream)
     worker.join(5)
     assert "test.after_logout" not in body, "event delivered after the session was revoked"
+    # timing-cap: the 8 s safety stop vs a measured 0.4 s end (20x); without the fix it ends only there
     assert elapsed < SAFETY_SECONDS, "stream kept running after logout"
 
 

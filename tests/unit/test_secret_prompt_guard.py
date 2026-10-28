@@ -226,6 +226,7 @@ def test_subprocess_blocks_a_secret_and_stays_inside_a_loose_time_budget(interpr
     assert decision["decision"] == "block" and "Anthropic API key" in decision["reason"]
     assert secret.encode() not in proc.stdout
     # the design target is < 200 ms; the bound is loose because a loaded CI host starts Python slowly
+    # timing-cap: 10 s vs a measured 0.06 s hook run (170x); only a hang or a stuck import reaches it
     assert elapsed < 10, f"hook took {elapsed:.2f}s"
 
 
@@ -244,6 +245,7 @@ def test_subprocess_is_silent_for_a_clean_prompt_and_for_garbage(interpreter: st
     for stdin in (_payload("refactor the config loader please").encode(), b"{", b"", b"\xff\xff"):
         proc, elapsed = _run(stdin, interpreter)
         assert proc.returncode == 0 and proc.stdout == b"" and proc.stderr == b""
+        # timing-cap: 10 s vs a measured 0.06 s hook run (170x); only a hang or a stuck import reaches it
         assert elapsed < 10
 
 
@@ -253,6 +255,7 @@ def test_a_large_prompt_with_many_pem_headers_is_scanned_in_linear_time() -> Non
     started = time.monotonic()
     decision = _decide(prompt)
     assert decision is not None and "private key" in str(decision["reason"])
+    # timing-cap: 10 s vs a measured 0.03 s scan (370x); only catastrophic backtracking reaches it
     assert time.monotonic() - started < 10
 
 

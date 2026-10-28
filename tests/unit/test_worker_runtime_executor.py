@@ -338,6 +338,7 @@ def test_timeout_kills_worker(settings, setup):
     t0 = time.monotonic()
     executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
+    # timing-cap: 60 s vs a measured 2.1 s (the 1 s timeout plus the kill, 28x); a missing kill waits 120 s
     assert time.monotonic() - t0 < 60
     assert run.outcome_code == "TIMEOUT" and not processes.is_alive(run.pid, run.pid_create_time)
 
@@ -519,6 +520,7 @@ def test_out_of_scope_edit_stops_the_run_at_once(settings, setup):
     t0 = time.monotonic()
     res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, te = _load(run_id, task_id)
+    # timing-cap: 45 s vs a measured 1.5 s (30x); without the scope stop the run ends at the 60 s timeout
     assert time.monotonic() - t0 < 45, "the worker would have slept 120 s / hit the 60 s timeout"
     assert res["stop_reason"] == "SCOPE_VIOLATION" and run.outcome_code == "SCOPE_VIOLATION"
     assert run.caps["scope_stop"] is True and run.quarantined

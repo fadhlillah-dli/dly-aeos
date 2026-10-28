@@ -1008,6 +1008,7 @@ def test_a_command_past_its_deadline_is_stopped_with_exit_124():
     started = time.monotonic()
     proc = _deadline("0.02", "--", sys.executable, "-c", "import time; time.sleep(60)")
     assert proc.returncode == 124 and "deadline" in proc.stderr
+    # timing-cap: 30 s vs a measured 1.3 s (the 1.2 s deadline plus start and stop); no stop waits the 60 s
     assert time.monotonic() - started < 30
 
 

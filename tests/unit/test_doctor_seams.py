@@ -812,6 +812,7 @@ def test_startup_doctor_runs_under_lifespan_without_blocking(settings, db, fake_
         deadline = time.monotonic() + 60
         while worker._thread is not None and worker._thread.is_alive() and time.monotonic() < deadline:
             time.sleep(0.1)
+    # timing-cap: 15 s vs a measured 0.015 s startup (1000x); a blocking startup waits the 20 s gate
     assert entered < 15  # a blocking startup would have waited for the 20 s gate (no tight timing)
     db.expire_all()
     run = db.scalar(select(DoctorRun).where(DoctorRun.trigger == "startup"))

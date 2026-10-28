@@ -216,6 +216,15 @@ record format) when the run was FULL and the tree CLEAN; otherwise it prints one
 A delegated builder that cannot run the full suite says so; the delegating session runs it before the push
 (`docs/agent/DELEGATION-BRIEF.md` rule 7).
 
+**Timing bounds state their margin** (LESSONS L15). A fixed time bound measures the machine, not the code (on
+2026-10-28 a 0.5 s CPU bound took 0.13 s on arm64 and 0.54 s on the Intel macOS runner). Prefer a relative check:
+linear growth (the time for a larger input against a multiple of the time for a smaller one, with a floor for
+noise) or the alternative the test rules out (the grace period, the timeout, the child's sleep). Where a fixed bound
+is the honest check, put `# timing-cap: <margin>` on the assert's line or the line directly above it, saying how far
+the bound is from the measured normal cost (`# timing-cap: 10 s vs a measured 0.06 s run; only a hang reaches it`);
+under about 10x, widen the bound or make it relative. `tests/unit/test_timing_bounds_declared.py` fails on an
+undeclared fixed bound on a measured time.
+
 Commit subjects follow Conventional Commits, `type(scope)?!?: description` (types `feat`, `fix`, `docs`,
 `test`, `ci`, `build`, `chore`, `refactor`, `perf`, `style`, `revert`, `security`; at most 100 characters;
 merge commits are exempt from the format; `Revert "<inner>"` and `Reapply "<inner>"`, as `git revert` writes

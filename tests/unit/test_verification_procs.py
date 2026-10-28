@@ -368,10 +368,14 @@ def test_a_member_that_left_the_group_is_a_survivor_at_once_without_grace(monkey
     import time
 
     g, calls = _scripted_group(monkeypatch, scans=[[777], [], []], detached_pids={777})
+    grace = 2.0
     start = time.monotonic()
-    survivors = g.reap(grace=2.0)
+    survivors = g.reap(grace=grace)
+    took = time.monotonic() - start
     assert [s["pid"] for s in survivors] == [777] and survivors[0]["detached"] is True
-    assert calls["killed"] == 1 and time.monotonic() - start < 1.0  # no grace was waited
+    assert calls["killed"] == 1
+    # timing-cap: the bound is the grace itself; waiting it fails, the scripted reap takes about 20 us
+    assert took < grace, f"reap took {took:.3f} s: the grace was waited"
 
 
 def test_an_ordinary_member_still_gets_the_grace_to_finish_exiting(monkeypatch):
