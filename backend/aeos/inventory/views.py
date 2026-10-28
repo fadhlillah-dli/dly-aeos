@@ -308,9 +308,10 @@ def next_action(comp: ComponentReference, dims: dict[str, dict[str, Any]], drift
         return act("OUTSIDE_PROBE_DOMAIN", "Admission di luar domain probe: reconcile tidak mengamati instalasi "
                    "komponen ini; periksa instalasi secara manual", link="/decisions")
     if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and not is_probeable(comp) \
-            and inst["value"] == "UNKNOWN":
+            and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):
         # admitted but the manifest probe is none: reconcile can never observe it, so "pasang lalu probe" would be an
-        # unsatisfiable next action (Doctor inventory.admitted_unprobed lists these)
+        # unsatisfiable next action (Doctor inventory.admitted_unprobed lists these); also when an older observation
+        # still says NOT_INSTALLED (the probe was set to none after it)
         return act("ADD_PROBE", "Admitted tanpa probe: instalasi tidak dapat diamati; tambahkan probe manifest (PR)",
                    link="/readiness")
     if dims["admission"]["value"] in ("TRIAL_APPROVED", "APPROVED") and inst["value"] in ("UNKNOWN", "NOT_INSTALLED"):

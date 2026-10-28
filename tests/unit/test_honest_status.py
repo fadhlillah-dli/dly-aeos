@@ -121,6 +121,9 @@ def test_admitted_without_probe_is_asked_for_a_probe_not_an_install(admission):
     action = views.next_action(_comp(probe={}), _dims(admission, "UNKNOWN"), [], {"status": "NO_PIN"})
     assert action["code"] == "ADD_PROBE", action
     assert action["command"] is None and action["link"] == "/readiness"
+    # an older NOT_INSTALLED observation of a component whose probe is now none: still no install-and-probe request
+    stale = views.next_action(_comp(probe={}), _dims(admission, "NOT_INSTALLED"), [], {"status": "NO_PIN"})
+    assert stale["code"] == "ADD_PROBE", f"unprobeable admitted NOT_INSTALLED component asked to {stale['code']}"
     # near misses: a probeable admitted component still asks to install; an unadmitted unprobed one is no probe request
     assert _code(admission, "UNKNOWN") == "INSTALL_TRIAL"
     assert views.next_action(_comp(probe={}), _dims("DISCOVERED", "UNKNOWN"), [], {"status": "NO_PIN"})["code"] \
