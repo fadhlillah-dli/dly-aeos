@@ -556,8 +556,10 @@ Copy the route key and its config hash from the `routes list` output.
   4. To undo a move before you record any decision on it: the same command with `--pool WATCHLIST`.
 * **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models (ids ending in
   `:free`) may serve worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes;
-  CONFIDENTIAL never goes to a worker route. Other OpenRouter routes keep the rules above (a paid route needs a BUDGET
-  decision); among OpenRouter routes `set-pool` moves only `:free` routes. Since your decision of 2026-10-28
+  CONFIDENTIAL never goes to a worker route. The DLY AEOS project's own tasks are INTERNAL until you record its
+  PUBLIC classification ([2.13](#213-data-classification-of-the-dly-aeos-project-per-machine)). Other OpenRouter
+  routes keep the rules above (a paid route needs a BUDGET decision); among OpenRouter routes `set-pool` moves only
+  `:free` routes. Since your decision of 2026-10-28
   (decision C', ADR-0124) a free route is the fallback for PUBLIC tasks: the Go routes rank first, and a PUBLIC task
   uses a free route when no Go route can take it (busy, cooling down, out of 5h allowance or past PUBLIC's share). When
   the free tier is at its limit and no Go route can take the task, it waits (`FREE_TIER_LIMIT_REACHED`, shown as
@@ -1162,6 +1164,34 @@ Each item below is recorded either as an ADR, through the builder, or with the c
   was ever real, rotate it first.
 * **GitHub profile (optional).** Contributions on the public repository count once commits land on `main` with
   your verified or noreply address.
+
+### 2.13 Data classification of the DLY AEOS project [per machine]
+
+Decided 2026-10-29: the DLY AEOS project (`dly-aeos`, PERSONAL) becomes PUBLIC, because its repository is public
+on GitHub. `aeos seed` registers it INTERNAL. Until this is recorded, every task planned for it is at least
+INTERNAL, so the PUBLIC-only routes (DeepSeek on OpenCode Go, the free OpenRouter models) never take its tasks
+(ADR-0133).
+
+Record: you approve in chat and the maintainer runs this as your actor (your rule of 2026-10-29), or you run it
+yourself. It asks for no password; `<admin>` is your SUPER_ADMIN username:
+
+```bash
+./aeos project reclassify --project dly-aeos --domain PERSONAL \
+  --to PUBLIC --actor "<admin>" \
+  --reason "owner decision 2026-10-29: the repository is public"
+```
+
+What it records: a POLICY decision on `project_classification:<project id>` naming the old class INTERNAL, the new
+class PUBLIC, your reason and your username, plus the audit record `portfolio.project.reclassify` and the event
+`portfolio.project.reclassified` with the same facts. What it does not change: TaskSpecs that already exist keep
+their class (INTERNAL). Only plans and task DAGs compiled afterwards use PUBLIC as their floor, and a task is PUBLIC
+only when its plan says so. Check it with `./aeos project list --domain PERSONAL` (the class column) and
+`./aeos policy decisions --kind POLICY --target-type project_classification`.
+
+To undo: run the command again with `--to INTERNAL` (a raise needs no decision; it ends the lowering decision), or
+revoke the decision with `./aeos policy revoke <decision id> --as "<admin>" --reason "<why>"` (asks for your
+password), which restores INTERNAL. An OFFICE project is never lowered by this command: that is the company's
+authorisation ([4.1](#41-company-authorisation-for-office)). Raising an OFFICE project is allowed.
 
 ---
 

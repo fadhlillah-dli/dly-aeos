@@ -409,6 +409,34 @@ snapshot is never a live status.
   `RETIREMENT_CHECKLIST_STALE` / `RETIREMENT_REQUIRES_RETIRING`); lifecycle `RETIRED` is refused
   (`RETIREMENT_NOT_VERIFIED`) unless that decision still matches the current checklist.
 
+## Project data classification (ADR-0133)
+
+A project's data classification is chosen when it is created (`aeos seed` registers the DLY AEOS project INTERNAL)
+and is the floor of its work: each task gets the higher of the project class and the class its plan states, and
+routing sends a task only to routes that allow its class. `aeos project reclassify` is the one path that changes it
+(owner decision 2026-10-29: the DLY AEOS project becomes PUBLIC, [OWNER_ACTIONS 2.13](OWNER_ACTIONS.md#213-data-classification-of-the-dly-aeos-project-per-machine)):
+
+```bash
+./aeos project reclassify --project dly-aeos --domain PERSONAL \
+  --to PUBLIC --actor "<admin>" \
+  --reason "owner decision 2026-10-29: the repository is public"
+```
+
+| Question | Answer |
+|---|---|
+| Raise (more restrictive) | allowed for an active SUPER_ADMIN whose scope covers the project, in both domains; audit record `portfolio.project.reclassify` and event `portfolio.project.reclassified`, no decision. It also ends (INVALIDATED) the project's ACTIVE lowering decision |
+| Lower | a POLICY decision on `project_classification:<project id>` (`target_version` = the new class, details `from_classification`/`to_classification`), plus the audit record and the event; all three name old class, new class, reason and actor. Needs an active SUPER_ADMIN (`LOWERING_NEEDS_SUPER_ADMIN` otherwise); an ARCHIVED or RETIRED project is refused (`PROJECT_READ_ONLY`). A newer lowering supersedes the previous decision |
+| OFFICE | never lowered by this command (`OFFICE_LOWERING_DENIED`): which OFFICE data classes may leave the host is the company's authorisation (master §23, `approved_data_classes`). Raising is allowed |
+| In-flight work | TaskSpecs are immutable and keep the class they were compiled with; routing, review and context packs read the task's class. Only plans and task DAGs compiled afterwards use the new floor. After a raise the delivery gate G0 refuses a task below the new class; the command lists open tasks below it so you can cancel and re-plan them |
+| Refused input | an unknown class (`INVALID_CLASSIFICATION`), a reason under 10 characters (`REASON_TOO_SHORT`), an actor who is not active (exit 2) or is VIEWER, a project of the other domain ("not found"). Every policy refusal is a DENIED audit record. The same class again records nothing |
+| Undo | raise it again with the same command, or revoke the decision (`aeos policy revoke <decision id>`): a revoked lowering decision that still backs the class restores the class it lowered from (audit trigger `decision_inactive`) |
+| Not here | `PATCH /api/projects/{id}` refuses `data_classification` (`FIELD_NOT_EDITABLE`, pointing at this command); `aeos policy decide` refuses the target (`DEDICATED_ENDPOINT_REQUIRED`) |
+| Actor | the command names the actor and asks no password (like `aeos plan`): the owner approves in chat, the maintainer runs it as the owner's actor, and the decision states it (`details.actor_check`) |
+
+How to read it: *Keputusan* lists the POLICY decision (`./aeos policy decisions --kind POLICY --target-type
+project_classification`); *Riwayat, Audit & Pemulihan* > Audit shows `portfolio.project.reclassify` with
+`from`, `to`, `direction`, `actor_username`, `decision_id` and the in-flight TaskSpec counts.
+
 ## Dependency lockfile
 
 `requirements.lock` is a **universal** lock (Windows, macOS, Linux; markers such as

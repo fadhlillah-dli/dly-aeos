@@ -29,6 +29,16 @@ def repositories(session: Session, project_id: str) -> list[RepositoryReference]
 # ---- additive (non-breaking) contract ---------------------------------------------------------------
 
 
+def on_classification_decision_inactive(session: Session, decision: Any) -> dict[str, Any] | None:
+    """Additive (ADR-0133): the decision registry calls this when a POLICY decision on
+    ``project_classification/<project id>`` stops being ACTIVE. A revoked or expired lowering decision that still
+    backs the project's class restores the class it lowered from (fail closed); a superseded one, or one a later
+    raise already ended, changes nothing. Returns what was restored, or None."""
+    from aeos.portfolio.reclassify import on_decision_inactive as impl
+
+    return impl(session, decision)
+
+
 def inventory_for_project(session: Session, project_id: str, *, commit: str | None = None) -> dict:
     """Read-only inventory of the project's registered primary repository (ADR-0022 §6) for
     ``PlanningContext.repo_inventory``. Raises ``NotFound``/``Blocked`` (no repository/checkout) and
