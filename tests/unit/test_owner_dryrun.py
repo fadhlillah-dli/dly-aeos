@@ -81,8 +81,12 @@ def no_host_process(monkeypatch):
     """Every subprocess.Popen in this file is refused (never started) and recorded; a test that attempted one fails.
 
     The real Docker CLI talks to the owner's daemon over a Unix socket and the real opencode is a host binary: neither
-    may run from these tests (review finding on 729940b)."""
+    may run from these tests (review finding on 729940b). The Doctor's freshness checks (runtime.frontend_fresh,
+    runtime.code_drift) ask git about the checkout; here they get a fixed answer instead of a git process (main went
+    red on 3ba0dec when both arrived together, LESSONS L24)."""
     import subprocess
+
+    from aeos.operations import freshness
 
     started: list[list[str]] = []
 
@@ -91,6 +95,7 @@ def no_host_process(monkeypatch):
         raise OSError("the owner dry-run tests never start a host process")
 
     monkeypatch.setattr(subprocess, "Popen", refuse)
+    monkeypatch.setattr(freshness, "_git", lambda repo, *args, timeout=30: None)  # "not a git checkout": no process
     yield started
     assert started == [], f"a test started a host process: {started}"
 
