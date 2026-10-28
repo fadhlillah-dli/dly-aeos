@@ -386,8 +386,6 @@ def activate(route_key: str, body: ActivateBody, db: DB, principal: AdminPrincip
                  details={"mode": body.mode, "decision_id": decision.id, "config_hash": route.config_hash,
                           "budget_decision_id": body.budget_decision_id, "eval_run_ids": body.eval_run_ids or [],
                           "client_terms": bool(body.client_terms)})
-    emit(db, source="routing", kind="route.activated", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
-         entity_version=route.config_hash, payload={"mode": body.mode, "decision_id": decision.id})
     db.commit()
     return {"route": route_view(db, route, principal), "decision_id": decision.id, "decision_kind": decision.kind}
 
@@ -456,7 +454,5 @@ def disable(route_key: str, body: DisableBody, db: DB, principal: AdminPrincipal
     route = service.disable_route(db, route_key, reason=body.reason)
     audit.record(db, actor_type="user", actor_id=principal.user.id, action="route.disable",
                  target_type=service.TARGET_TYPE, target_id=route.route_key, reason=body.reason)
-    emit(db, source="routing", kind="route.disabled", entity_type=service.TARGET_TYPE, entity_id=route.route_key,
-         payload={"reason": body.reason})
     db.commit()
     return {"route": route_view(db, route, principal)}

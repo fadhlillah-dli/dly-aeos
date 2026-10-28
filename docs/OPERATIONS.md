@@ -537,6 +537,15 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
   Deployment target" / "Produksi — Deployment target": the https base URL and an optional health path (validated
   with the observer's rule). AEOS only GETs it (G6/G8, `aeos delivery observe-target`, `aeos docs screenshot`);
   deploying stays a human action. The GitHub Actions pipeline reference is "CI — GitHub Actions" on the same page.
+* **Route keys (2026-10-28):** routing rejects a remote route whose key (`mode_params.credential_ref`, or the default
+  OpenRouter worker keys) is not stored, with `credential <ref> not stored: aeos secrets set <ref>`; a sealed,
+  unreachable or unknown store rejects every keyed route (fail closed). It is a status lookup, only for a route
+  nothing else rejects and once per reference and eligibility call, never a value read and never a provider call;
+  loopback LOCAL and `claude-native` routes need no key. Doctor: `route.registry` names the active routes kept out ("Dikecualikan: kunci belum disimpan");
+  `route.worker_key` lists them as a non-blocking note while another route is eligible (both remedies: store the
+  key, or `aeos routes disable <key> --reason "..."`) and stays MISSING when no route is left. Storing or deleting a
+  `workers/*` or `personal/openrouter` key marks both checks STALE. Route activation and disable emit
+  `route.activated` / `route.disabled` once from the routing service, so the CLI and the API record the same event.
 * **Route feasibility (ARENA/COMPARATOR/LOCAL, ADR-0111; WORKER too):** activate the free (or local, or flat-fee
   subscription) route as TRIAL (owner decision),
   then `aeos broker probe-route <route_key>` / `POST /api/broker/routes/<key>/feasibility` sends one synthetic

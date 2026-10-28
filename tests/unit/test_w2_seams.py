@@ -288,7 +288,7 @@ def test_secret_purposes_follow_the_secrets_contract():
     check_purpose(provider.SECRET_REF, provider.SECRET_PURPOSE)
 
 
-def test_routing_rejects_routes_the_broker_could_not_authenticate(db):
+def test_routing_rejects_routes_the_broker_could_not_authenticate(db, worker_keys):
     from aeos.routing.service import credential_rejections
 
     zen = ModelRoute(route_key="z", pool="WORKER", provider="opencode-zen",
@@ -605,7 +605,7 @@ def test_branch_update_observation_failure_never_hides_a_landed_push(db, monkeyp
         "OBSERVATION_FAILED (OBSERVATION_REFUSED)"
 
 
-def test_routing_credential_rule_matches_the_broker(db):
+def test_routing_credential_rule_matches_the_broker(db, worker_keys):
     """Routing must not select a route the broker refuses: host parsing for loopback (not a prefix
     match) and no default OpenRouter credential for OFFICE (§26)."""
     from aeos.routing.service import credential_rejections

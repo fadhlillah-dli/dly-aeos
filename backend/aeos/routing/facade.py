@@ -141,3 +141,11 @@ def free_tier_count_lock(session: Session) -> bool:
     from aeos.routing.free_tier import acquire_count_lock as impl
 
     return impl(session)
+
+
+def unstored_credential_ref(reason: str) -> str | None:
+    """The secret reference a ``credential <ref> not stored: aeos secrets set <ref>`` rejection names (additive,
+    2026-10-28): the key the route needs is not in the secret store. None for any other reason."""
+    from aeos.routing.service import unstored_credential_ref as impl
+
+    return impl(reason)
