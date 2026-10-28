@@ -62,7 +62,7 @@ def test_seed_catalog_complete_and_creates_no_runs(db):
     res = seed.run(db)
     assert res["roles_created"] == len(ALL_ROLES) == 7 + 26 + 7
     assert len(PLANNING_ROLES) == 7 and len(EXECUTOR_ROLES) == 26 and len(SERVICE_ROLES) == 7
-    assert res["agents_created"] == 3
+    assert res["agents_created"] == 3 + 7  # implementer, reviewer, verifier + 7 category agents (ADR-0126)
     roles = list(db.scalars(select(RoleSkillPack)))
     assert {r.mode for r in roles} == {"DESIGN"} and {r.eval_status for r in roles} == {"NOT_EVALUATED"}
     assert all(r.revision_hash and r.version == "1" for r in roles)

@@ -134,8 +134,12 @@ def test_admission_waits_on_exhausted_route_quota_without_fallback(db, fakes):
 def test_lease_records_role_and_agent_revisions(db, fakes):
     """§50 'Role/model/mode diganti' -> configuration is versioned per attempt; history kept."""
     _p, specs = _ready(db, fakes, [{"task_key": "a", "role_key": "backend-api-engineer"}])
+    # ADR-0126: backend-api-engineer is served by the agentic-coder category agent (enabled by the owner)
+    agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == "agentic-coder"))
+    agent.enabled = True
+    db.flush()
     run = scheduler.acquire_lease(db, specs[0].id, actor="t")
-    agent = db.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == "opencode-implementer"))
+    assert run.agent_key == "agentic-coder"
     role = db.scalar(select(RoleSkillPack).where(RoleSkillPack.role_key == "backend-api-engineer"))
     assert run.agent_revision_hash == agent.revision_hash and run.role_revision_hash == role.revision_hash
     old = run.agent_revision_hash

@@ -8,6 +8,8 @@ import typer
 from rich.console import Console
 from rich.markup import escape
 
+from aeos.workforce.limits import HARD_MAX_ACTIVE
+
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
@@ -323,7 +325,8 @@ def role_eval_threshold(risk_class: str = typer.Argument(..., help="R0..R4: from
 
 
 @app.command("concurrency")
-def concurrency(max_active: int = typer.Argument(..., min=1, max=2, help="1 (pilot) or 2"),
+def concurrency(max_active: int = typer.Argument(..., min=1, max=HARD_MAX_ACTIVE,
+                                                help=f"1 (pilot) to {HARD_MAX_ACTIVE}"),
                 as_user: str = AS_OPTION,
                 rationale: str = typer.Option("", help="Why (min 10 chars for 2 workers)"),
                 eval_run: str = typer.Option(None, help="COMPLETED topology-C EvalRun (2 workers)"),
