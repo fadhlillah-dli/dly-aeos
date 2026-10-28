@@ -31,6 +31,7 @@ from aeos.claude_bridge.env import assert_clean, child_env, parent_hygiene
 from aeos.claude_bridge.facade import ClaudeRequest, ClaudeResult
 from aeos.claude_bridge.parsing import (
     ALLOWED_REQUEST_FAMILIES,
+    REFUSED_REQUEST_FAMILIES,
     cli_schema,
     family_of,
     is_pinned_id,
@@ -68,6 +69,7 @@ FORBIDDEN_FLAGS = frozenset({
     "--permission-mode", "--add-dir", "--agents", "--system-prompt", "--cloud", "--remote-control",
 })
 REQUIRED_FLAGS = ("-p", "--restricted", "--strict-mcp-config", "--no-session-persistence")
+MODEL_FAMILY_REFUSED = "MODEL_FAMILY_REFUSED"  # a request for a family AEOS never requests (ADR-0131)
 # Windows CreateProcess limits the whole command line to 32,767 characters *after* quoting (every '"' of the
 # JSON schema becomes '\"'). The planning contracts (plan_content/synthesis, ~19k chars compact, ~23k quoted)
 # fit; the limit is checked on the real quoted command line with a margin for the binary path. A schema that
@@ -135,11 +137,12 @@ CAPABILITY_TEST_MAX_AGE = timedelta(days=7)
 DOMAINLESS_PURPOSE_PREFIXES = ("doctor.",)
 
 # DESIGN default for display; the planning module's PlanVersion policy baseline is authoritative.
+# ADR-0131 (owner decision 2026-10-29): every planning and review stage uses Opus; Fable is never requested.
 SUPERVISOR_POLICY: dict[str, Any] = {
-    "allowed_families": ["opus", "fable"],
+    "allowed_families": ["opus"],
     "stages": {
-        "planning.primary": "opus", "planning.challenge": "fable", "planning.synthesis": "opus",
-        "planning.final": "fable", "review.checkpoint": "fable",
+        "planning.primary": "opus", "planning.challenge": "opus", "planning.synthesis": "opus",
+        "planning.final": "opus", "review.checkpoint": "opus",
     },
     "fallback": "NONE - queue waits; switching supervisor needs an approved policy change",
     "mode": "DESIGN",
@@ -212,8 +215,12 @@ def validate_request(request: ClaudeRequest) -> tuple[str, str] | None:
     """Return (code, message) when the request must not be sent at all."""
     model = (request.model or "").strip()
     fam = family_of(model)
+    if fam in REFUSED_REQUEST_FAMILIES:
+        # ADR-0131: refused by family (alias, pinned id or any spelling the parser recognises), never sent
+        return MODEL_FAMILY_REFUSED, (f"model {model!r} is refused: DLY AEOS never requests the Claude {fam} family "
+                                      "(owner decision 2026-10-29, ADR-0131); planning and review stages use opus")
     if fam not in ALLOWED_REQUEST_FAMILIES or not (model.lower() in ALLOWED_REQUEST_FAMILIES or is_pinned_id(model)):
-        return "REQUEST_INVALID", f"model {model!r} is not an allowed supervisor alias/pinned id (opus/fable/sonnet)"
+        return "REQUEST_INVALID", f"model {model!r} is not an allowed supervisor alias/pinned id (opus/sonnet)"
     bad_tools = sorted(set(request.allowed_tools) - READ_ONLY_TOOLS)
     if bad_tools:
         return "TOOL_NOT_ALLOWED", f"supervisor runs are read-only; tools not allowed: {bad_tools}"

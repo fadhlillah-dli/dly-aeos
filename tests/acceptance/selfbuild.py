@@ -171,7 +171,7 @@ def review(client: AuthedClient, run_id: str) -> dict[str, Any]:
     return r.json()
 
 
-def claude_code_envelope(structured: dict[str, Any], model: str = "claude-fable-5-1") -> dict[str, Any]:
+def claude_code_envelope(structured: dict[str, Any], model: str = "claude-opus-5-5") -> dict[str, Any]:
     """What `claude -p --output-format json` prints for the manual package: the result envelope whose
     ``modelUsage`` proves which Claude model answered (§15 — a bare JSON object proves nothing)."""
     import json

@@ -1,14 +1,17 @@
 """Planning & Blueprint service (§05 steps 6-10, §12, §14, §15, §21).
 
 Lifecycle: PlanningContext (DATA with provenance) -> Plan (DRAFT -> CONTEXT_READY) -> four bounded
-activities through the official Claude Code bridge (Primary Planner/opus -> Planning Challenger/fable
--> Planning Synthesizer/opus -> Final Planning Reviewer/fable) -> READY_FOR_HUMAN_REVIEW -> human
-decision bound to the exact PlanVersion + manifest hash.
+activities through the official Claude Code bridge (Primary Planner/opus -> Planning Challenger/opus
+-> Planning Synthesizer/opus -> Final Planning Reviewer/opus; ADR-0131: the Fable family is never requested)
+-> READY_FOR_HUMAN_REVIEW -> human decision bound to the exact PlanVersion + manifest hash.
 
 Guarantees:
 * Domain/goal come only from the human-created records; model output and attachments are DATA.
 * Each stage records a PlanningRun (requested/resolved model, engine version, input/output hash,
   usage, trace) and a PlanningArtifact. A resolved model outside the policy family fails the stage.
+* Each stage is its own bridge invocation in a fresh context (new supervisor directory, ``--no-session-persistence``,
+  ``--resume``/``--continue`` refused); a reviewer answering in its author's session fails (REVIEWER_NOT_INDEPENDENT).
+  That separation, not a second model family, is what keeps the Challenger and the Final Reviewer independent.
 * No stage is ever skipped. Bridge unavailable -> manual package + AWAITING_MANUAL_CLAUDE (never the
   Claude API); quota exhausted -> checkpoint + NEEDS_DECISION; OFFICE -> capability + company policy
   gate before any model call.
@@ -88,8 +91,9 @@ BRIDGE_UNAVAILABLE_CODES = frozenset({
 })
 
 PLANNING_BASELINE: dict[str, Any] = {
-    "name": "opus-fable-4-stage",
-    "source": "master §02, §15, §17: Opus -> Fable -> Opus -> Fable planning baseline",
+    "name": "opus-only-4-stage",
+    "source": "master §02, §15, §17 as amended by ADR-0131 (owner decision 2026-10-29): Opus -> Opus -> Opus -> Opus "
+              "planning baseline; the Claude Fable family is never requested; each stage runs in a fresh context",
     "stages": [{"stage": s.state.value, "role": s.role, "model": s.model, "family": s.family} for s in STAGES],
     "skippable": False,
     "change_rule": "Reducing or skipping a stage is a policy change that needs evaluation and a recorded POLICY "

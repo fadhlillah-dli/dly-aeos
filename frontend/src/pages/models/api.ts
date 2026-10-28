@@ -23,7 +23,7 @@ export function useRouteDetail(key: string | null) {
 export function useCapabilityTest() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (model: "opus" | "fable") => post<CapabilityTestView & { status: string }>("/api/claude/capability-test", { model }),
+    mutationFn: (model: "opus") => post<CapabilityTestView & { status: string }>("/api/claude/capability-test", { model }),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ["claude-status"] });
       qc.invalidateQueries({ queryKey: ["routes"] });

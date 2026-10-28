@@ -193,7 +193,7 @@ class FakeClaude:
     def _result(self, req: Any, structured: dict[str, Any] | None, **kw: Any) -> Any:
         return bridge_facade.ClaudeResult(
             ok=kw.pop("ok", True), structured=structured, text="", model_requested=req.model,
-            model_resolved=kw.pop("model_resolved", RESOLVED.get(req.model, "claude-fable-5-1")),
+            model_resolved=kw.pop("model_resolved", RESOLVED.get(req.model, "claude-opus-5-5")),
             engine_version="2.1.301 (e2e scripted claude)", session_id=f"e2e-{len(self.calls)}",
             usage={"input_tokens": 100, "output_tokens": 40}, duration_ms=5, mode="NATIVE", **kw)
 
@@ -206,7 +206,7 @@ class FakeClaude:
                 return self._result(req, None, ok=False, model_resolved=None, error_code="QUOTA_EXHAUSTED",
                                     error="weekly limit reached", quota_exhausted=True)
             return self._result(req, review_payload(self.review_verdict, copy.deepcopy(self.review_findings)),
-                                model_resolved="claude-fable-5-1")
+                                model_resolved="claude-opus-5-5")  # ADR-0131: the checkpoint review is opus
         raise AssertionError(f"unexpected bridge purpose {req.purpose}")
 
 

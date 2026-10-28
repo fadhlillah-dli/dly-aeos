@@ -28,13 +28,14 @@ export const EXCEPTION_PRESETS: Record<string, { label: string; target: string; 
   },
 };
 
-/** §15 supervisor stage-model pin: the exact target planning.configured_stage_models reads, and its stages. */
+/** §15 supervisor stage-model pin: the exact target planning.configured_stage_models reads, and its stages.
+ * ADR-0131 (owner decision 2026-10-29): every stage is in the Opus family; Fable is never requested. */
 export const STAGE_MODEL_TARGET = { type: "planning_baseline", id: "stage_models" } as const;
 export const PLANNING_STAGES: { stage: string; family: string }[] = [
   { stage: "PRIMARY_PLANNING", family: "opus" },
-  { stage: "CHALLENGE_REVIEW", family: "fable" },
+  { stage: "CHALLENGE_REVIEW", family: "opus" },
   { stage: "SYNTHESIS", family: "opus" },
-  { stage: "FINAL_REVIEW", family: "fable" },
+  { stage: "FINAL_REVIEW", family: "opus" },
 ];
 
 /**

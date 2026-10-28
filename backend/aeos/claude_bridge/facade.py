@@ -23,7 +23,7 @@ class ClaudeRequest:
 
     purpose: str  # planning.primary|planning.challenge|planning.synthesis|planning.final|review.checkpoint|...
     role: str
-    model: str  # alias or pinned id from policy (e.g. "opus", "fable")
+    model: str  # alias or pinned id from policy (e.g. "opus", "claude-opus-5-5"); "fable" is refused (ADR-0131)
     prompt: str
     json_schema: dict[str, Any]
     project_id: str | None = None

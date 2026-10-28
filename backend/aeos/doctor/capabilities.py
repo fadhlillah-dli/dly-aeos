@@ -77,7 +77,7 @@ RULES: dict[Capability, CapRule] = {
         "Merencanakan proyek PERSONAL", (*BASE, "claude.env"),
         required=("claude.binary", "claude.auth", "claude.capability_test", "policy.snapshot"),
         advisory=("policy.mci", "claude.extra_billing", "claude.quota", "secret.no_raw_exposure"), domain="PERSONAL",
-        description="Planning Opus/Fable lewat Claude Code resmi (Max); tanpa bridge terbukti hanya paket manual."),
+        description="Planning empat tahap Opus lewat Claude Code resmi (Max); tanpa bridge terbukti hanya paket manual."),
     Capability.CAN_PLAN_OFFICE: CapRule(
         "Merencanakan proyek OFFICE", (*BASE, "claude.env", "policy.office_defaults"),
         required=("claude.binary", "claude.auth", "claude.capability_test", "policy.snapshot"),

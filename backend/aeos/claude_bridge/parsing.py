@@ -30,8 +30,13 @@ from jsonschema.exceptions import SchemaError
 
 from aeos.core.redaction import redact_text
 
+# Families the parser RECOGNISES in a resolved model (so an answer from any of them is identified and judged),
+# not the families AEOS may request: a Fable answer is named as fable and then fails the opus stage policy.
 FAMILIES = ("opus", "fable", "sonnet", "haiku")
-ALLOWED_REQUEST_FAMILIES = ("opus", "fable", "sonnet")
+# Families a request may name. ADR-0131 (owner decision 2026-10-29): the Claude Fable family is never requested;
+# the bridge refuses it with its own error (MODEL_FAMILY_REFUSED), before any process starts.
+ALLOWED_REQUEST_FAMILIES = ("opus", "sonnet")
+REFUSED_REQUEST_FAMILIES = ("fable",)
 AUXILIARY_FAMILIES = ("haiku",)  # small helper calls the client may make; never the answer model
 _FAMILY_RE = re.compile(r"claude-(opus|fable|sonnet|haiku)\b")
 _FULL_ID_RE = re.compile(r"^claude-(opus|fable|sonnet|haiku)-[0-9][0-9a-z\-]*$")
@@ -91,7 +96,7 @@ class ModelResolution:
 def resolve_model(requested: str, model_usage: Any) -> ModelResolution:
     """Determine which model produced the answer and whether it satisfies the request policy.
 
-    * alias request (``opus``/``fable``/``sonnet``): the answer model must be in that family;
+    * alias request (``opus``/``sonnet``): the answer model must be in that family;
     * pinned request (``claude-opus-5-5``): the answer model must be exactly that id;
     * any other model that produced output must be in-family too, except auxiliary ``haiku``
       helpers producing fewer tokens than the answer model;

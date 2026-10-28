@@ -317,9 +317,14 @@ def seed_routes() -> list[dict[str, Any]]:
             "eligible_domains": ["PERSONAL"], "allowed_data_classes": [P, I, C], "supports_tools": "YES",
             "mode_params": dict(SUPERVISOR_MODE_PARAMS),
             "priority": 10, "source_refs": ["S01", "S02", "S03", "S05"],
-            "notes": "Fable weekly limit is part of the total Max weekly limit (S02); when exhausted the queue waits. "
-                     "2026-10-18 probe: `--model fable` answered via claude-opus-4-8 (fable 0 output tokens, "
-                     "safety_stops=2) -> MODEL_POLICY_MISMATCH (ADR-0040).",
+            # ADR-0131 (owner decision 2026-10-29): never requested. The row stays as catalog history (deleting it
+            # would lose its observations); seeding has no status, a SUPERVISOR route is never activated as a worker
+            # route, and the bridge refuses the fable family, so the note (descriptive, not configuration) says so.
+            "notes": "NOT USED: DLY AEOS never requests the Claude Fable family (owner decision 2026-10-29, ADR-0131); "
+                     "the bridge refuses it (MODEL_FAMILY_REFUSED) and every planning/review stage uses Opus. History: "
+                     "Fable weekly limit is part of the total Max weekly limit (S02). 2026-10-18 probe: `--model fable` "
+                     "answered via claude-opus-4-8 (fable 0 output tokens, safety_stops=2) -> MODEL_POLICY_MISMATCH "
+                     "(ADR-0040).",
             "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": RESEARCH_DATE,
         },
         {
@@ -331,8 +336,9 @@ def seed_routes() -> list[dict[str, Any]]:
             "eligible_domains": ["PERSONAL"], "allowed_data_classes": [P, I, C], "supports_tools": "YES",
             "mode_params": dict(SUPERVISOR_MODE_PARAMS),
             "priority": 20, "source_refs": ["S01", "S03", "S05"],
-            "notes": "Planning baseline primary/synthesis. The alias resolves to the latest Opus; the resolved id is "
-                     "recorded by the bridge and an alias change is a new configuration.",
+            "notes": "Planning baseline: all four stages, and the checkpoint and proposal reviews (ADR-0131). The alias "
+                     "resolves to the latest Opus; the resolved id is recorded by the bridge and an alias change is a "
+                     "new configuration.",
             "pricing_checked_at": RESEARCH_DATE, "terms_checked_at": RESEARCH_DATE,
         },
         # ---- WORKER initial (pilot priority, not a ranking) ----

@@ -25,7 +25,7 @@ export function SupervisorSection() {
   const { isAdmin } = useAuth();
   const q = useClaudeStatus();
   const test = useCapabilityTest();
-  const [model, setModel] = useState<"opus" | "fable">("opus");
+  const [model, setModel] = useState<"opus">("opus");
 
   if (q.isLoading) return <Loading label="Memeriksa Claude Code resmi…" />;
   if (q.error) return <ErrorBox error={q.error} />;
@@ -173,9 +173,8 @@ export function SupervisorSection() {
           </div>
           {isAdmin ? (
             <div className="flex flex-wrap items-center gap-2">
-              <select className={inputBase + " w-auto"} value={model} onChange={(e) => setModel(e.target.value as "opus" | "fable")} aria-label="Model uji">
+              <select className={inputBase + " w-auto"} value={model} onChange={(e) => setModel(e.target.value as "opus")} aria-label="Model uji">
                 <option value="opus">opus</option>
-                <option value="fable">fable</option>
               </select>
               <Button variant="primary" busy={test.isPending} onClick={() => test.mutate(model)}>
                 <FlaskConical className="h-4 w-4" aria-hidden /> Uji kemampuan

@@ -76,14 +76,17 @@ class StageSpec:
     failure_state: S
 
 
+# ADR-0131 (owner decision 2026-10-29, amends master §02/§15/§17): every stage requests Opus; the Claude Fable family is
+# never requested (the bridge refuses it). All four stages still run; the reviewers' independence comes from a fresh
+# context per stage (a separate bridge invocation, no session reuse; REVIEWER_NOT_INDEPENDENT in the service).
 STAGES: tuple[StageSpec, ...] = (
     StageSpec(S.PRIMARY_PLANNING, "Primary Planner", "opus", "opus", "planning.primary", "plan_content",
               "proposal", S.PLANNING_FAILED),
-    StageSpec(S.CHALLENGE_REVIEW, "Planning Challenger", "fable", "fable", "planning.challenge",
+    StageSpec(S.CHALLENGE_REVIEW, "Planning Challenger", "opus", "opus", "planning.challenge",
               "challenge_findings", "findings", S.REVIEW_FAILED),
     StageSpec(S.SYNTHESIS, "Planning Synthesizer", "opus", "opus", "planning.synthesis", "synthesis",
               "synthesis", S.PLANNING_FAILED),
-    StageSpec(S.FINAL_REVIEW, "Final Planning Reviewer", "fable", "fable", "planning.final", "final_review",
+    StageSpec(S.FINAL_REVIEW, "Final Planning Reviewer", "opus", "opus", "planning.final", "final_review",
               "verdict", S.REVIEW_FAILED),
 )
 STAGE_BY_STATE: dict[S, StageSpec] = {s.state: s for s in STAGES}

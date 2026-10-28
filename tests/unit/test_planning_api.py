@@ -73,8 +73,8 @@ def test_full_flow_create_run_approve_dag(personal_client, db, monkeypatch, tmp_
     detail = _run_to_ready(personal_client, plan["id"])
     assert len(bridge.calls) == 4
     stages = {s["stage"]: s["latest"] for s in detail["stages"]}
-    assert stages["CHALLENGE_REVIEW"]["model_requested"] == "fable"
-    assert stages["CHALLENGE_REVIEW"]["model_resolved"] == "claude-fable-5-1"
+    assert stages["CHALLENGE_REVIEW"]["model_requested"] == "opus"  # ADR-0131: never fable
+    assert stages["CHALLENGE_REVIEW"]["model_resolved"] == "claude-opus-5-5"
     assert stages["SYNTHESIS"]["model_matches_policy"] is True
     assert detail["findings"]["missing_dependencies"] and detail["verdict"]["verdict"] == "PASS-STATIC"
     assert detail["needs_decision"] is True and len(detail["versions"]) == 2

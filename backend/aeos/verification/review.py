@@ -60,7 +60,7 @@ SRE_ROLES = frozenset({"sre-operations-assistant", "platform-devsecops-engineer"
 SENSITIVE_CLASSES = frozenset({"CONFIDENTIAL", "RESTRICTED"})
 # §19 review budget: independent read-only reviews per run (all kinds, re-requests included)
 DEFAULT_MAX_REVIEWS_PER_RUN = 12
-DEFAULT_REVIEW_MODEL = "fable"
+DEFAULT_REVIEW_MODEL = "opus"  # ADR-0131 (owner decision 2026-10-29): Opus; the Claude Fable family is never requested
 PACKAGE_VERSION = "1"
 PACKAGER_IDENTITY = f"aeos-review-packager/{__version__}"
 DIFF_EXCERPT_CHARS = 60_000

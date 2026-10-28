@@ -31,7 +31,8 @@ UNKNOWN = "UNKNOWN"
 # §50 "Nama repo ambigu atau sumber tidak terverifikasi -> UNVERIFIED dan blocked admission";
 # "Source repo rename/redirect/fork -> tidak mewarisi trust otomatis".
 ADMISSION_BLOCKING_IDENTITY = ("UNVERIFIED", "CHANGED", "NOT_FOUND")
-REVIEW_MODEL = "fable"  # §15/§39: highest Claude per policy; the bridge records the resolved model
+# §15/§39 Claude per policy, ADR-0131 (owner decision 2026-10-29): Opus, never Fable; the bridge records the resolved model
+REVIEW_MODEL = "opus"
 KIND_QUESTIONS = {
     "ADD": "Capability baru apa yang dibutuhkan dan mengapa komponen yang ada tidak cukup?",
     "REPLACE": "Komponen mana yang diganti, siapa consumer-nya, dan kapan versi lama boleh dihentikan?",

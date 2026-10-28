@@ -139,7 +139,7 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
         assert s.scalar(select(AcceptanceRecord).where(AcceptanceRecord.task_id == chain.task_id)) is None
         q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native"))
         # recorded per model family — the scope the bridge clears after a later successful call
-        assert q.state == "EXHAUSTED" and q.source == "observed-limit" and q.scope == "fable"
+        assert q.state == "EXHAUSTED" and q.source == "observed-limit" and q.scope == "opus"
     run_view = chain.ok(chain.client.get(f"/api/runs/{run_id}"))
     assert run_view["ui_state"] == "WAITING_QUOTA"
 
@@ -156,7 +156,7 @@ def test_full_chain_plan_to_pr_then_new_commit_reopens(chain):
     # the limit lifted: the run no longer waits and Max goes back to UNKNOWN (never "OK", never forever EXHAUSTED)
     assert run.quota_status is None
     with session_factory()() as s:
-        q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+        q = s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "opus"))
         assert q.state == "UNKNOWN" and q.source == "observed-successful-call"
         assert s.scalar(select(QuotaState).where(QuotaState.provider == "claude-native",
                                                  QuotaState.state == "EXHAUSTED")) is None
