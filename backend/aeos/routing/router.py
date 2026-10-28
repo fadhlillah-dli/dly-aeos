@@ -493,9 +493,10 @@ def set_endpoint(route_key: str, body: EndpointBody, db: DB, principal: AdminPri
 
 
 class PoolBody(BaseModel):
-    """Owner move of an OpenRouter route between ARENA and WORKER (decision C, ADR-0041 amendment 2026-10-26)."""
+    """Owner move of an OpenRouter :free route between ARENA and WORKER (decision C, ADR-0041 amendment 2026-10-26) or
+    of an OpenCode Go CANDIDATE route without decisions between WATCHLIST and WORKER (ADR-0125)."""
 
-    pool: Literal["ARENA", "WORKER"]
+    pool: Literal["ARENA", "WORKER", "WATCHLIST"]
     rationale: str = Field(min_length=10, max_length=2000)
 
 

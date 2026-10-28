@@ -54,11 +54,19 @@ from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
 from aeos.models.decisions import Decision
+from aeos.models.evidence import EvidenceArtifact
 from aeos.models.planning import TaskSpec
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
 from aeos.routing import free_tier
-from aeos.routing.facade import RouteDecision
+from aeos.routing.facade import (
+    TOOL_PROBE_ANSWERED,
+    TOOL_PROBE_COLLECTOR,
+    TOOL_PROBE_EVIDENCE_KIND,
+    TOOL_PROBE_MARK,
+    TOOL_PROBE_PASS,
+    RouteDecision,
+)
 
 log = logging.getLogger("aeos.routing")
 
@@ -775,6 +783,49 @@ def tool_set_rejections(route: ModelRoute, tools: list[str] | None) -> list[str]
     return [f"TaskSpec tools {missing} outside the route's reviewed tool set {sorted(reviewed)}"] if missing else []
 
 
+def tool_probe_pass(session: Session, route: ModelRoute) -> EvidenceArtifact | None:
+    """The newest trusted tool-call probe PASS bound to the route's CURRENT configuration hash (ADR-0125), else None.
+
+    Only the broker's tool-call probe writes it (``TOOL_PROBE_COLLECTOR``, a trusted ``collector`` origin, LIVE):
+    worker attachments and other evidence never count. The hash is recomputed from the live record, so evidence of an
+    older configuration is never inherited (the same rule as decisions and eval results)."""
+    current = compute_config_hash(route)
+    rows = session.scalars(
+        select(EvidenceArtifact).where(EvidenceArtifact.kind == TOOL_PROBE_EVIDENCE_KIND,
+                                       EvidenceArtifact.subject_type == TARGET_TYPE,
+                                       EvidenceArtifact.subject_id == route.route_key,
+                                       EvidenceArtifact.collector_identity == TOOL_PROBE_COLLECTOR,
+                                       EvidenceArtifact.trusted.is_(True), EvidenceArtifact.mode == "LIVE")
+        .order_by(EvidenceArtifact.created_at.desc()))
+    for ev in rows:
+        env = ev.environment if isinstance(ev.environment, dict) else {}
+        if env.get("probe") != TOOL_PROBE_MARK or env.get("config_hash") != current:
+            continue
+        # The newest answer the model actually gave decides: a later FAIL revokes an earlier PASS. A probe the
+        # provider never answered (rate limit, timeout, unreachable) says nothing about tool use and is skipped.
+        if env.get("outcome", TOOL_PROBE_ANSWERED) != TOOL_PROBE_ANSWERED:
+            continue
+        return ev if env.get("verdict") == TOOL_PROBE_PASS else None
+    return None
+
+
+def tool_capable(session: Session, route: ModelRoute) -> bool:
+    """Contract (b) (ADR-0125): ``supports_tools`` YES, or a tool-call probe PASS for the current configuration."""
+    return route.supports_tools == "YES" or tool_probe_pass(session, route) is not None
+
+
+def tool_probe_recorded(session: Session, *, route_key: str, verdict: str, evidence_id: str | None) -> None:
+    """After a tool-call probe: readiness checks that depend on routes go STALE (eligibility may have changed) and
+    ``route.tool_probe`` is emitted. ``supports_tools`` and the configuration hash are never touched."""
+    route = get_route(session, route_key)
+    notify_readiness(session, route.route_key, reason=f"tool-call probe {verdict}", pool=route.pool)
+    from aeos.events.service import emit
+
+    emit(session, source="routing", kind="route.tool_probe", entity_type=TARGET_TYPE, entity_id=route.route_key,
+         entity_version=route.config_hash, payload={"verdict": verdict, "evidence_id": evidence_id,
+                                                    "tool_capable": tool_capable(session, route)})
+
+
 def _unavailable_regions(terms: dict[str, Any]) -> list[str]:
     return [str(x).strip().upper() for x in terms.get("unavailable_regions") or [] if str(x).strip()]
 
@@ -922,8 +973,9 @@ def _route_rejections(
         restriction = terms_restriction(route.data_terms or {}, route.identity_status)
         if restriction:
             reasons.append(f"{restriction}: only PUBLIC data may be sent")
-    if needs_tools and route.supports_tools != "YES":
-        reasons.append(f"tool support {route.supports_tools}: tool use not proven for this route")
+    if needs_tools and not tool_capable(session, route):
+        reasons.append(f"tool support {route.supports_tools}: tool use not proven for this route (no PASS tool-call "
+                       f"probe for its current configuration: aeos broker probe-route --tools {route.route_key})")
     reasons += tool_set_rejections(route, tools)
     if min_context:
         if not route.context_window:
@@ -1939,6 +1991,35 @@ def set_local_endpoint(
 
 
 POOL_MOVES = frozenset({("ARENA", "WORKER"), ("WORKER", "ARENA")})
+# ADR-0125 (owner decision 2026-10-28): an OpenCode Go route moves between WATCHLIST and WORKER, only while it is an
+# untouched CANDIDATE with no decision at all (nothing the owner decided is ever voided by the move).
+GO_PROVIDER = "opencode-go"
+GO_POOL_MOVES = frozenset({("WATCHLIST", "WORKER"), ("WORKER", "WATCHLIST")})
+
+
+def route_decision_ids(session: Session, route: ModelRoute) -> list[str]:
+    """Every decision that names *route*, whatever its kind or status (INVALIDATED and expired ones too): decisions
+    targeting the route key, and BUDGET decisions listing it in ``auth_scope.routes``."""
+    ids = list(session.scalars(select(Decision.id).where(Decision.target_id == route.route_key)))
+    for d in session.scalars(select(Decision).where(Decision.kind == "BUDGET")):
+        routes = (d.auth_scope or {}).get("routes") if isinstance(d.auth_scope, dict) else None
+        if isinstance(routes, list) and route.route_key in routes and d.id not in ids:
+            ids.append(d.id)
+    return ids
+
+
+def _go_pool_move_problem(session: Session, route: ModelRoute) -> tuple[str, str, dict[str, Any]] | None:
+    """(code, message, details) when an OpenCode Go route may not move (ADR-0125), else None."""
+    if route.status != "CANDIDATE":
+        return ("ROUTE_POOL_MOVE_NOT_CANDIDATE",
+                f"only a CANDIDATE OpenCode Go route moves; {route.route_key} is {route.status} (a move would void the "
+                "owner's decision on it: disable it first, or keep its pool)", {"status": route.status})
+    ids = route_decision_ids(session, route)
+    if ids:
+        return ("ROUTE_POOL_MOVE_HAS_DECISIONS",
+                f"{route.route_key} already has {len(ids)} decision(s) (any status counts): an OpenCode Go route moves "
+                "only before any decision was recorded on it", {"decision_ids": ids})
+    return None
 
 
 def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: str) -> tuple[ModelRoute, dict[str, Any]]:
@@ -1948,18 +2029,29 @@ def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: st
     configuration identity, so a move is a new configuration: every decision bound to the route is invalidated (an
     ARENA TRIAL never carries over, and moving back does not revive it), eval results are not inherited and readiness
     goes STALE; the owner activates the new configuration with a new TRIAL. Nothing is moved automatically: the
-    catalog refresh and the seed never change a pool. Caller authenticates the human, audits and commits."""
+    catalog refresh and the seed never change a pool. Caller authenticates the human, audits and commits.
+
+    ADR-0125 (owner decision 2026-10-28): an OpenCode Go route moves between WATCHLIST and WORKER (either way) only
+    while it is CANDIDATE with no decision of any kind or status (``ROUTE_POOL_MOVE_NOT_CANDIDATE`` /
+    ``ROUTE_POOL_MOVE_HAS_DECISIONS`` otherwise), so the move never voids an owner decision; the owner then activates
+    the WORKER configuration as a TRIAL."""
     if len((rationale or "").strip()) < 10:
         raise ValidationFailed("rationale is required (min 10 characters)")
     target = str(pool or "").strip().upper()
     route = get_route(session, route_key)
     if route.mode in {"MOCK", "DEMO"}:
         raise ValidationFailed("fixture routes cannot be configured")
-    if not free_tier.is_free_model_route(route) or (route.pool, target) not in POOL_MOVES:
-        raise ValidationFailed(f"only an OpenRouter ':free' route moves, and only between ARENA and WORKER (decision C);"
-                               f" route {route.route_key} is {route.provider} {route.model_id} in {route.pool}, target "
-                               f"{target or '-'}", code="ROUTE_POOL_MOVE_UNSUPPORTED")
-    if target in free_tier.WORKER_POOLS:
+    go_move = route.provider == GO_PROVIDER and (route.pool, target) in GO_POOL_MOVES
+    if not go_move and (not free_tier.is_free_model_route(route) or (route.pool, target) not in POOL_MOVES):
+        raise ValidationFailed(f"only an OpenRouter ':free' route moves between ARENA and WORKER (decision C), and an "
+                               f"OpenCode Go route between WATCHLIST and WORKER (ADR-0125); route {route.route_key} is "
+                               f"{route.provider} {route.model_id} in {route.pool}, target {target or '-'}",
+                               code="ROUTE_POOL_MOVE_UNSUPPORTED")
+    if go_move:
+        problem = _go_pool_move_problem(session, route)
+        if problem:
+            raise ValidationFailed(problem[1], code=problem[0], details=problem[2])
+    elif target in free_tier.WORKER_POOLS:
         problems = free_tier.decision_c_problems(route)
         if problems:
             raise ValidationFailed(f"the route cannot become a free OpenRouter WORKER route (decision C): {problems[0]}",
@@ -1968,7 +2060,8 @@ def set_route_pool(session: Session, route_key: str, *, pool: str, rationale: st
         route.config_hash = compute_config_hash(route)  # a known identity, so the change below invalidates
     previous = {"pool": route.pool, "config_hash": route.config_hash, "status": route.status}
     route.pool = target
-    reason = f"owner moved the route {previous['pool']} -> {target} (decision C): {redact_text(rationale.strip())[:120]}"
+    basis = "ADR-0125, OpenCode Go" if go_move else "decision C"
+    reason = f"owner moved the route {previous['pool']} -> {target} ({basis}): {redact_text(rationale.strip())[:120]}"
     changed = refresh_config_hash(session, route, reason=reason)  # invalidates the route's decisions, readiness STALE
     notify_readiness(session, route.route_key, reason=reason, pool=previous["pool"])  # the old pool's checks too
     session.flush()

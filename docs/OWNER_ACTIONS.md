@@ -424,8 +424,10 @@ Copy the route key and its config hash from the `routes list` output.
 * **Free OpenCode Zen routes:** they need the client-terms decision in [2.12](#212-smaller-open-decisions) first.
 * **OpenCode Go routes (decision A, ADR-0041 amendment 2026-10-26):** the WORKER candidates are
   `opencode-go/glm-5.3-flash` (first), `opencode-go/mimo-v2.6-flash`, `opencode-go/minimax-m3.1-flash`,
-  `opencode-go/hy3` and `opencode-go/kimi-k2.7-code`. hy3 has no documented tool support, so it never serves
-  tool-using tasks. **A WORKER route activated as TRIAL is eligible for real worker tasks at once.** If you want the
+  `opencode-go/hy3` and `opencode-go/kimi-k2.7-code`, and since 2026-10-28 (owner decision R31, ADR-0125)
+  `opencode-go/kimi-k3` and `opencode-go/step-5-preview`. hy3, kimi-k3 and step-5-preview have tool support UNKNOWN:
+  they serve tool-using tasks only after a tool-call probe PASS (step 6). **A WORKER route activated as TRIAL is
+  eligible for real worker tasks at once.** If you want the
   probe (step 6) first, activate it before you enable the worker agent (below), or pause scheduling around it
   (`./aeos work pause --reason "Go probe"`, then `./aeos work resume`). To activate one:
   1. Store the Go key (1.8), then run `./aeos routes refresh`. The `opencode_go_catalog` line must read OK, and its
@@ -458,6 +460,12 @@ Copy the route key and its config hash from the `routes list` output.
      No client-terms flag: Go allows other clients, and passing one is refused with `CLIENT_TERMS_NOT_APPLICABLE`.
   6. Probe, before real work (see the warning above): `./aeos broker probe-route opencode-go/glm-5.3-flash` sends one
      synthetic PUBLIC request (E3 evidence). On a subscription route the probe uses allowance, not money.
+     For a route with tool support UNKNOWN, also run the **tool-call probe** (ADR-0125):
+     `./aeos broker probe-route --tools opencode-go/kimi-k3`. It sends one synthetic PUBLIC request with one trivial
+     function and prints `tool call: PASS` or `tool call: FAIL - <reason>`. A PASS makes the route eligible for
+     tool-using tasks under its current configuration hash; it never changes `supports_tools`, the hash or your TRIAL.
+     Any later configuration change (a new hash) needs a new activation and a new tool-call probe. A FAIL naming
+     `finish_reason length` hit the probe's output cap. Until a PASS the route serves only tasks that need no tools.
   7. **Each billing cycle** (and before the TRIAL expires): record a new BUDGET decision (step 4) and run step 5
      again with `--budget-decision <new id>`. The TRIAL keeps the id of the BUDGET decision it was activated with, so
      a new BUDGET decision alone does not renew the route. See [1.15](#115-recurring-owner-actions).
@@ -521,14 +529,32 @@ Copy the route key and its config hash from the `routes list` output.
     route view and the task admission answer (`GET /api/tasks/<id>/admission`) carry the same figures for a user who
     may see every domain. `./aeos routes list` only flags `billing=SUBSCRIPTION`, and the Control Center pages do not
     show the windows yet.
+* **OpenCode Go routes from the WATCHLIST (owner decision R31, ADR-0125).** The Go WATCHLIST routes
+  (`opencode-go/glm-5.3`, `opencode-go/glm-5.2`, `opencode-go/kimi-k3.1-pro`, `opencode-go/mimo-v2.6-pro`,
+  `opencode-go/longcat-2.0`, `opencode-go/deepseek-v4.1-flash`) are not served until you move one into WORKER. The
+  move works only while the route is CANDIDATE and no decision of any kind or status names it. Otherwise it is refused
+  with `ROUTE_POOL_MOVE_NOT_CANDIDATE` or `ROUTE_POOL_MOVE_HAS_DECISIONS`, so it never voids a decision of yours.
+  1. Check the route with `./aeos routes list --pool WATCHLIST`. Its line must show `CANDIDATE`.
+  2. Move it. The command asks for your password:
+
+     ```bash
+     ./aeos routes set-pool opencode-go/kimi-k3.1-pro \
+       --pool WORKER --as "<admin>" \
+       --rationale "R31: best Go models first"
+     ```
+
+  3. Copy its new hash from `./aeos routes list --pool WORKER`, then do steps 1 to 7 of the OpenCode Go routes above
+     with this route key: the BUDGET decision for the plan fee, the TRIAL with tools UNKNOWN, and the tool-call probe
+     (step 6). `opencode-go/deepseek-v4.1-flash` stays PUBLIC only and needs the Global region (its route notes).
+  4. To undo a move before you record any decision on it: the same command with `--pool WATCHLIST`.
 * **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models (ids ending in
   `:free`) may serve worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes;
   CONFIDENTIAL never goes to a worker route. Other OpenRouter routes keep the rules above (a paid route needs a BUDGET
-  decision); `set-pool` moves only `:free` routes. Since your decision of 2026-10-28 (decision C', ADR-0124) a free
-  route is the fallback for PUBLIC tasks: the Go routes rank first, and a PUBLIC task uses a free route when no Go
-  route can take it (busy, cooling down, out of 5h allowance or past PUBLIC's share). When the free tier is at its
-  limit and no Go route can take the task, it waits (`FREE_TIER_LIMIT_REACHED`, shown as WAITING_QUOTA); it never moves
-  to a paid route. Do these steps in order:
+  decision); among OpenRouter routes `set-pool` moves only `:free` routes. Since your decision of 2026-10-28
+  (decision C', ADR-0124) a free route is the fallback for PUBLIC tasks: the Go routes rank first, and a PUBLIC task
+  uses a free route when no Go route can take it (busy, cooling down, out of 5h allowance or past PUBLIC's share). When
+  the free tier is at its limit and no Go route can take the task, it waits (`FREE_TIER_LIMIT_REACHED`, shown as
+  WAITING_QUOTA); it never moves to a paid route. Do these steps in order:
   1. **Credits (once, on openrouter.ai).** Buy at least $10 of credits. This raises the free-model daily cap of the
      account from 50 to 1000 requests. The per-minute cap stays 20.
   2. **Privacy (once, on openrouter.ai).** In the privacy settings, enable the free endpoints that may train on inputs.
@@ -565,7 +591,7 @@ Copy the route key and its config hash from the `routes list` output.
 
   6. **Decision C, the move into WORKER.** For each route you want as a worker, move it. The move is a new
      configuration: its ARENA TRIAL from step 5 stops applying, and it does not come back if you move the route back.
-     Only a `:free` OpenRouter route moves (`ROUTE_POOL_MOVE_UNSUPPORTED` otherwise).
+     Only a `:free` OpenRouter route moves between ARENA and WORKER (`ROUTE_POOL_MOVE_UNSUPPORTED` otherwise).
 
      ```bash
      ./aeos routes set-pool openrouter/cohere/north-mini-code:free \
