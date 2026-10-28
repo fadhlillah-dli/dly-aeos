@@ -220,8 +220,9 @@ def after_run(session: Session, run: WorkerRun, te: TaskExecution, task: TaskSpe
         why = (f"hypothesis {hyp}: {SENSITIVE_STOP} - a model request carried a credential and was not sent (see the "
                "run's broker.model_proxy.sensitive_blocked audit record); remove the credential from what the worker "
                "reads, then retry")
-        scheduler.transition_task(session, te.task_id, S.BLOCKED.value, actor=actor, expected_from=S.RUNNING.value,
-                                  reason_code=SENSITIVE_STOP, reason=why)
+        if te.state == S.RUNNING.value:  # a lost lease: the reconciler already moved the task; its state is kept
+            scheduler.transition_task(session, te.task_id, S.BLOCKED.value, actor=actor,
+                                      expected_from=S.RUNNING.value, reason_code=SENSITIVE_STOP, reason=why)
         run.block_reason = why
         session.flush()
         return "BLOCKED"

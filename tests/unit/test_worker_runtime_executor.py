@@ -476,6 +476,49 @@ def test_a_later_stop_without_a_sensitive_refusal_keeps_its_own_code(settings, s
     assert te.state == "BLOCKED" and te.reason_code == "QUOTA_EXHAUSTED"
 
 
+def _lose_the_lease_first(monkeypatch) -> None:
+    """The reconciler won the race: the lease expired with the worker still alive, so the task is already BLOCKED
+    (LEASE_LOST_PROCESS_ALIVE) and the run non-terminal (ORPHANED_ALIVE) when the outcome phase decides LEASE_INVALID."""
+    real = executor._decide
+
+    def decide(s, run, task, te, **kw):
+        if te is not None and te.state == "RUNNING":
+            scheduler.transition_task(s, te.task_id, "BLOCKED", actor="system:reconciler",
+                                      reason_code="LEASE_LOST_PROCESS_ALIVE", reason="lease expired (test)")
+            run.outcome_code = "ORPHANED_ALIVE"
+            s.flush()
+        return real(s, run, task, te, **{**kw, "stop_reason": "LEASE_INVALID"})
+
+    monkeypatch.setattr(executor, "_decide", decide)
+
+
+def test_bite_a_sensitive_refusal_after_a_lost_lease_keeps_the_task_state_and_records_the_code(settings, setup,
+                                                                                               monkeypatch):
+    """Differential review 2026-10-28: the sensitive override sent a lost-lease run down a transition that expects
+    RUNNING; it raised Conflict on every retry and the run stayed RUNNING with outcome UNKNOWN. Now the task keeps the
+    reconciler's state and the run still ends FAILED with SENSITIVE_CONTENT_BLOCKED."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _sensitive_blocked_row(run_id)
+    _lose_the_lease_first(monkeypatch)
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "FAILED", res
+    assert run.execution_status == "FAILED" and run.outcome_code == "SENSITIVE_CONTENT_BLOCKED", run.outcome_code
+    assert te.state == "BLOCKED" and te.reason_code == "LEASE_LOST_PROCESS_ALIVE", (te.state, te.reason_code)
+
+
+def test_a_lost_lease_without_a_sensitive_refusal_is_still_a_lease_stop(settings, setup, monkeypatch):
+    """Near miss: no refused request, so the lost lease stays LEASE_INVALID (run FAILED, task state kept)."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _lose_the_lease_first(monkeypatch)
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "STOPPED" and run.outcome_code == "LEASE_INVALID", (res, run.outcome_code)
+    assert te.state == "BLOCKED" and te.reason_code == "LEASE_LOST_PROCESS_ALIVE"
+
+
 def test_start_blocked_without_sandbox_exception(settings, setup):
     make, _ = setup
     run_id, task_id = make("ok")

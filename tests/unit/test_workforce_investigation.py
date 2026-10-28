@@ -357,3 +357,42 @@ def test_a_sensitive_refusal_blocks_the_investigation_instead_of_queueing_the_ne
         s.commit()
     te = _te(ids["inv"])
     assert te.state == "BLOCKED" and te.reason_code == "SENSITIVE_CONTENT_BLOCKED"  # a tick never clears it
+
+
+@pytest.mark.parametrize("sensitive", [True, False])
+def test_bite_a_sensitive_refusal_after_a_lost_lease_keeps_the_investigation_task_state(settings, world, monkeypatch,
+                                                                                        sensitive):
+    """Differential review 2026-10-28: the reconciler already moved the task (BLOCKED, LEASE_LOST_PROCESS_ALIVE) when
+    the outcome phase decides. With a refused request the run still records SENSITIVE_CONTENT_BLOCKED and the task keeps
+    the reconciler's state (it raised Conflict on every retry and the run stayed RUNNING before); without one (the near
+    miss) the lost lease stays a lease stop."""
+    from aeos.broker import facade as broker
+    from aeos.models.broker_ext import BrokerRequest
+
+    ids, _state = world
+    run_id = _lease(ids["inv"])
+    if sensitive:
+        with session_factory()() as s:
+            run = s.get(WorkerRun, run_id)
+            s.add(BrokerRequest(grant_id="g", run_id=run_id, project_id=run.project_id, domain=run.domain,
+                                outcome=broker.SENSITIVE_BLOCKED_OUTCOME, status_code=403,
+                                error_summary=f"{broker.SENSITIVE_CONTENT_BLOCKED}: github_token"))
+            s.commit()
+    real = executor._decide
+
+    def decide(s, run, task, te, **kw):
+        if te is not None and te.state == "RUNNING":
+            scheduler.transition_task(s, te.task_id, "BLOCKED", actor="system:reconciler",
+                                      reason_code="LEASE_LOST_PROCESS_ALIVE", reason="lease expired (test)")
+            run.outcome_code = "ORPHANED_ALIVE"
+            s.flush()
+        return real(s, run, task, te, **{**kw, "stop_reason": "LEASE_INVALID"})
+
+    monkeypatch.setattr(executor, "_decide", decide)
+    out = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run = _run(run_id)
+    te = _te(ids["inv"])
+    assert run.execution_status == "FAILED", (out, run.execution_status)
+    assert run.outcome_code == ("SENSITIVE_CONTENT_BLOCKED" if sensitive else "LEASE_INVALID"), run.outcome_code
+    assert out["status"] == ("BLOCKED" if sensitive else "STOPPED"), out
+    assert te.state == "BLOCKED" and te.reason_code == "LEASE_LOST_PROCESS_ALIVE", (te.state, te.reason_code)

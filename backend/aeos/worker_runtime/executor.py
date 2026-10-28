@@ -1001,6 +1001,10 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
                "SCOPE_VIOLATION": "changes outside the TaskSpec scope (patch quarantined)",
                "EXIT_NONZERO": f"worker exited {exit_code}"}[code]
         scheduler.set_run_status(s, run, S.FAILED.value, reason=why, actor=ACTOR, outcome_code=code)
+        if code == SENSITIVE_STOP and te.state != S.RUNNING.value:
+            # the lease was lost and the reconciler already moved the task (BLOCKED, LEASE_LOST_PROCESS_ALIVE): its state
+            # is kept, as for LEASE_INVALID above, and the run still records the refusal (differential review 2026-10-28)
+            return "FAILED"
         if te.attempts_used < max_att:
             scheduler.transition_task(
                 s, te.task_id, S.REVIEW.value, actor=ACTOR, reason_code="ATTEMPT_FAILED", expected_from=S.RUNNING.value,
