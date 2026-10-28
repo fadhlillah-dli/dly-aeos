@@ -10,4 +10,4 @@
   feasibility probe's gates: activated, PERSONAL, no money) and records PASS/FAIL evidence bound to the route's
   configuration hash; `routing.facade.tool_capable` (supports_tools YES, or such a PASS for the current hash) replaces
   the plain `supports_tools` check in routing, and the probe never changes `supports_tools`. E2 (respx, macOS arm64);
-  live Go tool calls NOT-PROVEN.
+  live Go tool calls NOT-PROVEN. The newest probe the model actually answered decides for the current configuration: a later answered FAIL revokes an earlier PASS, while a rate-limited or unanswered probe neither grants nor revokes (bite test).

@@ -1,6 +1,6 @@
 # ADR-0125 — OpenCode Go WATCHLIST/WORKER owner move, the R31 Go WORKER candidates and tool-call probe evidence (§23, §43)
 
-* Status: PROPOSED
+* Status: ACCEPTED
 * Date: 2026-10-28
 * Deciders: owner (Fadhlillah) — owner decision of 2026-10-28, recorded by the owner in chat (register R31). The
   mechanism below (the guarded owner move, the seeded candidates, the tool-call probe and its evidence) is the
@@ -89,9 +89,10 @@ makes it eligible for tool-using tasks under that configuration.
   `policy/*.yaml` and the context strategy are untouched, so no ACTIVE TRIAL is voided.
 * **A probe PASS can change eligibility without a new decision.** That is the point of contract (b): `supports_tools`
   is part of the identity, the probe evidence is not. The evidence is bound to the exact configuration that answered.
-* **Contract (b) is literal.** Any PASS for the current hash makes the route tool-capable; a later FAIL for the same
-  hash does not revoke it (one well-formed call proves the configuration can produce one). A provider that degrades
-  shows up in worker runs and the route-behaviour check, not here.
+* **The newest answer decides.** For the current hash, the newest probe the model actually answered decides: a PASS
+  makes the route tool-capable and a later answered FAIL revokes it (a model that stops calling tools is no longer
+  trusted with tool tasks). A probe the provider never answered (rate limit, timeout, unreachable) says nothing about
+  tool use and is skipped. Review of 2026-10-28; the evidence records the probe outcome for this.
 * **The Go WORKER pool grows.** More routes can be activated; each still needs the owner's terms review, region and
   BUDGET decision. Ranking among them is ADR-0124.
 

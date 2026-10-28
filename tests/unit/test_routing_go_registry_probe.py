@@ -319,6 +319,30 @@ def test_a_rate_limited_tool_probe_is_a_fail(db, key):
     assert not routing.tool_capable(db, route)
 
 
+def test_bite_a_later_answered_fail_revokes_an_earlier_pass(db, key):
+    """The newest answer the model gave decides (owner review 2026-10-28): a model that stops calling tools after a
+    PASS is no longer tool-capable under the same configuration."""
+    route = _go_route(db)
+    _activate(db, route)
+    _probe(db, _answer(_call()))
+    assert routing.tool_capable(db, route)
+    _probe(db, _answer({"role": "assistant", "content": "OK"}))
+    assert not routing.tool_capable(db, route), "a later answered FAIL left the route tool-capable"
+
+
+def test_a_later_unanswered_probe_keeps_an_earlier_pass(db, key):
+    """Near miss: a rate limit says nothing about tool use, so it neither grants nor revokes."""
+    route = _go_route(db)
+    _activate(db, route)
+    _probe(db, _answer(_call()))
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(GO_CHAT).mock(return_value=httpx.Response(429, json={"error": "limit"}))
+        out = broker.probe_route(db, route_key=GO, actor="user:owner", tools=True)
+        db.commit()
+    assert out["outcome"] == "RATE_LIMITED"
+    assert routing.tool_capable(db, route), "a rate-limited probe revoked an earlier PASS"
+
+
 def test_bite_untrusted_evidence_with_pass_marks_never_counts(db, key):
     route = _go_route(db)
     _activate(db, route)

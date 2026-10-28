@@ -52,6 +52,7 @@ from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
 from aeos.routing import free_tier
 from aeos.routing.facade import (
+    TOOL_PROBE_ANSWERED,
     TOOL_PROBE_COLLECTOR,
     TOOL_PROBE_EVIDENCE_KIND,
     TOOL_PROBE_MARK,
@@ -790,9 +791,13 @@ def tool_probe_pass(session: Session, route: ModelRoute) -> EvidenceArtifact | N
         .order_by(EvidenceArtifact.created_at.desc()))
     for ev in rows:
         env = ev.environment if isinstance(ev.environment, dict) else {}
-        if (env.get("probe") == TOOL_PROBE_MARK and env.get("verdict") == TOOL_PROBE_PASS
-                and env.get("config_hash") == current):
-            return ev
+        if env.get("probe") != TOOL_PROBE_MARK or env.get("config_hash") != current:
+            continue
+        # The newest answer the model actually gave decides: a later FAIL revokes an earlier PASS. A probe the
+        # provider never answered (rate limit, timeout, unreachable) says nothing about tool use and is skipped.
+        if env.get("outcome", TOOL_PROBE_ANSWERED) != TOOL_PROBE_ANSWERED:
+            continue
+        return ev if env.get("verdict") == TOOL_PROBE_PASS else None
     return None
 
 

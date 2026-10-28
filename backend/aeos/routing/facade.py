@@ -152,6 +152,7 @@ TOOL_PROBE_COLLECTOR = "aeos-broker/route-tool-probe"
 TOOL_PROBE_MARK = "TOOL_CALL"  # the evidence environment's ``probe`` value
 TOOL_PROBE_PASS = "PASS"
 TOOL_PROBE_FAIL = "FAIL"
+TOOL_PROBE_ANSWERED = "REACHABLE"  # the probe outcome of an answer the model actually gave (only those decide)
 
 
 def tool_capable(session: Session, route: ModelRoute) -> bool:

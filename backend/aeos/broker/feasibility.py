@@ -520,7 +520,8 @@ def _evidence(session: Session, route: ModelRoute, result: dict[str, Any]) -> st
         from aeos.routing import facade as routing
 
         collector = routing.TOOL_PROBE_COLLECTOR
-        environment.update({"probe": routing.TOOL_PROBE_MARK, "verdict": result["tool_call"]["verdict"]})
+        environment.update({"probe": routing.TOOL_PROBE_MARK, "verdict": result["tool_call"]["verdict"],
+                            "outcome": result["outcome"]})
         claim = (f"Route tool-call probe {route.route_key} ({route.pool}): {result['tool_call']['verdict']} "
                  f"({result['outcome']})")
     try:
