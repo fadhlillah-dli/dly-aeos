@@ -1,8 +1,8 @@
 # ADR-0131 — Opus at every Claude stage; the Claude Fable family is never requested (§02, §12, §15, §17)
 
-* Status: ACCEPTED (owner decision 2026-10-29, owner request R42)
-* Date: 2026-10-29
-* Deciders: owner (Fadhlillah), decision of 2026-10-29; built by the delegating session. The owner can still
+* Status: ACCEPTED (owner decision 2026-10-28, owner requests R38 and R42)
+* Date: 2026-10-28
+* Deciders: owner (Fadhlillah), decision of 2026-10-28; built by the delegating session. The owner can still
   supersede it as an `ADR` decision (see the register README).
 * References: [ADR-0030](ADR-0030-planning-pipeline-and-manual-fallback.md) (four-stage pipeline, Opus → Fable →
   Opus → Fable baseline), [ADR-0040](ADR-0040-claude-native-bridge-invocation.md) (bridge invocation and the
@@ -11,8 +11,8 @@
 
 ## Context
 
-* The owner, 2026-10-29 (verbatim): "jangan pernah gunakan Fable 5.1". Asked what replaces it, the owner answered
-  (verbatim): "Ganti ke Opus 5.5".
+* The owner, 2026-10-28 (verbatim, R38): "jangan pernah gunakan Fable 5.1". Asked what replaces Fable in the
+  planning pipeline, the owner answered the same evening (verbatim, R42): "Ganti ke Opus 5.5".
 * Exact scope: DLY AEOS never requests a Claude Fable model through the Claude Code bridge, and every stage that
   used Fable switches to Opus. Nothing else changes: the number of stages, the review gates, the manual fallback,
   the quota handling and the human decisions stay as they are.
@@ -49,21 +49,47 @@
    binary) asserts one process per stage, four distinct supervisor directories, `--no-session-persistence` and no
    resume or session flag on every call, and four distinct sessions.
 3. **Fail closed at the bridge.** `fable` is removed from the families a request may name
-   (`parsing.ALLOWED_REQUEST_FAMILIES` is `opus`, `sonnet`; `parsing.REFUSED_REQUEST_FAMILIES` is `fable`). A request
-   for the Fable family (the alias, a pinned id such as `claude-fable-5-1`, any case) is refused by
-   `bridge.validate_request` before any process starts, with its own code `MODEL_FAMILY_REFUSED` and the message
-   "model '...' is refused: DLY AEOS never requests the Claude fable family (owner decision 2026-10-29, ADR-0131);
-   planning and review stages use opus". The manual package has the same preflight, so no Fable package is written
-   either. `aeos bridge test` accepts only `opus`, and so does the Control Center capability test
-   (`POST /api/claude/capability-test`, schema `model: "opus"`).
-4. **A Fable answer is still recognised, then rejected.** The parser keeps `fable` in `parsing.FAMILIES`, so an
-   answer produced by a Fable model is named as such and fails the Opus family check: `MODEL_POLICY_MISMATCH` for
-   every planning stage (a hard stop: checkpoint and NEEDS_DECISION, no other model, nothing skipped), for the
-   checkpoint review ("family fable ... is not the requested family opus") and for the proposal review. It is never
-   silently accepted.
-5. **Plans created before this ADR.** A plan's `policy_baseline` is history and is not rewritten. When such a plan
-   runs its next stage, `planning.service.stage_model` ignores a recorded model outside the stage family and
-   requests `opus`, so an older plan whose baseline says `fable` never requests Fable.
+   (`parsing.ALLOWED_REQUEST_FAMILIES` is `opus`, `sonnet`; `parsing.REFUSED_REQUEST_FAMILIES` is `fable`). One
+   function identifies the family, `parsing.refused_family` (the bridge facade exports it): the name is NFKC-normalised
+   (full-width letters become ASCII), invisible characters are removed (zero-width space and joiner, BOM, soft
+   hyphen, controls) and it is split into lower-case alphanumeric tokens; a `fable` token is the family. So the alias,
+   a pinned id such as `claude-fable-5-1`, `fable[1m]`, `Fable 5.1`, any case and a zero-width character inside the
+   name are all refused by `bridge.validate_request` before any process starts, with their own code
+   `MODEL_FAMILY_REFUSED` and the message "model '...' is refused: DLY AEOS never requests the Claude fable family
+   (owner decision 2026-10-28, ADR-0131); planning and review stages use opus". A word that only contains it
+   (`fableish`, `notfable`) is not the family. A name the tokens cannot identify, for example one written with
+   letters of another script that only look Latin, names no family AEOS knows: the generic check refuses it as
+   `REQUEST_INVALID`, also before any process starts. That is the safe answer, because calling it Fable would be a
+   guess and nothing is sent either way. The manual package has the same preflight, so no Fable package is written.
+   `bridge.capability_test` checks the family first: a refused family returns status `REFUSED` without probing the
+   binary or the login and without persisting a capability-test row or evidence. `aeos bridge test` accepts only
+   `opus`, and so does the Control Center capability test (`POST /api/claude/capability-test`, schema
+   `model: "opus"`).
+4. **A Fable answer is never accepted, whatever was requested.** The parser keeps `fable` in `parsing.FAMILIES`, so
+   an answer produced by a Fable model is named as such. `parsing.resolve_model` refuses every model that produced
+   output and belongs to a refused family, and a request that named one, even when the request itself said `fable`
+   (a package or a record written before this ADR): `MODEL_POLICY_MISMATCH` with the message "answer produced by ...
+   (family fable): the Claude fable family is never accepted, whatever was requested (owner decision 2026-10-28,
+   ADR-0131)". That is a hard stop at every planning stage (checkpoint and NEEDS_DECISION, no other model, nothing
+   skipped) and a refused proposal review. The checkpoint review's identity check
+   (`verification.review.refused_review_model`, the first step of `_model_policy_problem`) refuses a review answered
+   by, or requested from, Fable with its own message, whatever its stored `model_requested` says.
+5. **Records written before this ADR.** None is rewritten; none can make AEOS request or accept Fable.
+   * Plans: a plan's `policy_baseline` is history. When such a plan runs its next stage,
+     `planning.service.stage_model` ignores a recorded model outside the stage family and requests `opus`.
+   * Planning manual packages written for Fable (`package.json` `model_requested`): `read_manual_result` refuses them
+     with `MODEL_FAMILY_REFUSED` (whether or not a result exists yet); `import_manual_result` refuses before anything
+     changes (`PolicyDenied`, `MODEL_FAMILY_REFUSED`) and tells the owner to run the plan again; the plan's manual
+     instructions no longer point to the package (they say not to run it and to run the plan again) and
+     `allowed.import_manual` is false. Running the plan again marks the manual run ABANDONED and runs the same stage
+     with opus, writing a new manual package if the bridge is still not proven.
+   * A checkpoint review waiting for a manual result that was requested from Fable: `collect_manual_review` refuses
+     the import (`PolicyDenied`, `MODEL_FAMILY_REFUSED`) and tells the owner to request a new review
+     (`aeos verify review <run>`), which uses opus.
+   * A review completed by a Fable model (or requested from Fable) before this ADR is not counted for any new
+     acceptance: the acceptance check names it "not counted for acceptance: the review was answered by ... (Claude
+     fable family), which DLY AEOS never accepts (owner decision 2026-10-28, ADR-0131); request a new review, it
+     uses opus". Acceptance records already written are history and stay as they are.
 6. **The route catalog keeps the Fable row as history.** `claude-native/fable` (SUPERVISOR pool, CANDIDATE) is not
    deleted: it records the 2026-10-18 probe, and on the owner's machine it holds the observations of earlier Fable
    calls (resolved version, Claude Code version). The seed has no status
@@ -86,9 +112,11 @@
 
 ## What changed
 
-* Backend: `planning/states.py`, `planning/service.py` (baseline name and source, docstring), `claude_bridge/parsing.py`,
-  `claude_bridge/bridge.py`, `claude_bridge/cli.py`, `claude_bridge/router.py`, `verification/review.py`,
-  `proposals/review.py`, `routing/seed.py` (notes only), the Doctor capability text of `CAN_PLAN_PERSONAL` (and the
+* Backend: `planning/states.py`, `planning/service.py` (baseline name and source, docstring, the refused manual
+  package), `planning/cli.py`, `claude_bridge/parsing.py` (`refused_family`, the refusal in `resolve_model`),
+  `claude_bridge/bridge.py` (request and capability-test refusal), `claude_bridge/facade.py`, `claude_bridge/manual.py`,
+  `claude_bridge/cli.py`, `claude_bridge/router.py`, `verification/review.py` (review default, `refused_review_model`,
+  the manual import refusal), `verification/acceptance.py`, `proposals/review.py`, `routing/seed.py` (notes only), the Doctor capability text of `CAN_PLAN_PERSONAL` (and the
   generated `docs/OWNER_TARGET_CAPABILITY_MATRIX.md`), the workforce engine hints of the Planning Challenger and the
   Final Planning Reviewer (their role revision changes once at the next `aeos seed`).
 * Control Center: the stage labels ("Review penantang (Opus)", "Review akhir (Opus)"), the plan page heading, the
@@ -96,8 +124,22 @@
 * Tests: the stage-model, quota-scope and resolved-model assertions that named Fable, in the unit, e2e and trusted
   acceptance suites (acceptance 1.30 and 1.31 keep their meaning: the review waits on an observed limit, now scoped
   `opus`; an answer from outside the policy family is never accepted, now a Fable answer to an Opus request), and
-  `tests/unit/test_opus_only_claude_stages.py` with the three guards of this ADR, each red with its own message and
-  each with an Opus near miss.
+  `tests/unit/test_opus_only_claude_stages.py` with the guards of this ADR (no stage names Fable; a Fable request
+  is refused in every spelling and the capability test starts and stores nothing; a Fable answer fails every stage
+  and both reviews whatever was requested; records written before this ADR are refused), each red with its own
+  message and each with an Opus near miss.
+
+## Amendment 2026-10-28: review before merge
+
+A blind review of the first build found that a record or package written before this ADR could still let a Fable
+answer through, because the checks compared the answer only with what had been requested: a waiting checkpoint
+review whose stored `model_requested` was `fable` plus a Fable result envelope became COMPLETED with a pass verdict;
+`acceptance` counted such a review; a planning package written for Fable could be imported and its instructions
+still said `--model fable`. It also found that `capability_test("fable")` probed the binary and the login and
+stored a FAILED row before refusing, that `fable[1m]`, `Fable 5.1` or a zero-width character inside the name got the
+generic `REQUEST_INVALID` instead of the dedicated refusal, and that the decision date was wrong (the owner decided on
+2026-10-28, WIB). Decisions 3, 4 and 5 above now state the fixed behaviour; each fix has a bite test that is red with
+its own message on the first build and an Opus near miss that completes.
 
 ## Consequences
 
@@ -107,6 +149,7 @@
   decision 2; blind spots that one model family shares are a residual risk the owner accepted with this decision.
 * An old plan or an old POLICY pin that names Fable cannot make AEOS request Fable (decisions 1, 3 and 5).
 * Evidence: E2, unit, seam and e2e tests on macOS arm64 (stage models, the refusal of every Fable spelling with
-  no process started, a Fable answer rejected at every stage and in both reviews, one fresh invocation per stage).
+  no process started, a Fable answer rejected at every stage and in both reviews whatever was requested, records
+  and packages written before this ADR refused, one fresh invocation per stage).
   NOT-PROVEN: a live Opus-only planning run through the owner's Max login (the last live run, 2026-10-19, used
   Fable for the review stages), and Windows and macOS Intel until CI runs.

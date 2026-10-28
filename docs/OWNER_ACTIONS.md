@@ -128,7 +128,7 @@ Running `claude` the first time asks you to sign in with your Claude Max account
 `claude auth status` must show `loggedIn true`, authMethod `claude.ai` and subscriptionType `max`. The `echo`
 must print `<not set>`; remove any `ANTHROPIC_API_KEY` export from `~/.zshrc` and `~/.zprofile`. The `opus` bridge
 test must resolve inside the Opus family, with no MODEL_POLICY_MISMATCH. Every planning and review stage uses Opus;
-DLY AEOS never requests a Claude Fable model (owner decision 2026-10-29,
+DLY AEOS never requests a Claude Fable model (owner decision 2026-10-28,
 [ADR-0131](decisions/ADR-0131-opus-only-claude-stages.md)), so there is no `fable` bridge test: the bridge refuses
 it (MODEL_FAMILY_REFUSED). `doctor --functional` is the Claude capability test and uses a little Max quota.
 

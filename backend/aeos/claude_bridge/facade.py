@@ -65,6 +65,14 @@ def capability_test() -> dict[str, Any]:
     return impl()
 
 
+def refused_family(model: str | None) -> str | None:
+    """ADR-0131: the Claude family DLY AEOS never requests nor accepts (``fable``) that *model* belongs to, in any
+    spelling (alias, pinned id, ``[1m]`` suffix, case, invisible characters), else None."""
+    from aeos.claude_bridge.parsing import refused_family as impl
+
+    return impl(model)
+
+
 def write_manual_package(request: ClaudeRequest, *, package_id: str) -> Path:
     """§12 fallback: write prompt+schema+context so the user can run it in official Claude Code."""
     from aeos.claude_bridge.manual import write_manual_package as impl

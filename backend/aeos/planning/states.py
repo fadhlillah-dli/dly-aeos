@@ -76,7 +76,7 @@ class StageSpec:
     failure_state: S
 
 
-# ADR-0131 (owner decision 2026-10-29, amends master §02/§15/§17): every stage requests Opus; the Claude Fable family is
+# ADR-0131 (owner decision 2026-10-28, amends master §02/§15/§17): every stage requests Opus; the Claude Fable family is
 # never requested (the bridge refuses it). All four stages still run; the reviewers' independence comes from a fresh
 # context per stage (a separate bridge invocation, no session reuse; REVIEWER_NOT_INDEPENDENT in the service).
 STAGES: tuple[StageSpec, ...] = (

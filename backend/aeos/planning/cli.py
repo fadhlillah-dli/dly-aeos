@@ -94,7 +94,7 @@ def run(plan_id: str = typer.Argument(...), actor: str = typer.Option(..., help=
     try:
         plan = service.run_pipeline(session, plan_id, actor=actor_id)
         console.print(_ascii(f"Plan {plan.id}: {plan.state} - {plan.state_reason}"))
-        manual = service.manual_instructions(plan)
+        manual = service.manual_instructions(plan, session)
         if manual:
             for step in manual["steps"]:
                 console.print(_ascii(f"  * {step}"))

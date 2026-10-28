@@ -1,4 +1,4 @@
-"""ADR-0131 (owner decision 2026-10-29, R42): DLY AEOS never requests a Claude Fable model; every planning and review
+"""ADR-0131 (owner decisions 2026-10-28, R38 and R42): DLY AEOS never requests a Claude Fable model; every planning and review
 stage uses Opus. Three guards, each red with its own message and each with a near miss that stays green:
 
 (a) no planning stage, bridge policy entry, checkpoint review default or proposal review model names Fable;
@@ -27,16 +27,22 @@ from aeos.claude_bridge.parsing import (
     REFUSED_REQUEST_FAMILIES,
     family_of,
     parse_output,
+    refused_family,
     resolve_model,
 )
-from aeos.core.errors import ValidationFailed
+from aeos.core.errors import PolicyDenied, ValidationFailed
 from aeos.planning import service as planning
 from aeos.planning.states import STAGES, StageSpec
 from aeos.proposals import review as proposals_review
 from aeos.verification import review as verification_review
 from tests.unit.test_claude_bridge_parsing import FABLE_ANSWER, OPUS_OK, SCHEMA
 
-FABLE_IDS = ("fable", "FABLE", " fable ", "claude-fable-5-1", "claude-fable-5-1[1m]", "Claude-Fable-5-1")
+ZWSP, BOM, SOFT_HYPHEN = chr(0x200B), chr(0xFEFF), chr(0x00AD)  # built at run time: no invisible text in the file
+FULLWIDTH_FABLE = "".join(chr(0xFF00 + ord(c) - 0x20) for c in "fable")
+FABLE_IDS = ("fable", "FABLE", " fable ", "claude-fable-5-1", "claude-fable-5-1[1m]", "Claude-Fable-5-1", "fable[1m]",
+             "Fable 5.1", f"fa{ZWSP}ble", f"{BOM}fable", f"claude-fa{SOFT_HYPHEN}ble-5-1", FULLWIDTH_FABLE)
+# near misses that only contain the word: not the family (refused as unknown models, never as Fable)
+NOT_FABLE = ("fableish", "notfable", "claude-fables-1")
 PROMPT = "Rencanakan fitur kecil. Kembalikan {\"ok\": true}."
 
 
@@ -149,9 +155,11 @@ def test_opus_and_other_allowed_requests_pass_the_family_gate(model):
     assert bridge.validate_request(_req(model)) is None, f"{model!r} is an allowed request (near miss)"
 
 
-def test_an_unknown_model_is_refused_with_the_generic_message_not_the_fable_one():
-    code, message = bridge.validate_request(_req("gpt-6")) or ("", "")
-    assert code == "REQUEST_INVALID" and "fable" not in message.lower(), message
+@pytest.mark.parametrize("model", ["gpt-6", *NOT_FABLE])
+def test_an_unknown_model_is_refused_with_the_generic_message_not_the_fable_one(model):
+    assert refused_family(model) is None, f"{model!r} only contains the word; it is not the fable family"
+    code, message = bridge.validate_request(_req(model)) or ("", "")
+    assert code == "REQUEST_INVALID" and "never requests" not in message, message
 
 
 @pytest.mark.parametrize("model", ["fable", "claude-fable-5-1"])
@@ -180,6 +188,35 @@ def test_a_fable_manual_package_is_refused_too(settings, tmp_path):
     assert write_manual_package(_req("opus"), package_id="pkg-opus-ok").is_dir()  # near miss
 
 
+@pytest.mark.parametrize("model", ["fable", "claude-fable-5-1", "Fable 5.1"])
+def test_a_fable_capability_test_starts_nothing_and_stores_nothing(settings, db, monkeypatch, model):
+    """Review finding F2: the capability test probed the binary and the login and stored a FAILED row before the
+    request was refused. Now the family is checked first."""
+    from aeos.models.claude_bridge_ext import ClaudeCapabilityTest
+    from tests.unit.test_claude_bridge_run import _probe
+    from tests.unit.test_routing_fakes import install_fakes
+
+    install_fakes(monkeypatch)
+    probed: list[bool] = []
+    started: list[Any] = []
+
+    def probe(settings, refresh=False):
+        probed.append(refresh)
+        return _probe(found=False)
+
+    monkeypatch.setattr(binmod, "probe", probe)
+    monkeypatch.setattr(bridge, "run_process", lambda *a, **k: started.append(a))
+    out = bridge.capability_test(model, actor="tester", settings=settings)
+    assert out["status"] == "REFUSED" and out["error_code"] == "MODEL_FAMILY_REFUSED", out["status"]
+    assert "never requests the Claude fable family" in out["error"], out["error"]
+    assert probed == [], "a refused family must not probe the binary or the login"
+    assert not started and out["persisted"] is False and out["id"] is None
+    db.expire_all()
+    assert db.query(ClaudeCapabilityTest).count() == 0, "a refused request is not a capability observation"
+    near = bridge.capability_test("opus", actor="tester", settings=settings)  # near miss: opus probes and is stored
+    assert probed == [True] and near["status"] == "BLOCKED" and near["id"] is not None
+
+
 def test_the_capability_test_accepts_only_opus():
     from aeos.claude_bridge.router import CapabilityTestBody
 
@@ -206,10 +243,27 @@ def test_a_fable_answer_fails_the_family_check_of_every_stage(spec):
     assert near.ok and near.model_resolved == "claude-opus-5-5"
 
 
+@pytest.mark.parametrize("requested", ["fable", "claude-fable-5-1"])
+def test_a_fable_answer_is_refused_even_when_the_request_said_fable(requested):
+    """Review finding F1(a): a package or record written before ADR-0131 requested fable; its Fable answer matched
+    the request and passed. A refused family never counts, whatever was requested."""
+    parsed = parse_output(json.dumps(FABLE_ANSWER), "", returncode=0, schema=SCHEMA, model_requested=requested)
+    assert not parsed.ok and parsed.error_code == "MODEL_POLICY_MISMATCH", parsed.error_code
+    assert "the Claude fable family is never accepted, whatever was requested" in parsed.error, parsed.error
+    res = resolve_model(requested, {"claude-fable-5-1": {"outputTokens": 10}})
+    assert not res.policy_ok and "never accepted" in res.reason, res.reason
+    problem = verification_review._model_policy_problem({}, "claude-fable-5-1", requested)
+    assert problem and "which DLY AEOS never accepts" in problem and "request a new review" in problem, problem
+    # near miss: an opus answer to an opus request passes all three
+    assert parse_output(json.dumps(OPUS_OK), "", returncode=0, schema=SCHEMA, model_requested="opus").ok
+    assert resolve_model("opus", {"claude-opus-5-5": {"outputTokens": 10}}).policy_ok
+    assert verification_review._model_policy_problem({}, "claude-opus-5-5", "opus") is None
+
+
 def test_a_fable_answer_fails_the_checkpoint_and_proposal_review_policy():
     problem = verification_review._model_policy_problem({}, "claude-fable-5-1",
                                                         verification_review.DEFAULT_REVIEW_MODEL)
-    assert problem and "family fable" in problem and "requested family opus" in problem, problem
+    assert problem and "Claude fable family" in problem and "never accepts" in problem, problem
     assert verification_review._model_policy_problem({}, "claude-opus-5-5",
                                                      verification_review.DEFAULT_REVIEW_MODEL) is None
     usage = {"claude-fable-5-1": {"outputTokens": 10}}
@@ -236,3 +290,144 @@ def test_the_fable_route_is_kept_as_history_and_cannot_be_activated(db):
     assert "supervisor routes are governed by the planning policy" in e.value.message
     opus = routing.get_route(db, "claude-native/opus")
     assert "ADR-0131" in opus.notes and not opus.notes.startswith("NOT USED")  # near miss: the route in use
+
+
+# ------------------------------------------------------------------------------------- records written before ADR-0131
+
+
+@pytest.fixture
+def wf(monkeypatch):
+    from tests.unit.test_verification_support import FakeWorkforce
+
+    return FakeWorkforce().install(monkeypatch)
+
+
+@pytest.fixture
+def world(db):
+    from tests.unit.test_verification_support import make_world
+
+    return make_world(db)
+
+
+def _waiting_review(db, world, monkeypatch, *, model_requested: str):
+    from tests.unit.test_verification_support import FakeBridge, install_doctor, record_verification
+
+    install_doctor(monkeypatch, status="UNKNOWN")  # no proven bridge: the review waits for a manual result
+    FakeBridge().install(monkeypatch, manual=False)
+    record_verification(db, world)
+    waiting = verification_review.review_run(db, world.run.id, actor="t").review
+    waiting.model_requested = model_requested  # "fable": a package written before ADR-0131
+    db.commit()
+    return waiting
+
+
+def test_a_waiting_review_requested_from_fable_is_never_imported(db, world, wf, monkeypatch):
+    """Review finding F1(b): a waiting review whose stored request said fable, plus a Fable result envelope, became
+    COMPLETED with a pass verdict. Now the import is refused before anything is read."""
+    from tests.unit.test_verification_support import claude_envelope, review_payload
+
+    waiting = _waiting_review(db, world, monkeypatch, model_requested="fable")
+    with pytest.raises(PolicyDenied) as e:
+        verification_review.collect_manual_review(
+            db, waiting.id, actor="owner", structured=claude_envelope(review_payload(), model="claude-fable-5-1"))
+    assert e.value.code == "MODEL_FAMILY_REFUSED", e.value.code
+    assert "requested from 'fable' (Claude fable family)" in e.value.message, e.value.message
+    assert f"aeos verify review {world.run.id}" in e.value.message, e.value.message
+    db.refresh(waiting)
+    assert waiting.status == "NEEDS_DECISION" and not wf.of("mark_accepted")
+
+
+def test_a_waiting_opus_review_with_an_opus_envelope_completes(db, world, wf, monkeypatch):
+    """Near miss of the refusal above: the same import for an opus review completes and is accepted."""
+    from tests.unit.test_verification_support import claude_envelope, review_payload
+
+    waiting = _waiting_review(db, world, monkeypatch, model_requested="opus")
+    out = verification_review.collect_manual_review(
+        db, waiting.id, actor="owner", structured=claude_envelope(review_payload(), model="claude-opus-5-5"))
+    db.commit()
+    assert out.review.status == "COMPLETED" and out.review.verdict == "PASS-CONTROLLED"
+    assert out.acceptance and out.acceptance["acceptance_status"] == "ACCEPTED"
+
+
+@pytest.mark.parametrize(("requested", "resolved", "counted"), [
+    ("fable", "claude-fable-5-1", False),  # completed by Fable before the decision
+    ("opus", "claude-fable-5-1", False),
+    ("opus", "claude-opus-5-5", True),  # near miss
+])
+def test_a_review_completed_by_fable_is_not_counted_for_new_acceptance(db, world, wf, requested, resolved, counted):
+    """Review finding F1(d): acceptance counted a COMPLETED review that a Fable model answered for a fable request."""
+    from aeos.verification import acceptance
+    from tests.unit.test_verification_support import make_review, record_verification
+
+    report = record_verification(db, world)
+    rec = make_review(db, world, report, model_resolved=resolved)
+    rec.model_requested = requested
+    db.commit()
+    out = acceptance.evaluate_acceptance(db, world.run.id)
+    refusals = [r for r in out.reasons if "not counted for acceptance" in r]
+    if counted:
+        assert out.acceptance_status == "ACCEPTED" and not refusals, out.reasons
+    else:
+        assert out.acceptance_status == "REJECTED", out.reasons
+        assert refusals and "Claude fable family" in refusals[0] and "never accepts" in refusals[0], out.reasons
+
+
+def test_a_planning_package_written_for_fable_is_refused_and_never_pointed_to(db, monkeypatch, tmp_path):
+    """Review finding F1(c): a planning manual package written for Fable could be imported, and its instructions
+    still sent the owner to a `--model fable` package. Now the import is refused before anything changes, the
+    instructions say to run the plan again, and the re-run (opus) imports normally (the near miss)."""
+    from aeos.models.planning import PlanningRun
+    from tests.conftest import create_admin
+    from tests.unit.test_planning_support import FakeBridge, make_project
+
+    owner = create_admin(db)
+    fake = FakeBridge(monkeypatch, tmp_path, blocked={"CHALLENGE_REVIEW"})
+    project = make_project(db)
+    plan = planning.create_plan(db, project=project, domain=project.domain, title="Rencana", attachment_ids=[],
+                                prompt="Bangun aplikasi catatan pribadi dengan sinkronisasi.", actor_user_id=owner.id)
+    db.commit()
+    planning.run_pipeline(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert plan.state == "AWAITING_MANUAL_CLAUDE"
+    old = db.get(PlanningRun, plan.checkpoint["run_id"])
+    old.model_requested = "fable"  # a package written before ADR-0131
+    db.commit()
+    fake.complete_manual(plan.checkpoint["package_id"])
+    with pytest.raises(PolicyDenied) as e:
+        planning.import_manual_result(db, plan.id, actor=owner.id)
+    assert e.value.code == "MODEL_FAMILY_REFUSED", e.value.code
+    assert "written for 'fable' (Claude fable family)" in e.value.message and "Run the plan again" in e.value.message
+    db.refresh(plan)
+    assert plan.state == "AWAITING_MANUAL_CLAUDE", "a refused import changes nothing"
+    manual = planning.manual_instructions(plan, db)
+    assert manual and manual["refused"]["code"] == "MODEL_FAMILY_REFUSED" and manual["package_path"] is None
+    text = " ".join(manual["steps"])
+    assert "--model fable" not in text and "Jangan jalankan paket ini" in text and "aeos plan run" in text, text
+    assert planning.plan_detail(db, plan)["allowed"]["import_manual"] is False
+    # near miss: running again writes a new (opus) package that imports and completes the pipeline
+    planning.run_pipeline(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert plan.state == "AWAITING_MANUAL_CLAUDE" and db.get(PlanningRun, old.id).status == "ABANDONED"
+    new = db.get(PlanningRun, plan.checkpoint["run_id"])
+    assert new.model_requested == "opus" and "steps" in (planning.manual_instructions(plan, db) or {})
+    assert planning.plan_detail(db, plan)["allowed"]["import_manual"] is True
+    fake.complete_manual(plan.checkpoint["package_id"])
+    planning.import_manual_result(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert plan.state == "READY_FOR_HUMAN_REVIEW", plan.state_reason
+
+
+def test_a_real_manual_package_written_for_fable_is_refused_when_read(settings, tmp_path):
+    """The real package reader refuses a package whose package.json requested Fable, with or without a result."""
+    from aeos.claude_bridge.facade import read_manual_result, write_manual_package
+
+    pkg = write_manual_package(_req("opus"), package_id="pkg-old-fable")
+    assert read_manual_result("pkg-old-fable") is None  # near miss: an opus package without a result yet
+    meta = json.loads((pkg / "package.json").read_text(encoding="utf-8"))
+    (pkg / "package.json").write_text(json.dumps({**meta, "model_requested": "fable"}), encoding="utf-8")
+    res = read_manual_result("pkg-old-fable")
+    assert res is not None and not res.ok and res.error_code == "MODEL_FAMILY_REFUSED", res
+    assert "written for 'fable' (Claude fable family)" in res.error and "uses opus" in res.error, res.error
+    (pkg / "result.json").write_text(json.dumps(FABLE_ANSWER), encoding="utf-8")
+    res = read_manual_result("pkg-old-fable")
+    assert res is not None and res.error_code == "MODEL_FAMILY_REFUSED" and res.structured is None

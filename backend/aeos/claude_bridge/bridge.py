@@ -31,12 +31,12 @@ from aeos.claude_bridge.env import assert_clean, child_env, parent_hygiene
 from aeos.claude_bridge.facade import ClaudeRequest, ClaudeResult
 from aeos.claude_bridge.parsing import (
     ALLOWED_REQUEST_FAMILIES,
-    REFUSED_REQUEST_FAMILIES,
     cli_schema,
     family_of,
     is_pinned_id,
     parse_output,
     redact_strings,
+    refused_family_message,
     validate_schema,
 )
 from aeos.claude_bridge.process import run_process
@@ -137,7 +137,7 @@ CAPABILITY_TEST_MAX_AGE = timedelta(days=7)
 DOMAINLESS_PURPOSE_PREFIXES = ("doctor.",)
 
 # DESIGN default for display; the planning module's PlanVersion policy baseline is authoritative.
-# ADR-0131 (owner decision 2026-10-29): every planning and review stage uses Opus; Fable is never requested.
+# ADR-0131 (owner decision 2026-10-28): every planning and review stage uses Opus; Fable is never requested.
 SUPERVISOR_POLICY: dict[str, Any] = {
     "allowed_families": ["opus"],
     "stages": {
@@ -215,10 +215,10 @@ def validate_request(request: ClaudeRequest) -> tuple[str, str] | None:
     """Return (code, message) when the request must not be sent at all."""
     model = (request.model or "").strip()
     fam = family_of(model)
-    if fam in REFUSED_REQUEST_FAMILIES:
-        # ADR-0131: refused by family (alias, pinned id or any spelling the parser recognises), never sent
-        return MODEL_FAMILY_REFUSED, (f"model {model!r} is refused: DLY AEOS never requests the Claude {fam} family "
-                                      "(owner decision 2026-10-29, ADR-0131); planning and review stages use opus")
+    refusal = refused_family_message(request.model, answered=False)
+    if refusal:
+        # ADR-0131: refused by family (alias, pinned id, any spelling parsing.refused_family identifies), never sent
+        return MODEL_FAMILY_REFUSED, refusal
     if fam not in ALLOWED_REQUEST_FAMILIES or not (model.lower() in ALLOWED_REQUEST_FAMILIES or is_pinned_id(model)):
         return "REQUEST_INVALID", f"model {model!r} is not an allowed supervisor alias/pinned id (opus/sonnet)"
     bad_tools = sorted(set(request.allowed_tools) - READ_ONLY_TOOLS)
@@ -565,6 +565,17 @@ def quota_view(session: Session) -> dict[str, Any]:
 
 def capability_test(model: str = "opus", *, actor: str = "system", settings: Settings | None = None) -> dict[str, Any]:
     """Binary + version + auth mode + env hygiene + one tiny structured call (§12 pilot, §08)."""
+    refusal = refused_family_message(model, answered=False)
+    if refusal:
+        # ADR-0131: a refused family is refused before anything starts (no probe of the binary or the login, no
+        # process) and nothing is persisted: it is not a capability observation, only a refused request.
+        return {"status": "REFUSED", "checked_at": utcnow().isoformat(), "model_requested": model,
+                "model_resolved": None, "engine_version": None, "binary": {}, "auth": {},
+                "steps": [{"id": "model_family", "status": "REFUSED", "detail": refusal,
+                           "error_code": MODEL_FAMILY_REFUSED}],
+                "duration_ms": 0, "error_code": MODEL_FAMILY_REFUSED, "error": refusal, "quota_exhausted": False,
+                "trace_ref": None, "evidence_level": None, "mode": "LIVE", "evidence_id": None, "id": None,
+                "persisted": False}
     settings = settings or get_settings()
     started = utcnow()
     steps: list[dict[str, Any]] = []
