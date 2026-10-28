@@ -618,6 +618,31 @@ Then:
 ./aeos doctor -c CAN_RUN_WORKER
 ```
 
+**Category agents (ADR-0126, owner decision R31 of 2026-10-28) [per machine, DECISION].** Tasks of every role
+except `feature-implementer` run on one of seven category agents, not on `opencode-implementer`: `agentic-coder`,
+`coder`, `designer`, `reasoner`, `researcher`, `writer` and `analyst` (the roles of each are in the ADR-0126
+table). They are seeded disabled. Until you enable one, the tasks of its roles wait with `AGENT_DISABLED` naming
+that agent; a role with no agent is refused with `ROLE_UNKNOWN`, never run by the implementer. Keep
+`opencode-implementer` enabled: `CAN_RUN_WORKER` needs it. Enable only the categories you want to run, one agent
+at a time. Check the prerequisites first:
+
+```bash
+./aeos work agent-prereqs "<agent_key>" --domain PERSONAL
+```
+
+`agent-enable` asks for your password, so it ends its own block:
+
+```bash
+./aeos work agent-enable "<agent_key>" --as "<admin>" \
+  --domain PERSONAL --reason "<why>"
+```
+
+Dry run (in-process, temporary database):
+`tests/unit/test_workforce_role_agents.py::test_owner_agent_enable_of_a_category_agent_dry_run` shows the refusal
+while a prerequisite is missing and that only the named agent is enabled once they are READY. Each agent's route
+preference is generated from LiveBench and changes only through a reviewed pull request (ADR-0126, "Regenerating
+the ranking"); it re-orders routes you already activated and never activates one.
+
 The M4 and the i9 have different hardware, so measure each one. In the UI the agent controls are on *Organisasi &
 Peran* → agent card → *Periksa prasyarat* / *Aktifkan*.
 

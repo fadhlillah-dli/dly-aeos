@@ -21,6 +21,7 @@ from aeos.identity.facade import Principal
 from aeos.models.planning import Plan
 from aeos.models.workforce import TaskExecution, WorkerRun
 from aeos.workforce import integrations, scheduler, views
+from aeos.workforce.limits import HARD_MAX_ACTIVE
 
 router = APIRouter(tags=["workforce"])
 RUN_DETAIL_SOURCE = "worker_runs, task_executions, leases, evidence_artifacts, review_records, acceptance_records"
@@ -186,7 +187,7 @@ def set_scheduler(body: Enable, principal: AdminPrincipal, db: DB) -> dict[str, 
 
 
 class ConcurrencyIn(BaseModel):
-    max_active: int = Field(ge=1, le=2)
+    max_active: int = Field(ge=1, le=HARD_MAX_ACTIVE)  # one source with the scheduler and the CLI
     rationale: str = Field(default="", max_length=2000)
     eval_run_id: str | None = Field(default=None, max_length=64)  # bounded-parallel run (topology C)
     baseline_eval_run_id: str | None = Field(default=None, max_length=64)  # sequential baseline (topology A)

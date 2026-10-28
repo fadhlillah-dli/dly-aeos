@@ -1,0 +1,2225 @@
+{
+ "schema_version": "1",
+ "generated_by": "scripts/role_route_ranking.py",
+ "inputs": "docs/evidence/livebench-2026-10-28/role-ranking-inputs.json",
+ "inputs_sha256": "ec2be1da5bcd0b80b1a7db3cce7721ef5c20fa184cb02ecbb31cb3d268da483f",
+ "decision": "owner decision R31, 2026-10-28 (ADR-0126): best models first, matched to each role's needs",
+ "method": {
+  "release_per_category": {
+   "2.0": "2026-10-25",
+   "v1": "2026-06-25"
+  },
+  "noise_band": "1.96 * 50 / sqrt(nq) points (95% half-width, worst case p=0.5)",
+  "v1_nq": "not published in the v1 table; 50 assumed (NOT-PROVEN)",
+  "bucket": "a bucket takes every model within the noise band of its best remaining score",
+  "inside_bucket": "larger monthly allowance first, then higher score, then route key",
+  "unscored": "after the scored routes of the tier: larger allowance first, then route key",
+  "tiers": "OPENCODE_GO first, then OPENROUTER_FREE (PUBLIC only: eligibility filters it for INTERNAL)",
+  "never_listed": "Gemini 4 Argon, Qwen 3.8 Max (API family the broker does not support), DeepSeek",
+  "effect": "re-orders routes that are already eligible; never makes a route eligible"
+ },
+ "aliases": {
+  "2.0:gemma-4-31b": {
+   "route_key": "openrouter/google/gemma-4-31b-it:free",
+   "reason": "LiveBench lists the instruction-tuned release without the -it suffix"
+  }
+ },
+ "agents": {
+  "agentic-coder": {
+   "category": "Long Agentic",
+   "release": "2026-10-25",
+   "livebench_version": "2.0",
+   "nq": 18,
+   "nq_used_for_band": 18,
+   "noise_band": 23.1,
+   "preferred_routes": [
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/minimax-m3.1-flash",
+    "opencode-go/kimi-k3.1-pro",
+    "opencode-go/mimo-v2.6-pro",
+    "opencode-go/kimi-k3",
+    "opencode-go/step-5-preview",
+    "opencode-go/glm-5.2",
+    "opencode-go/kimi-k2.7-code",
+    "opencode-go/glm-5.3",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/thinkingmachines/inkling:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/liquid/lfm-2.5-2.6b:free",
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/poolside/laguna-xs-2.1:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/thinkingmachines/inkling-small:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+   ],
+   "entries": [
+    {
+     "route_key": "opencode-go/glm-5.3-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 19.0,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 19.0,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3.1-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 28.8,
+     "allowance_usd_month": 20.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 28.8,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3.1-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 39.1,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 39.1,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.6-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 35.2,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 35.2,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 26.4,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 26.4,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/step-5-preview",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 19.4,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 19.4,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.2",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/kimi-k2.7-code",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/glm-5.3",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-31b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 10.7,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 10.7,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 8.5,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Long Agentic",
+       "score": 8.5,
+       "nq": 18,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/cohere/north-mini-code:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/dots-studio/dots-3-note-preview:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-26b-a4b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/liquid/lfm-2.5-2.6b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-lightning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "LiveBench 2026-10-25 has two builds (full precision and nvfp4) and the free endpoint does not say which one it serves"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-s-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-xs-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/recursive/flint-v1.0:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling-small:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    }
+   ]
+  },
+  "analyst": {
+   "category": "Data Analysis",
+   "release": "2026-10-25",
+   "livebench_version": "2.0",
+   "nq": 150,
+   "nq_used_for_band": 150,
+   "noise_band": 8.0,
+   "preferred_routes": [
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/minimax-m3.1-flash",
+    "opencode-go/kimi-k3.1-pro",
+    "opencode-go/kimi-k3",
+    "opencode-go/mimo-v2.6-pro",
+    "opencode-go/step-5-preview",
+    "opencode-go/glm-5.2",
+    "opencode-go/kimi-k2.7-code",
+    "opencode-go/glm-5.3",
+    "openrouter/thinkingmachines/inkling:free",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/liquid/lfm-2.5-2.6b:free",
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/poolside/laguna-xs-2.1:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/thinkingmachines/inkling-small:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+   ],
+   "entries": [
+    {
+     "route_key": "opencode-go/glm-5.3-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 76.4,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 76.4,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3.1-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 71.4,
+     "allowance_usd_month": 20.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 71.4,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3.1-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 79.1,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 79.1,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 78.7,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 78.7,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.6-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 72.3,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 72.3,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/step-5-preview",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 63.5,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 63.5,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.2",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/kimi-k2.7-code",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/glm-5.3",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 72.8,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 72.8,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-31b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 2,
+     "score": 53.3,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Data Analysis",
+       "score": 53.3,
+       "nq": 150,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/cohere/north-mini-code:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/dots-studio/dots-3-note-preview:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-26b-a4b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/liquid/lfm-2.5-2.6b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-lightning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "LiveBench 2026-10-25 has two builds (full precision and nvfp4) and the free endpoint does not say which one it serves"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-s-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-xs-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/recursive/flint-v1.0:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling-small:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    }
+   ]
+  },
+  "coder": {
+   "category": "Coding",
+   "release": "2026-10-25",
+   "livebench_version": "2.0",
+   "nq": 29,
+   "nq_used_for_band": 29,
+   "noise_band": 18.2,
+   "preferred_routes": [
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/minimax-m3.1-flash",
+    "opencode-go/step-5-preview",
+    "opencode-go/kimi-k3.1-pro",
+    "opencode-go/mimo-v2.6-pro",
+    "opencode-go/kimi-k3",
+    "opencode-go/glm-5.2",
+    "opencode-go/kimi-k2.7-code",
+    "opencode-go/glm-5.3",
+    "openrouter/thinkingmachines/inkling:free",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/liquid/lfm-2.5-2.6b:free",
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/poolside/laguna-xs-2.1:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/thinkingmachines/inkling-small:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+   ],
+   "entries": [
+    {
+     "route_key": "opencode-go/glm-5.3-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 80.6,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 80.6,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3.1-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 83.9,
+     "allowance_usd_month": 20.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 83.9,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/step-5-preview",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 85.6,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 85.6,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3.1-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 81.8,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 81.8,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.6-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 81.5,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 81.5,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 59.3,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 59.3,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.2",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/kimi-k2.7-code",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/glm-5.3",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 64.0,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 64.0,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-31b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 49.0,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Coding",
+       "score": 49.0,
+       "nq": 29,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/cohere/north-mini-code:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/dots-studio/dots-3-note-preview:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-26b-a4b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/liquid/lfm-2.5-2.6b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-lightning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "LiveBench 2026-10-25 has two builds (full precision and nvfp4) and the free endpoint does not say which one it serves"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-s-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-xs-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/recursive/flint-v1.0:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling-small:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    }
+   ]
+  },
+  "designer": {
+   "category": "Design",
+   "release": "2026-10-25",
+   "livebench_version": "2.0",
+   "nq": 25,
+   "nq_used_for_band": 25,
+   "noise_band": 19.6,
+   "preferred_routes": [
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/minimax-m3.1-flash",
+    "opencode-go/mimo-v2.6-pro",
+    "opencode-go/kimi-k3.1-pro",
+    "opencode-go/kimi-k3",
+    "opencode-go/step-5-preview",
+    "opencode-go/glm-5.2",
+    "opencode-go/kimi-k2.7-code",
+    "opencode-go/glm-5.3",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/thinkingmachines/inkling:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/liquid/lfm-2.5-2.6b:free",
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/poolside/laguna-xs-2.1:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/thinkingmachines/inkling-small:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+   ],
+   "entries": [
+    {
+     "route_key": "opencode-go/glm-5.3-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 77.2,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 77.2,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3.1-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 74.0,
+     "allowance_usd_month": 20.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 74.0,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.6-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 78.5,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 78.5,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3.1-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 77.8,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 77.8,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 77.2,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 77.2,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/step-5-preview",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 76.9,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 76.9,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.2",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/kimi-k2.7-code",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/glm-5.3",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-31b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 58.4,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 58.4,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 58.3,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Design",
+       "score": 58.3,
+       "nq": 25,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/cohere/north-mini-code:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/dots-studio/dots-3-note-preview:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-26b-a4b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/liquid/lfm-2.5-2.6b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-lightning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "LiveBench 2026-10-25 has two builds (full precision and nvfp4) and the free endpoint does not say which one it serves"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-s-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-xs-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/recursive/flint-v1.0:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling-small:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    }
+   ]
+  },
+  "reasoner": {
+   "category": "Reasoning",
+   "release": "2026-10-25",
+   "livebench_version": "2.0",
+   "nq": 202,
+   "nq_used_for_band": 202,
+   "noise_band": 6.9,
+   "preferred_routes": [
+    "opencode-go/kimi-k3.1-pro",
+    "opencode-go/kimi-k3",
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/minimax-m3.1-flash",
+    "opencode-go/step-5-preview",
+    "opencode-go/mimo-v2.6-pro",
+    "opencode-go/glm-5.2",
+    "opencode-go/kimi-k2.7-code",
+    "opencode-go/glm-5.3",
+    "openrouter/thinkingmachines/inkling:free",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/liquid/lfm-2.5-2.6b:free",
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/poolside/laguna-xs-2.1:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/thinkingmachines/inkling-small:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+   ],
+   "entries": [
+    {
+     "route_key": "opencode-go/kimi-k3.1-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 91.1,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 91.1,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 90.7,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 90.7,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.3-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 77.6,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 77.6,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3.1-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 82.9,
+     "allowance_usd_month": 20.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 82.9,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/step-5-preview",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 83.8,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 83.8,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.6-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 79.6,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 79.6,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.2",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/kimi-k2.7-code",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/glm-5.3",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 78.3,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 78.3,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-31b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 2,
+     "score": 68.3,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Reasoning",
+       "score": 68.3,
+       "nq": 202,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/cohere/north-mini-code:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/dots-studio/dots-3-note-preview:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-26b-a4b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/liquid/lfm-2.5-2.6b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-lightning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "LiveBench 2026-10-25 has two builds (full precision and nvfp4) and the free endpoint does not say which one it serves"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-s-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-xs-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/recursive/flint-v1.0:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling-small:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    }
+   ]
+  },
+  "researcher": {
+   "category": "Research",
+   "release": "2026-10-25",
+   "livebench_version": "2.0",
+   "nq": 22,
+   "nq_used_for_band": 22,
+   "noise_band": 20.89,
+   "preferred_routes": [
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/minimax-m3.1-flash",
+    "opencode-go/kimi-k3",
+    "opencode-go/kimi-k3.1-pro",
+    "opencode-go/mimo-v2.6-pro",
+    "opencode-go/step-5-preview",
+    "opencode-go/glm-5.2",
+    "opencode-go/kimi-k2.7-code",
+    "opencode-go/glm-5.3",
+    "openrouter/thinkingmachines/inkling:free",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/liquid/lfm-2.5-2.6b:free",
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/poolside/laguna-xs-2.1:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/thinkingmachines/inkling-small:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+   ],
+   "entries": [
+    {
+     "route_key": "opencode-go/glm-5.3-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 70.1,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 70.1,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3.1-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 72.7,
+     "allowance_usd_month": 20.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 72.7,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 79.0,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 79.0,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3.1-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 77.9,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 77.9,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.6-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 76.7,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 76.7,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/step-5-preview",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 72.8,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 72.8,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.2",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/kimi-k2.7-code",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 60.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "opencode-go/glm-5.3",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 59.9,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 59.9,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-31b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 44.4,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/data/20261025/table.csv",
+       "release": "2026-10-25",
+       "category": "Research",
+       "score": 44.4,
+       "nq": 22,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/cohere/north-mini-code:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/dots-studio/dots-3-note-preview:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-26b-a4b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/liquid/lfm-2.5-2.6b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-lightning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "LiveBench 2026-10-25 has two builds (full precision and nvfp4) and the free endpoint does not say which one it serves"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-s-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-xs-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/recursive/flint-v1.0:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling-small:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    },
+    {
+     "route_key": "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench 2.0 release 2026-10-25"
+    }
+   ]
+  },
+  "writer": {
+   "category": "Instruction Following",
+   "release": "2026-06-25",
+   "livebench_version": "v1",
+   "nq": null,
+   "nq_used_for_band": 50,
+   "noise_band": 13.86,
+   "preferred_routes": [
+    "opencode-go/glm-5.2",
+    "opencode-go/kimi-k3",
+    "opencode-go/glm-5.3",
+    "opencode-go/kimi-k2.7-code",
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/minimax-m3.1-flash",
+    "opencode-go/kimi-k3.1-pro",
+    "opencode-go/mimo-v2.6-pro",
+    "opencode-go/step-5-preview",
+    "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "openrouter/cohere/north-mini-code:free",
+    "openrouter/dots-studio/dots-3-note-preview:free",
+    "openrouter/google/gemma-4-26b-a4b-it:free",
+    "openrouter/google/gemma-4-31b-it:free",
+    "openrouter/liquid/lfm-2.5-2.6b:free",
+    "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "openrouter/nvidia/nemotron-3.5-lightning:free",
+    "openrouter/nvidia/nemotron-3.5-super-vl:free",
+    "openrouter/poolside/laguna-s-2.1:free",
+    "openrouter/poolside/laguna-xs-2.1:free",
+    "openrouter/recursive/flint-v1.0:free",
+    "openrouter/thinkingmachines/inkling-small:free",
+    "openrouter/thinkingmachines/inkling:free",
+    "openrouter/xingchen-agi/xing4.0-29b-a4b:free"
+   ],
+   "entries": [
+    {
+     "route_key": "opencode-go/glm-5.2",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 62.29,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 62.29,
+       "nq": null,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k3",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 71.36,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 71.36,
+       "nq": null,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.3",
+     "tier": "OPENCODE_GO",
+     "bucket": 1,
+     "score": 69.3,
+     "allowance_usd_month": 15.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 69.3,
+       "nq": null,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/kimi-k2.7-code",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 56.29,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 56.29,
+       "nq": null,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/glm-5.3-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": 2,
+     "score": 52.82,
+     "allowance_usd_month": 60.0,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 52.82,
+       "nq": null,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "opencode-go/minimax-m3.1-flash",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 20.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "opencode-go/kimi-k3.1-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "opencode-go/mimo-v2.6-pro",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "opencode-go/step-5-preview",
+     "tier": "OPENCODE_GO",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": 15.0,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": 1,
+     "score": 73.45,
+     "allowance_usd_month": null,
+     "source_refs": [
+      {
+       "url": "https://livebench.ai/v1/table_2026_06_25.csv",
+       "release": "2026-06-25",
+       "category": "Instruction Following",
+       "score": 73.45,
+       "nq": null,
+       "date": "2026-10-28"
+      }
+     ]
+    },
+    {
+     "route_key": "openrouter/cohere/north-mini-code:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/dots-studio/dots-3-note-preview:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-26b-a4b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/google/gemma-4-31b-it:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/liquid/lfm-2.5-2.6b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-lightning:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/nvidia/nemotron-3.5-super-vl:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "LiveBench 2026-10-25 has two builds (full precision and nvfp4) and the free endpoint does not say which one it serves"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-s-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/poolside/laguna-xs-2.1:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/recursive/flint-v1.0:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling-small:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/thinkingmachines/inkling:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    },
+    {
+     "route_key": "openrouter/xingchen-agi/xing4.0-29b-a4b:free",
+     "tier": "OPENROUTER_FREE",
+     "bucket": null,
+     "score": null,
+     "allowance_usd_month": null,
+     "source_refs": [],
+     "note": "no score in LiveBench v1 release 2026-06-25"
+    }
+   ]
+  }
+ }
+}
