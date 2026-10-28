@@ -228,6 +228,34 @@ def test_owner_command_dry_run_on_the_seeded_platform_project(db, secrets_memory
     assert "Owner approval: chat 2026-10-28, owner rule R43" in r.output
 
 
+def test_lowering_reports_what_stays_above_the_new_class(db):
+    """Review H1 (d): memory, attachments and evidence keep their class after a lowering; the command counts those
+    above the new class and says they never reach a task or route below it. Near miss: PUBLIC items are not counted."""
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.models.portfolio import Attachment
+    from aeos.models.research import MemoryRecord
+
+    create_admin(db)
+    p = make_project(db, key="held-above")
+    for klass in ("INTERNAL", "PUBLIC"):
+        db.add(MemoryRecord(project_id=p.id, domain=p.domain, content=f"note {klass}", classification=klass,
+                            status="ACCEPTED"))
+        db.add(Attachment(project_id=p.id, domain=p.domain, filename=f"{klass}.md", stored_name=f"{klass}.md",
+                          size_bytes=1, sha256=f"sha256:{klass.lower()}", classification=klass))
+        db.add(EvidenceArtifact(project_id=p.id, domain=p.domain, kind="LOG", origin="verifier",
+                                collector_identity="test", content_hash=f"sha256:{klass.lower()}",
+                                classification=klass))
+    db.commit()
+    r = _reclassify("held-above", "PUBLIC")
+    assert r.exit_code == 0, r.output
+    assert ("Classified above PUBLIC and kept so: 1 memory record(s), 1 attachment(s), 1 evidence item(s); they are "
+            "never put into the context of a task below their class") in r.output
+    [d] = _decisions(db)
+    assert d.details["held_above_new_class"] == {"memory": 1, "attachments": 1, "evidence": 1}
+    [a] = _audits(db, "SUCCESS")
+    assert a.details["held_above_new_class"] == {"memory": 1, "attachments": 1, "evidence": 1}
+
+
 def test_reason_is_required_and_lowercase_class_is_accepted(db):
     create_admin(db)
     p = make_project(db, key="short-reason")
@@ -269,24 +297,68 @@ def test_raise_after_lowering_ends_the_lowering_decision(db):
     assert _project(db, p.id).data_classification == "INTERNAL"
 
 
-def test_revoking_the_lowering_decision_restores_the_class(db):
-    """`aeos policy revoke`: consumers fail closed at once. Here the consumer is the project's class."""
+def test_revoking_the_newest_of_two_lowerings_restores_the_class_before_the_chain(db):
+    """`aeos policy revoke`: consumers fail closed at once. Two lowerings CONFIDENTIAL -> INTERNAL -> PUBLIC: the second
+    supersedes the first and carries restore_to; revoking it restores CONFIDENTIAL, never the lowered INTERNAL that no
+    ACTIVE decision backs any more (review L1)."""
     from aeos.policy.decisions import revoke_decision
 
     admin = create_admin(db)
     p = make_project(db, key="revoke-me", classification="CONFIDENTIAL")
     assert _reclassify("revoke-me", "INTERNAL").exit_code == 0
-    assert _reclassify("revoke-me", "PUBLIC").exit_code == 0
+    r = _reclassify("revoke-me", "PUBLIC")
+    assert r.exit_code == 0 and "which restores CONFIDENTIAL" in r.output
     first, second = _decisions(db)
     # near miss: the newer lowering superseded the first one without restoring anything
     assert first.status == "SUPERSEDED" and second.status == "ACTIVE"
+    assert first.details["restore_to"] == "CONFIDENTIAL" and second.details["restore_to"] == "CONFIDENTIAL"
     assert _project(db, p.id).data_classification == "PUBLIC"
     revoke_decision(db, second.id, actor_user_id=admin.id, reason="owner withdrew the approval")
     db.commit()
-    assert _project(db, p.id).data_classification == "INTERNAL"  # the class the revoked decision lowered from
+    assert _project(db, p.id).data_classification == "CONFIDENTIAL"
     restored = [a for a in _audits(db, "SUCCESS") if a.details.get("trigger") == "decision_inactive"]
     assert len(restored) == 1 and restored[0].details["decision_id"] == second.id
-    assert _events(db)[-1].payload["to"] == "INTERNAL"
+    assert _events(db)[-1].payload["to"] == "CONFIDENTIAL"
+
+
+def test_revoking_a_single_lowering_restores_its_own_from(db):
+    """Near miss of the chain case: one lowering restores the class it lowered from."""
+    from aeos.policy.decisions import revoke_decision
+
+    admin = create_admin(db)
+    p = make_project(db, key="revoke-one")
+    assert _reclassify("revoke-one", "PUBLIC").exit_code == 0
+    [d] = _decisions(db)
+    assert d.details["restore_to"] == "INTERNAL"
+    revoke_decision(db, d.id, actor_user_id=admin.id, reason="owner withdrew the approval")
+    db.commit()
+    assert _project(db, p.id).data_classification == "INTERNAL"
+
+
+def test_an_unknown_stored_label_is_read_as_restricted_and_restored_as_restricted(db):
+    """Review L2: a stored label such as 'Secret' is RESTRICTED for routing; lowering from it records RESTRICTED (the
+    raw label in from_label) and a revocation restores RESTRICTED, never the unknown label or nothing."""
+    from aeos.policy.decisions import revoke_decision
+
+    admin = create_admin(db)
+    p = make_project(db, key="odd-label", classification="Secret")
+    r = _reclassify("odd-label", "PUBLIC")
+    assert r.exit_code == 0, r.output
+    assert "The stored class 'Secret' is not a known class; it was read as RESTRICTED" in r.output
+    assert "RESTRICTED -> PUBLIC (lowered)" in r.output
+    [d] = _decisions(db)
+    assert d.details["from_classification"] == "RESTRICTED" and d.details["from_label"] == "Secret"
+    assert d.details["restore_to"] == "RESTRICTED"
+    [a] = _audits(db, "SUCCESS")
+    assert a.details["from"] == "RESTRICTED" and a.details["from_label"] == "Secret"
+    revoke_decision(db, d.id, actor_user_id=admin.id, reason="owner withdrew the approval")
+    db.commit()
+    assert _project(db, p.id).data_classification == "RESTRICTED"
+    # near miss: setting RESTRICTED on an unknown label normalises it (a raise), never "already RESTRICTED"
+    q = make_project(db, key="odd-label-2", classification="Top secret")
+    r2 = _reclassify("odd-label-2", "RESTRICTED")
+    assert r2.exit_code == 0 and "(raised; audit record, no decision needed)" in r2.output
+    assert _project(db, q.id).data_classification == "RESTRICTED"
 
 
 # ---------------------------------------------------------------- in-flight work keeps its class

@@ -39,6 +39,15 @@ def on_classification_decision_inactive(session: Session, decision: Any) -> dict
     return impl(session, decision)
 
 
+def classification_at(session: Session, project: Project) -> Any:
+    """Additive (ADR-0133): ``class_at(when)``, the project's data class in effect when a record was created (from
+    the audit trail of reclassifications), so project records keep the class they had after a lowering; ``when``
+    None (origin unknown) -> the highest class the project ever had. An unknown stored label reads as RESTRICTED."""
+    from aeos.portfolio.reclassify import class_resolver as impl
+
+    return impl(session, project)
+
+
 def inventory_for_project(session: Session, project_id: str, *, commit: str | None = None) -> dict:
     """Read-only inventory of the project's registered primary repository (ADR-0022 §6) for
     ``PlanningContext.repo_inventory``. Raises ``NotFound``/``Blocked`` (no repository/checkout) and

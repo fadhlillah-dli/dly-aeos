@@ -5,7 +5,8 @@
 * ``record_lowering``: one POLICY decision on ``project_classification/<project id>`` bound to the old and new class
   (``target_version`` = new class, ``target_hash`` over project/from/to), operation ``lower_data_classification``.
   The registry re-checks the actor (active SUPER_ADMIN, scope), audits it and emits ``decision.recorded``. A newer
-  lowering supersedes the project's previous ACTIVE lowering decision.
+  lowering supersedes the project's previous ACTIVE lowering decision and carries ``restore_to``, the class before the
+  first lowering of the chain, so revoking the newest decision restores that class (never a lowered one).
 * ``end_lowerings``: a raise ends (INVALIDATED, with actor and reason) the project's ACTIVE lowering decisions, which
   no longer describe the class. Call it after the class changed: the registry's lifecycle hook restores a class
   only while the decision still backs it.
@@ -40,6 +41,9 @@ def record_lowering(session: Session, *, project_id: str, project_key: str, doma
                     details: dict[str, Any] | None = None) -> tuple[Decision, list[str]]:
     """Record the lowering decision; return it and the ids of the earlier lowering decisions it superseded."""
     previous = active_lowerings(session, project_id)
+    # the chain's origin: an earlier ACTIVE lowering's own restore_to (or its from), else this lowering's from
+    first: dict[str, Any] = (previous[0].details or {}) if previous else {}
+    restore_to = str(first.get("restore_to") or first.get("from_classification") or from_class)
     decision = registry.record_decision(
         session, kind="POLICY", actor_user_id=actor_user_id, target_type=TARGET, target_id=project_id,
         target_version=to_class, target_hash=content_hash({"project_id": project_id, "from": from_class,
@@ -49,7 +53,7 @@ def record_lowering(session: Session, *, project_id: str, project_key: str, doma
                     "operation": "lower_data_classification", "recorded_via": "aeos project reclassify"},
         project_id=project_id, domain=domain, rationale=reason,
         details={**(details or {}), "from_classification": from_class, "to_classification": to_class,
-                 "direction": "LOWER",
+                 "restore_to": restore_to, "direction": "LOWER",
                  "system_change": {"class": "NOT_A_SYSTEM_CHANGE", "evaluation": "NOT_APPLICABLE",
                                    "note": "a project's data classification, not a policy/model/tool/prompt "
                                            "target"}},

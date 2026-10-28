@@ -271,7 +271,9 @@ def make_route(db: Session, *, key: str = "worker.test-free", provider: str = "o
     r = ModelRoute(route_key=key, pool="WORKER", provider=provider, model_id=model_id, status=status,
                    eligible_domains=domains if domains is not None else ["PERSONAL"], is_free=is_free,
                    endpoint=endpoint, mode_params=mode_params or {}, pricing=pricing or {},
-                   allowed_data_classes=data_classes or [])
+                   # a route that may carry the default task class (ADR-0133: the executor and the broker refuse a
+                   # task or context pack whose class the route does not allow); a test states [] explicitly if needed
+                   allowed_data_classes=data_classes if data_classes is not None else ["PUBLIC", "INTERNAL"])
     db.add(r)
     db.flush()
     if status in ("APPROVED", "TRIAL"):

@@ -30,6 +30,8 @@ durable), after the unit of work was rolled back.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from datetime import datetime
 from typing import Any, NoReturn
 
 from sqlalchemy import select
@@ -39,6 +41,7 @@ from aeos.audit import service as audit
 from aeos.core.enums import TERMINAL_EXECUTION_STATES, Domain, Role
 from aeos.core.errors import AeosError, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.redaction import redact_text
+from aeos.core.timeutil import ensure_aware
 from aeos.events import service as events
 from aeos.models.decisions import Decision
 from aeos.models.identity import User
@@ -57,6 +60,7 @@ ACTOR_CHECK = ("named active SUPER_ADMIN, no password prompt (CLI): allowed only
                "and the maintainer runs it as the owner's actor (owner rule R43); approval_ref names that approval")
 LOWER, RAISE, UNCHANGED = "LOWER", "RAISE", "UNCHANGED"
 CLASSES = tuple(c.value for c in cls.ORDER)
+STRICTEST = CLASSES[-1]
 IN_FLIGHT_RULE = ("existing TaskSpecs keep the class they were compiled with (no silent downgrade of in-flight work); "
                   "routing applies the higher of a task's class and its project's current class, so a raise applies "
                   "to open tasks at once; plans and task DAGs compiled after this change use the new class as their "
@@ -94,6 +98,58 @@ def _target_class(value: Any) -> str:
         raise ValidationFailed("the new classification must be text: " + ", ".join(CLASSES),
                                code="INVALID_CLASSIFICATION", details={"allowed": list(CLASSES)})
     return cls.normalize(value)  # INVALID_CLASSIFICATION for an unknown label
+
+
+def normalized(label: Any) -> str:
+    """A stored class label as routing reads it: a known class, or RESTRICTED for anything else (ADR-0133)."""
+    text = str(label or "").strip().upper()
+    return text if text in CLASSES else STRICTEST
+
+
+def class_changes(session: Session, project_id: str) -> list[tuple[datetime | None, str, str]]:
+    """(when, from, to) of every recorded change of the project's class, oldest first, from the append-only audit
+    trail (``portfolio.project.reclassify`` SUCCESS records: the command and a restoring revocation)."""
+    from aeos.models.audit import AuditEvent
+
+    rows = session.scalars(select(AuditEvent).where(
+        AuditEvent.action == ACTION, AuditEvent.result == "SUCCESS", AuditEvent.project_id == project_id)
+        .order_by(AuditEvent.seq))
+    return [(ensure_aware(r.at), normalized((r.details or {}).get("from")), normalized((r.details or {}).get("to")))
+            for r in rows]
+
+
+def class_resolver(session: Session, project: Project) -> Callable[[Any], str]:
+    """``class_at(when)``: the project's class in effect at *when* (the ``from`` of the first change after it, or the
+    current class), so a record created while the project was INTERNAL stays INTERNAL after a lowering. ``when`` None
+    (origin time unknown) -> the highest class the project ever had (ADR-0133, fail closed)."""
+    current = normalized(project.data_classification)
+    changes = class_changes(session, project.id)
+    highest = max([current, *[c for _at, frm, to in changes for c in (frm, to)]], key=cls.rank)
+
+    def class_at(when: Any) -> str:
+        at = ensure_aware(when) if isinstance(when, datetime) else None
+        if at is None:
+            return highest
+        for changed_at, frm, _to in changes:
+            if changed_at is None or changed_at > at:
+                return frm
+        return current
+
+    return class_at
+
+
+def held_above(session: Session, project_id: str, klass: str) -> dict[str, int]:
+    """Memory records, attachments and evidence of the project whose own class is above *klass*: after a lowering they
+    keep their class, so they never reach a task or route of a lower class (ADR-0133)."""
+    from aeos.models.evidence import EvidenceArtifact
+    from aeos.models.portfolio import Attachment
+    from aeos.models.research import MemoryRecord
+
+    out: dict[str, int] = {}
+    for name, model in (("memory", MemoryRecord), ("attachments", Attachment), ("evidence", EvidenceArtifact)):
+        labels = session.scalars(select(model.classification).where(model.project_id == project_id))
+        out[name] = sum(1 for label in labels if cls.rank(normalized(label)) > cls.rank(klass))
+    return out
 
 
 def in_flight(session: Session, project_id: str) -> dict[str, Any]:
@@ -155,7 +211,9 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
     if project.domain != chosen.value:
         raise NotFound(f"project not found in {chosen.value}")  # another domain's project is never revealed
     new = _target_class(to)
-    old = str(project.data_classification or "").strip().upper()
+    raw_old = str(project.data_classification or "").strip()
+    old = normalized(raw_old)  # an unknown stored label is RESTRICTED, as routing reads it (fail closed)
+    from_label = None if raw_old.upper() == old else raw_old[:64]
     text = clean_text(reason, field="reason", max_len=MAX_DESCRIPTION, required=True)
     if len(text) < MIN_REASON:
         raise ValidationFailed(f"the reason needs at least {MIN_REASON} characters (name the owner's approval)",
@@ -163,14 +221,15 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
     reason_v = redact_text(text)
     approval = redact_text(clean_text(approval_ref, field="approval_ref", max_len=MAX_APPROVAL_REF)) or None
     base = {"project_id": project.id, "project_key": project.project_key, "domain": project.domain, "from": old,
-            "to": new, "reason": reason_v, "approval_ref": approval, "event": EVENT, "in_flight_rule": IN_FLIGHT_RULE}
+            "from_label": from_label, "to": new, "reason": reason_v, "approval_ref": approval, "event": EVENT,
+            "in_flight_rule": IN_FLIGHT_RULE}
     actor = session.get(User, actor_user_id) if actor_user_id else None
-    if new == old:
+    if new == old and from_label is None:
         if actor is None or not actor.is_active:
             raise PolicyDenied("the actor is not an active user", code="RECLASSIFY_ACTOR_UNKNOWN")
         return {**base, "direction": UNCHANGED, "actor": actor.username, "decision_id": None, "ended_decisions": [],
                 "audit_id": None, "in_flight": in_flight(session, project.id)}
-    # an unknown stored label ranks as the strictest class, so any change from it is a lowering (fail closed)
+    # from an unknown stored label (read as RESTRICTED) any other class is a lowering; RESTRICTED itself normalises it
     direction = LOWER if cls.rank(new) < cls.rank(old) else RAISE
     if direction == LOWER and project.domain == Domain.OFFICE.value:
         _deny(session, actor_id=actor_user_id, project=project, code="OFFICE_LOWERING_DENIED", reason=OFFICE_REFUSAL,
@@ -179,7 +238,9 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
     if direction == LOWER:
         require_writable(project)  # an ARCHIVED/RETIRED project is read-only; raising stays possible
     flight = in_flight(session, project.id)
+    above = held_above(session, project.id, new) if direction == LOWER else {}
     decision_id: str | None = None
+    restore_to: str | None = None
     ended: list[str] = []
     if direction == LOWER:
         decision, ended = policy.record_classification_lowering(
@@ -189,9 +250,10 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
                      "actor_username": user.username,
                      # stated, never implied: the CLI names the actor and asks no password; the owner's approval
                      # (chat, owner rule R43) is what allows it, and approval_ref says where it was given
-                     "actor_check": ACTOR_CHECK, "approval_ref": approval,
-                     "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
+                     "actor_check": ACTOR_CHECK, "approval_ref": approval, "from_label": from_label,
+                     "held_above_new_class": above, "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
         decision_id = decision.id
+        restore_to = str((decision.details or {}).get("restore_to") or old)
     project.data_classification = new
     session.flush()
     if direction == RAISE:
@@ -204,27 +266,32 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
         project_id=project.id, domain=project.domain, reason=reason_v,
         details={"from": old, "to": new, "direction": direction, "actor_username": user.username,
                  "approval_ref": approval, "actor_check": ACTOR_CHECK, "decision_id": decision_id,
-                 "ended_decisions": ended, "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
+                 "ended_decisions": ended, "from_label": from_label, "held_above_new_class": above,
+                 "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
     events.emit(session, source="portfolio", kind=EVENT, entity_type="project", entity_id=project.id,
                 project_id=project.id, domain=project.domain,
                 payload={"project_key": project.project_key, "from": old, "to": new, "direction": direction,
                          "actor": user.username, "reason": reason_v, "approval_ref": approval,
                          "decision_id": decision_id, "ended_decisions": ended})
     return {**base, "direction": direction, "actor": user.username, "decision_id": decision_id,
-            "ended_decisions": ended, "audit_id": rec.event_id, "in_flight": flight}
+            "restore_to": restore_to, "ended_decisions": ended, "audit_id": rec.event_id, "in_flight": flight,
+            "held_above_new_class": above}
 
 
 def on_decision_inactive(session: Session, decision: Decision) -> dict[str, Any] | None:
     """A lowering decision that was revoked or expired while it still backs the project's class restores the class
-    it lowered from (fail closed). SUPERSEDED (a newer lowering backs the class) and decisions a raise already ended
-    (the class moved on) change nothing."""
+    before its chain of lowerings (``restore_to``: a lowering that superseded an earlier one carries the class before
+    the first; older decisions without it restore their ``from``) - fail closed. SUPERSEDED (a newer lowering backs the
+    class) and decisions a raise already ended (the class moved on) change nothing."""
     if decision.kind != "POLICY" or decision.target_type != TARGET or decision.status not in ("INVALIDATED", "EXPIRED"):
         return None
     details = decision.details or {}
-    lowered_from, lowered_to = details.get("from_classification"), details.get("to_classification")
+    lowered_from = details.get("restore_to") or details.get("from_classification")
+    lowered_to = details.get("to_classification")
     project = session.get(Project, decision.target_id)
-    if project is None or lowered_from not in CLASSES or lowered_to not in CLASSES:
+    if project is None or lowered_to not in CLASSES:
         return None
+    lowered_from = normalized(lowered_from)  # an unknown or missing origin label restores the strictest class
     if project.data_classification != lowered_to or cls.rank(lowered_from) <= cls.rank(lowered_to):
         return None
     project.data_classification = lowered_from
@@ -254,6 +321,9 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
     if result["direction"] == UNCHANGED:
         return [f"Project {key} ({dom}) is already {new}; nothing was recorded."]
     lines: list[str] = []
+    if result.get("from_label"):
+        lines.append(f"The stored class {result['from_label']!r} is not a known class; it was read as {old} "
+                     "(the strictest), as routing reads it.")
     if result["direction"] == LOWER:
         lines.append(f"Project {key} ({dom}): {old} -> {new} (lowered).")
         lines.append(f"Recorded POLICY decision {result['decision_id']} on {TARGET}:{result['project_id']}; "
@@ -272,8 +342,14 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
     lines.append(f"Only plans and task DAGs compiled after this change use {new} as their floor: a task with no "
                  f"stated class gets {new}, a stated class can only raise it.")
     if result["direction"] == LOWER:
-        lines.append(f"Undo: run this command again with --to {old}, or revoke the decision "
-                     f"(aeos policy revoke {result['decision_id']}), which restores {old}.")
+        above = result.get("held_above_new_class") or {}
+        lines.append(f"Classified above {new} and kept so: {above.get('memory', 0)} memory record(s), "
+                     f"{above.get('attachments', 0)} attachment(s), {above.get('evidence', 0)} evidence item(s); "
+                     f"they are never put into the context of a task below their class or sent to a route that does "
+                     f"not allow their class. Project records created before this change keep the class they had.")
+        restore = result.get("restore_to") or old
+        lines.append(f"Undo: run this command again with --to {restore}, or revoke the decision "
+                     f"(aeos policy revoke {result['decision_id']}), which restores {restore}.")
     else:
         below = {k: v for k, v in (flight.get("open_by_class") or {}).items() if cls.rank(k) < cls.rank(new)}
         if below:

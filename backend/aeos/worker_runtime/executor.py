@@ -225,12 +225,21 @@ def _close_db_window(prep: Prepared) -> dict[str, Any]:
 def resolve_artifacts(session: Any, task: TaskSpec) -> list[Any]:
     """§21 input artifacts bound by hash: an ``attachment:<id>`` reference is loaded from the planning context
     (scanned, redacted text) only when the attachment hash still matches the TaskSpec; otherwise the worker is told
-    it was not delivered. Plan sections carry their content in the immutable TaskSpec."""
+    it was not delivered. Plan sections carry their content in the immutable TaskSpec. ADR-0133: an attachment keeps
+    its own class (``classification`` on the artifact: the attachment's label, else the planning context's, else -
+    origin unknown - the highest class its project ever had); one above the task's effective class is never delivered
+    (its content is withheld, the artifact says why), whether it travels in the context pack or in the prompt."""
     from aeos.models.planning import Plan, PlanningContext, PlanVersion
+    from aeos.models.portfolio import Attachment, Project
+    from aeos.portfolio import facade as portfolio
+    from aeos.routing import facade as routing
 
     arts = list(task.input_artifacts or [])
     if not any(isinstance(a, dict) and a.get("kind") == "attachment" for a in arts):
         return arts
+    ceiling = routing.effective_task_class(session, task)
+    project = session.get(Project, task.project_id)
+    unknown_origin = portfolio.classification_at(session, project)(None) if project is not None else _CLASS_ORDER[-1]
     version = session.get(PlanVersion, task.plan_version_id)
     plan = session.get(Plan, version.plan_id) if version is not None else None
     ctx = session.get(PlanningContext, plan.context_id) if plan is not None and plan.context_id else None
@@ -238,14 +247,48 @@ def resolve_artifacts(session: Any, task: TaskSpec) -> list[Any]:
     out: list[Any] = []
     for a in arts:
         if isinstance(a, dict) and a.get("kind") == "attachment":
-            src = inputs.get(str(a.get("ref") or "").split(":", 1)[-1])
-            if src is not None and src.get("sha256") == a.get("sha256") and src.get("status") == "READ":
-                out.append({**a, "content": src.get("text") or ""})
+            att_id = str(a.get("ref") or "").split(":", 1)[-1]
+            src = inputs.get(att_id)
+            row = session.get(Attachment, att_id) if att_id else None
+            klass = _known_class((row.classification if row is not None else None)
+                                 or (src.get("classification") if src is not None else None) or unknown_origin)
+            if _class_rank(klass) > _class_rank(ceiling):
+                out.append({**a, "classification": klass, "withheld": "classification",
+                            "content": f"<<artifact withheld: classification {klass} above this task's class "
+                                       f"{ceiling}>>"})
+            elif src is not None and src.get("sha256") == a.get("sha256") and src.get("status") == "READ":
+                out.append({**a, "classification": klass, "content": src.get("text") or ""})
             else:
-                out.append({**a, "content": "<<artifact not delivered: missing or hash mismatch>>"})
+                out.append({**a, "classification": klass,
+                            "content": "<<artifact not delivered: missing or hash mismatch>>"})
         else:
             out.append(a)
     return out
+
+
+_CLASS_ORDER = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED")
+
+
+def _known_class(label: Any) -> str:
+    """A class label as routing reads it: unknown or missing -> RESTRICTED (fail closed)."""
+    text = str(label or "").strip().upper()
+    return text if text in _CLASS_ORDER else _CLASS_ORDER[-1]
+
+
+def _class_rank(label: Any) -> int:
+    return _CLASS_ORDER.index(_known_class(label))
+
+
+def context_class_problem(pack: dict[str, Any] | None, route: Any) -> str | None:
+    """Why the run must not start with this context pack on *route* (ADR-0133), or None: the pack's class (the highest
+    class of what it carries) must be data the route may carry - its allowed classes and its data terms."""
+    if pack is None or route is None:
+        return None
+    klass = _known_class(pack.get("classification"))
+    from aeos.routing import facade as routing
+
+    problem = routing.route_class_problem(route, klass)
+    return f"context pack {pack.get('id')} is {klass}: {problem}" if problem else None
 
 
 def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, ...], branch: str,
@@ -333,6 +376,9 @@ def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, .
             parts += [f"<<<BEGIN CONTEXT {label}>>>", redact_text(text), "<<<END CONTEXT>>>"]
         for ref in context_pack.get("omitted_artifacts") or []:
             parts.append(f"<<<CONTEXT omitted by the pack token budget: {redact_text(str(ref))[:120]}>>>")
+        for ref in context_pack.get("withheld_artifacts") or []:
+            parts.append(f"<<<CONTEXT withheld (data classification above this task's class): "
+                         f"{redact_text(str(ref))[:120]}>>>")
     return "\n".join(parts) + "\n"
 
 
@@ -394,6 +440,7 @@ def bind_prompt_revision(route: Any) -> bool:
 
 
 TASK_ARTIFACT_REF = "task-artifact:"
+CONTEXT_CLASS_NOT_ALLOWED = "CONTEXT_CLASS_NOT_ALLOWED"
 
 
 def _newest_task_pack(s: Any, task: TaskSpec) -> Any:
@@ -404,9 +451,10 @@ def _newest_task_pack(s: Any, task: TaskSpec) -> Any:
                     .order_by(ContextPack.created_at.desc()).limit(1))
 
 
-def _pack_reusable(s: Any, pack: Any, base_commit: str) -> bool:
+def _pack_reusable(s: Any, pack: Any, base_commit: str, task: TaskSpec | None = None) -> bool:
     """Read-only pre-check: a not-stale, unexpired task pack for exactly this base (or without a base) is kept, so
-    an owner-curated pack is never superseded by the runtime; the full freshness check happens at use."""
+    an owner-curated pack is never superseded by the runtime; the full freshness check happens at use. A pack whose
+    class is above the task's effective class (built before a lowering) is rebuilt (ADR-0133)."""
     from aeos.core.timeutil import ensure_aware
     from aeos.models.knowledge_ext import ContextPackMeta
 
@@ -416,6 +464,11 @@ def _pack_reusable(s: Any, pack: Any, base_commit: str) -> bool:
     expires = ensure_aware(meta.expires_at) if meta is not None and meta.expires_at is not None else None
     if expires is not None and expires <= utcnow():  # type: ignore[operator]
         return False
+    if task is not None:
+        from aeos.routing import facade as routing
+
+        if _class_rank(pack.classification) > _class_rank(routing.effective_task_class(s, task)):
+            return False
     return not pack.base_commit or pack.base_commit == base_commit
 
 
@@ -423,7 +476,7 @@ def _ensure_task_pack(s: Any, task: TaskSpec, base_commit: str, artifacts: list[
     """§24 "context yang benar-benar diterima model adalah ContextPack minimum ber-budget" (W6-071): with no CURRENT
     task-scoped pack for this base commit, build one through the knowledge facade - in its own committed
     transaction (a denial there audits and rolls back only that unit of work, never this run's preparation)."""
-    if _pack_reusable(s, _newest_task_pack(s, task), base_commit):
+    if _pack_reusable(s, _newest_task_pack(s, task), base_commit, task):
         return {"built": False, "reason": "a CURRENT task-scoped context pack for this base commit exists (kept)"}
     delivered = [a for a in artifacts if isinstance(a, dict)] + [{"name": f"artifact-{i}", "content": a}
                                                                   for i, a in enumerate(artifacts) if not isinstance(a, dict)]
@@ -472,11 +525,14 @@ def _context_pack(s: Any, task: TaskSpec, base_commit: str, *,
         return None, {**info, "used": False, "reason": "context pack was built for another base commit"}
     items = list(used.get("items") or [])
     meta = s.get(ContextPackMeta, pack.id)
-    omitted = [o for o in (meta.omitted if meta is not None else []) or []
-               if str(o.get("ref") or "").startswith(TASK_ARTIFACT_REF)]
-    in_pack = bool(omitted) or any(str(i.get("ref") or "").startswith(TASK_ARTIFACT_REF) for i in items)
+    left_out = [o for o in (meta.omitted if meta is not None else []) or []
+                if str(o.get("ref") or "").startswith(TASK_ARTIFACT_REF)]
+    withheld = [o for o in left_out if str(o.get("reason") or "").startswith("classification")]
+    omitted = [o for o in left_out if o not in withheld]
+    in_pack = bool(left_out) or any(str(i.get("ref") or "").startswith(TASK_ARTIFACT_REF) for i in items)
     return ({"id": pack.id, "hash": pack.pack_hash, "items": items, "artifacts_in_pack": in_pack,
-             "omitted_artifacts": [str(o.get("ref")) for o in omitted]},
+             "classification": pack.classification, "omitted_artifacts": [str(o.get("ref")) for o in omitted],
+             "withheld_artifacts": [str(o.get("ref")) for o in withheld]},
             {**info, "used": True, "items": len(items), "token_budget": used.get("token_budget"),
              "artifacts_in_pack": in_pack, "artifacts_omitted": len(omitted)})
 
@@ -554,6 +610,10 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
         te.base_commit = ws.base_commit
     sandbox = processes.SandboxDirs.create(ws.root / "sandbox")
     pack, pack_info = _context_pack(s, task, ws.base_commit, build=pack_build)
+    class_problem = context_class_problem(pack, route)
+    if class_problem:  # ADR-0133: never start a run whose context the route may not carry (nothing was sent)
+        workspace.cleanup_workspace(ws, keep_sandbox=False)
+        raise StartError(CONTEXT_CLASS_NOT_ALLOWED, class_problem)
     caps = dict(run.caps or {})
     per_req = int((task.limits or {}).get("max_output_tokens", 8192))
     try:

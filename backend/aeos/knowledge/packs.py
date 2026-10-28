@@ -14,6 +14,13 @@ A pack is the minimum, provenance-carrying context for one task/role:
 * research and attachments are labelled DATA / UNTRUSTED_DATA; memory is MEMORY_DATA (never policy);
 * every item has kind/ref/provenance/classification/hash and a token estimate (chars/4) checked
   against the budget; forbidden scope (defaults + request + TaskSpec) is always respected;
+* classification (ADR-0133): an item keeps the class it had when it was created - its own label (memory, attachment,
+  evidence, policy, research, the TaskSpec), else the project's class at the record's creation time
+  (``portfolio.facade.classification_at``; the highest class the project ever had when the time is unknown), never
+  below the project's current class; repository content at the pack's commit takes the project's current class. A
+  task-bound pack has a ceiling, the task's effective class (``routing.facade.effective_task_class``): an item above it
+  is left out and listed in ``omitted`` with a classification reason, and the local MCI source never enters a pack for
+  a PUBLIC task;
 * the pack is hashed; it becomes STALE when the repository head moves off its base commit, the
   policy file set changes, its TTL expires, or a newer pack for the same scope supersedes it.
 """
@@ -33,7 +40,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from aeos.audit import service as audit
-from aeos.core.enums import Domain
+from aeos.core.enums import DataClassification, Domain
 from aeos.core.errors import AeosError, NotFound, ValidationFailed
 from aeos.core.hashing import content_hash, file_sha256, sha256_bytes, sha256_text
 from aeos.core.paths import UnsafePathError, ensure_within, repo_root
@@ -56,6 +63,7 @@ DEFAULT_TTL_HOURS, MAX_TTL_HOURS = 168, 720
 MAX_REPO_READ_BYTES = 512 * 1024
 MIN_BUDGET, MAX_BUDGET = 1024, 200_000
 ITEM_OVERHEAD_TOKENS = 16
+REPO_KINDS = frozenset({"symbol", "repo_file", "code_match"})
 INCLUDE_KINDS = ("policy", "task", "symbol", "repo_file", "code_match", "project_doc", "metadata", "runtime", "memory",
                  "attachment", "research")
 MANDATORY = frozenset({"policy", "task"})
@@ -131,21 +139,42 @@ def _allowed(path: str, allowed: list[str]) -> bool:
 
 
 class _Collector:
-    def __init__(self, project: Project, budget: int):
+    def __init__(self, project: Project, budget: int, *, ceiling: str | None = None,
+                 class_at: Callable[[Any], str] | None = None):
         self.project = project
         self.budget = budget
         self.used = 0
         self.items: list[dict[str, Any]] = []
         self.omitted: list[dict[str, Any]] = []
         self.refs: set[str] = set()
+        self.ceiling = ceiling  # ADR-0133: a task-bound pack never carries an item above the task's effective class
+        self.class_at = class_at
+        self.withheld = 0
+
+    def item_class(self, kind: str, classification: str | None, created_at: Any) -> str:
+        """The item's own class (ADR-0133): its label, else the project's class when the record was created (the
+        highest it ever had when that time is unknown); repository content takes the current project class. Never
+        below the project's current class."""
+        if classification is not None:
+            base = classification
+        elif kind in REPO_KINDS or self.class_at is None:
+            base = self.project.data_classification
+        else:
+            base = self.class_at(created_at)
+        return cls.highest(base, self.project.data_classification)
 
     def add(self, *, kind: str, ref: str, content: str, provenance: dict[str, Any], trust: str,
             classification: str | None = None, title: str = "", truncatable: bool = False,
-            mandatory: bool = True) -> bool:
+            mandatory: bool = True, created_at: Any = None) -> bool:
         if ref in self.refs:
             return False
+        item_cls = self.item_class(kind, classification, created_at)
+        if self.ceiling is not None and cls.rank(item_cls) > cls.rank(self.ceiling):
+            self.withheld += 1
+            self.omitted.append({"kind": kind, "ref": ref, "classification": item_cls, "mandatory": False,
+                                 "reason": f"classification {item_cls} above the task's class {self.ceiling}"})
+            return False
         redacted = redact_text(content)
-        item_cls = cls.highest(classification or self.project.data_classification, self.project.data_classification)
         tokens = _tokens(redacted)
         truncated = False
         if self.used + tokens > self.budget:
@@ -349,6 +378,10 @@ def _collect_policy(col: _Collector, warnings: list[str], deferred: list[Callabl
     source = policy.mci_source_path(repo=repo)
     if source is None or not source.is_file():
         return
+    if col.ceiling == DataClassification.PUBLIC.value:
+        # ADR-0133: the owner-local MCI source never enters a pack for a PUBLIC task, whatever its status (not read)
+        warnings.append("local MCI source not included: it never goes into a pack for a PUBLIC task")
+        return
     if mci["status"] == "VERIFIED":
         add = functools.partial(_add_mci_source, col, source, f"mci:{source.name}", mci, warnings)
         if deferred is None:
@@ -493,7 +526,7 @@ def _collect_task(col: _Collector, task: TaskSpec) -> None:
             lines.extend(f"- {v}" for v in values)
     lines.append(f"Risk class: {task.risk_class}; base commit: {task.base_commit or 'UNKNOWN'}")
     col.add(kind="task", ref=f"task:{task.task_key}", content="\n".join(lines), trust="AEOS_RECORD",
-            classification=task.data_classification, title=f"TaskSpec {task.task_key}",
+            classification=task.data_classification, title=f"TaskSpec {task.task_key}",  # own label (ADR-0133)
             provenance={"source": "aeos-db task_specs (immutable)", "task_spec_id": task.id,
                         "plan_version_id": task.plan_version_id, "spec_hash": task.spec_hash})
 
@@ -594,6 +627,7 @@ def _collect_project_docs(col: _Collector, session: Session, project: Project) -
             body = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
             if col.add(kind="project_doc", ref=f"plan_version:{pv.id}#{section}", content=f"{section}:\n{body}",
                        trust="AEOS_RECORD", truncatable=True, title=f"{plan.title} v{pv.version} · {section}",
+                       created_at=pv.created_at,
                        provenance={"source": "aeos-db plan_versions (APPROVED, immutable)", "plan_id": plan.id,
                                    "plan_version_id": pv.id, "version": pv.version, "manifest_hash": pv.manifest_hash,
                                    "status": "APPROVED", "section": section}):
@@ -612,7 +646,7 @@ def _collect_project_docs(col: _Collector, session: Session, project: Project) -
         if rev is None or not rev.body_markdown:
             continue
         if col.add(kind="project_doc", ref=f"document:{doc.logical_doc_id}", content=rev.body_markdown, trust="AEOS_RECORD",
-                   truncatable=True, title=doc.title,
+                   truncatable=True, title=doc.title, created_at=rev.created_at,
                    provenance={"source": "aeos-db document_revisions (RENDERED, CURRENT)", "document_id": doc.id,
                                "status": doc.status, "content_hash": rev.content_hash,
                                "plan_version_id": doc.source_plan_version_id}):
@@ -732,8 +766,11 @@ def _collect_task_artifacts(col: _Collector, task: TaskSpec, artifacts: list[dic
             import json
 
             content = json.dumps(content, ensure_ascii=False, default=str)
+        # ADR-0133: a delivered attachment keeps its own class (the executor states it; unknown -> the project's
+        # highest class); other artifacts are part of the immutable TaskSpec and carry its class
+        own = art.get("classification") if art.get("kind") == "attachment" else task.data_classification  # own label (ADR-0133)
         col.add(kind="attachment", ref=f"task-artifact:{art.get('ref') or name}", content=content,
-                trust="UNTRUSTED_DATA", classification=task.data_classification, title=name, truncatable=True,
+                trust="UNTRUSTED_DATA", classification=own, title=name, truncatable=True,
                 provenance={"source": TASK_ARTIFACT_SOURCE, "task_spec_id": task.id, "ref": art.get("ref"),
                             "sha256": art.get("sha256"), "kind": art.get("kind")})
 
@@ -816,7 +853,12 @@ def build_pack(
 
     policy_snapshot = policy_hashes() if "policy" in kinds else {}
     mci_snapshot = mci_state() if "policy" in kinds else None
-    col = _Collector(project, budget)
+    from aeos.portfolio import facade as portfolio
+    from aeos.routing import facade as routing
+
+    # ADR-0133: a task-bound pack's ceiling is the task's effective class (max of its class and the project's)
+    ceiling = routing.effective_task_class(session, task) if task is not None else None
+    col = _Collector(project, budget, ceiling=ceiling, class_at=portfolio.classification_at(session, project))
     order = [k for k in SOURCE_ORDER if k in kinds]
     # the local MCI source (policy context, not mandatory) is added right after the last mandatory kind
     last_mandatory = next((k for k in reversed(order) if k in MANDATORY), None)
@@ -855,9 +897,11 @@ def build_pack(
             deferred.clear()
     for add in deferred:
         add()
+    if col.withheld:
+        warnings.append(f"{col.withheld} item(s) above this task's class {ceiling} were left out (classification; "
+                        "listed in omitted)")
 
-    classification = cls.highest(project.data_classification, task.data_classification if task else None,
-                                 *[i["classification"] for i in col.items])
+    classification = cls.highest(project.data_classification, ceiling, *[i["classification"] for i in col.items])
     pack = ContextPack(
         project_id=project.id, domain=project.domain, task_id=task.id if task else None, role_key=role,
         base_commit=resolved_commit, items=col.items, token_budget=budget, classification=classification, stale=False,

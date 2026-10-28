@@ -195,24 +195,32 @@ def test_a_raise_also_reaches_paid_admission(db, worker_keys, monkeypatch):
 # ---------------------------------------------------------------- one helper for every routing reader (ratchet)
 
 
+OWN_LABEL = "# own label (ADR-0133)"
+
+
 def _direct_readers(files: list[Any]) -> list[str]:
+    """Lines that read ``task.data_classification`` directly. Allowed: the helper itself, and a line that labels an
+    item with the task's own compiled class (marked ``# own label (ADR-0133)``) - never a decision where data may go."""
     import re
 
     pattern = re.compile(r"\btask\.data_classification\b")
     return [f"{p}:{i}" for p in files if p.name != "task_class.py"
-            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if pattern.search(line)]
+            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+            if pattern.search(line) and OWN_LABEL not in line]
 
 
-def test_every_routing_reader_of_a_task_class_goes_through_the_one_helper():
-    """A new routing reader of ``task.data_classification`` would ignore a project raise (ADR-0133 decision 6)."""
+def test_every_reader_of_a_task_class_goes_through_the_one_helper():
+    """A new reader of ``task.data_classification`` in routing, the context packs or the worker runtime would ignore a
+    project raise or let a lowered project's data through (ADR-0133 decisions 6 and 12, review H1/M1)."""
     from aeos.core.paths import repo_root
 
     root = repo_root() / "backend" / "aeos"
-    files = [*sorted((root / "routing").glob("*.py")), root / "evaluation" / "executor.py"]
-    assert len(files) > 5
+    files = [*sorted((root / "routing").glob("*.py")), root / "evaluation" / "executor.py",
+             *sorted((root / "knowledge").glob("*.py")), *sorted((root / "worker_runtime").glob("*.py"))]
+    assert len(files) > 15
     offenders = _direct_readers(files)
-    assert offenders == [], ("read a task's class through routing.task_class.effective_task_class (ADR-0133): "
-                             f"{offenders}")
+    assert offenders == [], ("read a task's class through routing.facade.effective_task_class, or mark a line that "
+                             f"only labels an item with the task's own class '{OWN_LABEL}' (ADR-0133): {offenders}")
 
 
 def test_bite_the_ratchet_sees_a_direct_reader_and_spares_the_helper(tmp_path):
@@ -223,4 +231,6 @@ def test_bite_the_ratchet_sees_a_direct_reader_and_spares_the_helper(tmp_path):
                   encoding="utf-8")
     helper = tmp_path / "task_class.py"
     helper.write_text("own = task.data_classification\n", encoding="utf-8")
-    assert _direct_readers([bad, ok, helper]) == [f"{bad}:1"]
+    label = tmp_path / "packs.py"  # near miss: an item labelled with the task's own class, marked
+    label.write_text(f"add(classification=task.data_classification)  {OWN_LABEL}\n", encoding="utf-8")
+    assert _direct_readers([bad, ok, helper, label]) == [f"{bad}:1"]

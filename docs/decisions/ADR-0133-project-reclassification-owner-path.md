@@ -70,13 +70,16 @@
    a decision C route in the broker, the paid escalation and admission of ADR-0128 and the evaluation executor's route
    check; a test fails on any other routing reader of `task.data_classification`) is the higher of the task's compiled
    class and its project's current class. So a raise stops a less restrictive route from taking the project's open
-   tasks at once, also at the next model call of a running decision C run. A lowering never relaxes a compiled task.
+   tasks at once. A lowering never relaxes a compiled task. The broker checks it on every model request for every
+   route (decision 13).
 7. **In-flight work is never downgraded.** TaskSpecs are immutable (DB trigger) and are never rewritten; after a
    lowering, existing tasks keep their class, and only plans and task DAGs compiled afterwards use the new floor. The
    command prints the existing TaskSpec counts per class and this rule.
 8. **Revocation fails closed.** `aeos policy revoke <decision id>` on the lowering decision that still backs the class
-   restores the class it lowered from (audit record with `trigger` `decision_inactive`, event, actor `policy`). A
-   superseded decision, or one a raise already ended, restores nothing.
+   restores the class before its chain of lowerings (audit record with `trigger` `decision_inactive`, event, actor
+   `policy`). A lowering that supersedes an earlier ACTIVE lowering carries `restore_to`, the class before the first
+   (CONFIDENTIAL -> INTERNAL -> PUBLIC, revoke the newest: CONFIDENTIAL, never the INTERNAL that no ACTIVE decision
+   backs any more). A superseded decision, or one a raise already ended, restores nothing.
 9. **No password, because the owner approves in chat.** Lowering without a password prompt is allowed only because
    the owner approves the change in chat and the maintainer runs the command as the owner's actor (owner rule R43,
    2026-10-28). The records show it: `actor_check` in the decision and the audit record states "named active
@@ -93,6 +96,34 @@
 11. **Each refusal is durable.** A policy refusal (OFFICE, actor role, actor scope, unknown actor) rolls back the
     unit of work and commits a DENIED audit record with its code; validation errors (class, reason, domain) record
     nothing.
+12. **What a task's context may carry** (`knowledge.packs`, review H1). Every context item keeps the class it had when
+    it was created: its own label (memory, attachments, evidence, policy files, research, the TaskSpec), else the
+    project's class at the record's creation time, read from the append-only audit trail of reclassifications
+    (`portfolio.facade.classification_at`; the highest class the project ever had when the creation time is unknown,
+    for example metadata search results), never below the current project class. Repository files at the task's
+    commit take the project's current class: the lowering decision is a decision about the repository's data (for
+    DLY AEOS: it is public). A task-bound pack's ceiling is the task's effective class (decision 6): an item above it
+    is left out and listed in `omitted` with "classification X above the task's class Y"; the owner-local MCI source
+    is never read into a pack for a PUBLIC task, whatever its status; and an attachment input above the ceiling is
+    withheld from the prompt as well (`worker_runtime.executor.resolve_artifacts`; an input known only to the planning
+    context, without a class, takes the highest class the project ever had). A pack built before a lowering is
+    not reused when its class is above the task's (it is rebuilt).
+13. **The broker checks the class on every request, every route** (`broker.model_proxy.task_class_refusal`, review M1):
+    before a request counts, the run's task at its effective class must be allowed by the route's
+    `allowed_data_classes` and its data terms (`routing.facade.run_class_problem`), else 403 `TASK_CLASS_NOT_ALLOWED`
+    and nothing is sent. A grant without a task (a route probe) is not judged there; a task that cannot be read is
+    refused.
+14. **The executor never starts a run whose context the route may not carry** (`CONTEXT_CLASS_NOT_ALLOWED`, run
+    BLOCKED, nothing spawned, workspace removed): the pack's class must be allowed by the route and its terms.
+15. **On a lowering the command says what stays above the new class**: the number of memory records, attachments and
+    evidence items of the project classified above it (also in the decision and the audit record), and that they never
+    reach a task or route below their class.
+16. **An unknown stored label** (for example `Secret`) is read as RESTRICTED, as routing reads it: a lowering from it
+    records `from_classification` RESTRICTED with the raw label in `from_label`, a revocation restores RESTRICTED, and
+    `--to RESTRICTED` normalises the label. No CHECK constraint is added: SQLite adds one only by rebuilding the
+    `projects` table (Alembic batch mode), which would have to drop and re-create its immutable-domain trigger, would
+    fail on exactly the unknown labels this handles, and the repository has no CHECK constraint to follow; every write
+    path validates instead (create normalises, reclassify normalises, PATCH refuses), and tests pin each one.
 
 ## Consequences
 
@@ -108,10 +139,21 @@
   already ran (`capacity._public_runs`) still counts by the class a run's task was compiled with: it describes what
   ran, not what may run.
 * A test fixture that put a PUBLIC TaskSpec into an INTERNAL project (which the compiler never produces) now sees
-  that task routed as INTERNAL; the broker proxy fixture uses a PUBLIC project.
+  that task routed as INTERNAL; the broker proxy fixture uses a PUBLIC project. The shared test route allows PUBLIC and
+  INTERNAL unless a test says otherwise (a route that allows no class can never be selected).
+* What a PUBLIC task of a lowered project no longer receives (decision 12): the `policy/` files and research entries
+  (labelled INTERNAL), records created while the project was INTERNAL, metadata search results (creation time
+  unknown) and evidence (labelled INTERNAL unless its collector states another class). It still receives the repository at its commit, the
+  TaskSpec and everything created as PUBLIC afterwards. Labelling the committed `policy/` files PUBLIC (they are in the
+  public repository) would be a separate decision.
 * Evidence: E2 on macOS arm64. `tests/unit/test_portfolio_reclassify.py` (each refusal red with its own message next
   to an allowed near miss; all red without the change, and the revocation test red without the registry hook alone;
   the owner command of OWNER_ACTIONS 2.13 runs as written against a temporary database seeded like a real one) and
   `tests/unit/test_task_classification.py` (compile rule and routing floor; the behaviour tests red without the
-  change, the near misses green). Windows and Intel macOS: NOT-PROVEN until CI runs there. The owner's real database
+  change, the near misses green; a ratchet refuses any unmarked reader of `task.data_classification` in routing,
+  knowledge and the worker runtime, red on the earlier pack builder) and `tests/unit/test_context_classification.py`
+  (after INTERNAL -> PUBLIC, INTERNAL memory, an INTERNAL attachment, an INTERNAL plan and the MCI source are absent
+  from a PUBLIC task's prompt - red before: the INTERNAL memory reached it - while PUBLIC ones are present; a raise
+  refuses the running run's next request - red before: HTTP 200); the executor refusal in
+  `tests/unit/test_worker_runtime_executor.py` (red before: the run reached REVIEW). Windows and Intel macOS: NOT-PROVEN until CI runs there. The owner's real database
   is not touched by the tests.

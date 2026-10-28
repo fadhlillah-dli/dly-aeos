@@ -35,3 +35,47 @@ def effective_task_class(session: Session, task: TaskSpec) -> str:
     if floor not in ORDER:
         return ORDER[-1]
     return ORDER[max(ORDER.index(own), ORDER.index(floor))]
+
+
+def rank(label: str | None) -> int:
+    """Position in ORDER; an unknown label ranks as the strictest class."""
+    text = str(label or "").strip().upper()
+    return ORDER.index(text) if text in ORDER else len(ORDER) - 1
+
+
+def route_class_problem(route: object, klass: str) -> str | None:
+    """Why *route* may not carry data of *klass* (None = it may): the class is not in the route's
+    ``allowed_data_classes``, or the route's data terms restrict it to PUBLIC (training/trial/UNKNOWN terms or an
+    UNVERIFIED model identity, ``routing.service.terms_restriction``)."""
+    allowed = list(getattr(route, "allowed_data_classes", None) or [])
+    if klass not in allowed:
+        return f"data classification {klass} is not allowed by route {getattr(route, 'route_key', '?')} " \
+               f"(allowed: {allowed})"
+    if klass == ORDER[0]:
+        return None
+    try:
+        from aeos.routing.service import terms_restriction
+    except ImportError:  # only when a test substitutes the routing service: the class check above still holds
+        return None
+    restriction = terms_restriction(getattr(route, "data_terms", None) or {}, getattr(route, "identity_status", None))
+    return f"{klass} data on route {getattr(route, 'route_key', '?')}: {restriction}" if restriction else None
+
+
+def run_class_problem(session: Session, route: object, *, run_id: str | None) -> str | None:
+    """Per-request check of the broker for ANY route (ADR-0133): the run's task, at its effective class (so a raise of
+    its project applies at the next model call), must be data the route may carry. A grant without a run or a run
+    without a task (a route probe) carries no task data and is not judged here; a run whose TaskSpec cannot be read
+    is refused (fail closed)."""
+    if not run_id:
+        return None
+    from aeos.models.workforce import WorkerRun
+
+    run = session.get(WorkerRun, run_id)
+    if run is None or not run.task_id:
+        return None
+    task = session.get(TaskSpec, run.task_id)
+    if task is None:
+        return "the run's TaskSpec cannot be read, so its data classification is unknown (fail closed)"
+    klass = effective_task_class(session, task)
+    problem = route_class_problem(route, klass)
+    return f"the run's task is {klass}: {problem}" if problem else None

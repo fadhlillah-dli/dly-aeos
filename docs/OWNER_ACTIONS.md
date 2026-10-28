@@ -1199,16 +1199,33 @@ audit record say so and name your approval (`--approval-ref`). `<admin>` is your
 
 What it records: a POLICY decision on `project_classification:<project id>` naming the old class INTERNAL, the new
 class PUBLIC, your reason, your username and the approval reference, plus the audit record
-`portfolio.project.reclassify` and the event `portfolio.project.reclassified` with the same facts. What it does not
-change: TaskSpecs that already exist keep their class (INTERNAL). Plans and task DAGs compiled afterwards use PUBLIC:
-a task whose plan states no class is PUBLIC, and a task the plan marks higher keeps the higher class. Check it with `./aeos project list --domain PERSONAL` (the class column) and
+`portfolio.project.reclassify` and the event `portfolio.project.reclassified` with the same facts. It also prints how
+many memory records, attachments and evidence items stay above PUBLIC.
+
+What it does not change:
+
+* TaskSpecs that already exist keep their class (INTERNAL). Plans and task DAGs compiled afterwards use PUBLIC: a task
+  whose plan states no class is PUBLIC, and a task the plan marks higher keeps the higher class.
+* Everything recorded while the project was INTERNAL keeps INTERNAL: memory, attachments, evidence, approved plans
+  and documents. A PUBLIC task's context leaves them out (each one is listed as omitted with the reason
+  "classification"), and the owner-local MCI source never goes to a PUBLIC task. The repository itself (its files at
+  the task's commit) is PUBLIC, because that is what you decided.
+* A run whose context the route may not carry does not start (`CONTEXT_CLASS_NOT_ALLOWED`).
+
+Check it with `./aeos project list --domain PERSONAL` (the class column) and
 `./aeos policy decisions --kind POLICY --target-type project_classification`.
 
-To undo: run the command again with `--to INTERNAL` (a raise needs no decision; it ends the lowering decision, and
-open tasks of the project stop using PUBLIC-only routes at once), or
-revoke the decision with `./aeos policy revoke <decision id> --as "<admin>" --reason "<why>"` (asks for your
-password), which restores INTERNAL. An OFFICE project is never lowered by this command: that is the company's
-authorisation ([4.1](#41-company-authorisation-for-office)). Raising an OFFICE project is allowed.
+To undo, either run the command again with `--to INTERNAL` (a raise needs no decision; it ends the lowering
+decision), or revoke the decision with `./aeos policy revoke <decision id> --as "<admin>" --reason "<why>"` (asks for
+your password), which restores INTERNAL (after two lowerings in a row, the class before the first). After a raise to
+INTERNAL, exactly this happens to the project's open tasks: routing no longer selects a PUBLIC-only route for them;
+a run already in progress on such a route has its next model request, and every one after it, refused by the
+broker (HTTP 403 `TASK_CLASS_NOT_ALLOWED`, nothing is sent; the refusal is in the audit trail); a run starting later is
+refused before it starts (`CONTEXT_CLASS_NOT_ALLOWED`) if its context is above what the route allows; and the
+delivery gate G0 refuses a task whose class is below the project's. The TaskSpecs themselves are not changed.
+
+An OFFICE project is never lowered by this command: that is the company's authorisation
+([4.1](#41-company-authorisation-for-office)). Raising an OFFICE project is allowed.
 
 ---
 
