@@ -292,6 +292,51 @@ def test_a_lowering_is_refused_while_the_project_has_content(db, label):
     assert _reclassify("has-content", "CONFIDENTIAL").exit_code == 0
 
 
+def _probe(db, project, *, kind: str = "PROVIDER_CAPABILITY", run_id: str | None = None,
+           task_id: str | None = None) -> None:
+    from aeos.models.evidence import EvidenceArtifact
+
+    db.add(EvidenceArtifact(project_id=project.id, domain=project.domain, kind=kind, origin="collector",
+                            collector_identity="github-capability-probe", content_hash=f"sha256:{kind.lower()}",
+                            claim="merge-gate capability of the code host", run_id=run_id, task_id=task_id))
+    db.commit()
+
+
+def test_a_platform_probe_alone_does_not_block_a_lowering(db):
+    """ADR-0133 decision 19: a PROVIDER_CAPABILITY probe without a run or task is platform metadata, not content (the
+    live DLY AEOS project holds exactly one). The lowering goes through and says what it did not count."""
+    create_admin(db)
+    p = make_project(db, key="probe-only")
+    _probe(db, p)
+    r = _reclassify("probe-only", "PUBLIC")
+    assert r.exit_code == 0, r.output
+    assert ("Not counted: 1 platform probe evidence record(s) (PROVIDER_CAPABILITY without a run or task), which "
+            "never reach a task's context.") in r.output
+    assert _project(db, p.id).data_classification == "PUBLIC"
+    [d] = _decisions(db)
+    assert d.details["exempt_probe_evidence"] == 1
+
+
+@pytest.mark.parametrize(("kind", "run_id", "task_id"), [
+    ("PROVIDER_CAPABILITY", "run-1", None),   # an exempt kind bound to a run is a run's evidence
+    ("PROVIDER_CAPABILITY", None, "task-1"),  # an exempt kind bound to a task is a task's evidence
+    ("LOG", None, None),                       # not an exempt kind
+    ("PROBE", None, None),                     # a probe kind not on the allow-list
+])
+def test_evidence_outside_the_probe_exemption_still_blocks_a_lowering(db, kind, run_id, task_id):
+    create_admin(db)
+    p = make_project(db, key="probe-bound")
+    _probe(db, p, kind=kind, run_id=run_id, task_id=task_id)
+    r = _reclassify("probe-bound", "PUBLIC")
+    assert r.exit_code == 1 and "LOWERING_BLOCKED_BY_CONTENT" in r.output and "evidence 1" in r.output, r.output
+    assert "Not counted" not in r.output
+    assert _project(db, p.id).data_classification == "INTERNAL"
+    # near miss in the same project: the exempt probe next to it is counted out, the other row still blocks
+    _probe(db, p)
+    r2 = _reclassify("probe-bound", "PUBLIC")
+    assert r2.exit_code == 1 and "evidence 1" in r2.output and "Not counted: 1 platform probe" in r2.output
+
+
 def test_the_content_list_covers_every_project_table():
     """A new table holding project data must be added to CONTENT_TABLES or named here as not content (with why)."""
     from aeos.core.db import Base, import_all_models

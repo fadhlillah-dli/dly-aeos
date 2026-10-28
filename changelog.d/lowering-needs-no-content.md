@@ -11,7 +11,9 @@
   first (plan versions, task specs and evidence are append-only, so such a project keeps its class). Raises stay
   allowed. As defence in depth, the compiler records the class of every input artifact, the pack builder and the
   runtime withhold any artifact above the task's class (in the pack and in the prompt), and a pack above the task's
-  class is never handed to a worker. On the owner's Mac the DLY AEOS project holds one evidence record (read-only
-  count), so the owner command is refused there until the owner decides. E2 on macOS arm64: each fix disabled in turn
+  class is never handed to a worker. Platform probe evidence (`PROVIDER_CAPABILITY` without a run or task, an explicit
+  allow-list) is not content: it never reaches a worker (a test and a ratchet prove it) and the output says how many
+  such records were not counted; on the owner's Mac that is the only evidence of the DLY AEOS project (read-only
+  count), so the owner command goes through there. E2 on macOS arm64: each fix disabled in turn
   turns its test red (the lowering went through, the INTERNAL pack was handed over, nothing was withheld, no class was
   recorded); NOT-PROVEN on Windows and Intel macOS until CI runs there.

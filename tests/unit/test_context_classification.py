@@ -380,3 +380,67 @@ def test_the_compiler_records_the_class_of_an_internal_era_plan_section(db):
     assert spec.data_classification == "PUBLIC"
     [prd] = [a for a in spec.input_artifacts if a.get("kind") == "plan_section"]
     assert prd["classification"] == "INTERNAL"
+
+
+# ---------------------------------------------------------------- decision 19: platform probes never reach a worker
+
+PROBE_CLAIM = "PROBE-CLAIM-MERGE-GATE branch protection of the code host"
+
+
+def test_platform_probe_evidence_never_reaches_a_task_pack_or_prompt(db):
+    """The exempt probe (PROVIDER_CAPABILITY, no run, no task) is not selected into a task's pack, even for an INTERNAL
+    task whose ceiling would allow its class - it is never selected, not merely withheld. Near miss: the task's own
+    trusted evidence is selected, so the runtime collector did run."""
+    from aeos.models.evidence import EvidenceArtifact
+
+    project = make_project(db, key="ctx-probe")
+    _plan, _pv, [task] = make_plan(db, project, [{"task_key": "impl", "data_classification": "INTERNAL",
+                                                  "role_key": "feature-implementer"}])
+    probe = EvidenceArtifact(project_id=project.id, domain=project.domain, kind="PROVIDER_CAPABILITY",
+                             origin="collector", collector_identity="github-capability-probe",
+                             content_hash="sha256:probe", claim=PROBE_CLAIM, trusted=True)
+    own = EvidenceArtifact(project_id=project.id, domain=project.domain, kind="TEST_REPORT", origin="verifier",
+                           collector_identity="verifier", content_hash="sha256:own", claim="OWN-TASK-TEST-REPORT",
+                           trusted=True, task_id=task.id)
+    db.add_all([probe, own])
+    db.commit()
+    prompt, info, pack = _prompt_for(task.id)
+    refs = [i["ref"] for i in pack["items"]] + [o["ref"] for o in info["omitted"]]
+    assert f"evidence:{probe.id}" not in refs and PROBE_CLAIM not in prompt
+    assert f"evidence:{own.id}" in refs and "OWN-TASK-TEST-REPORT" in prompt
+
+
+def _exempt_kind_readers(files: list[Any]) -> list[str]:
+    from aeos.portfolio.reclassify import EXEMPT_PROBE_KINDS
+
+    return [f"{p}:{i}" for p in files for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+            if any(k in line for k in EXEMPT_PROBE_KINDS)]
+
+
+def test_no_pack_or_prompt_builder_selects_an_exempt_probe_kind():
+    """Ratchet for decision 19: the exempt probe kinds stay out of every builder of worker or planner input - the
+    context packs, the worker runtime, the documentation engine, planning and the Claude bridge - and the task-pack
+    runtime collector keeps selecting only the task's own evidence. Exempting a kind that one of them reads would let
+    a lowered project's probe reach a lower-class task."""
+    import inspect
+
+    from aeos.core.paths import repo_root
+    from aeos.docs_engine.service import SIGNAL_EVIDENCE_KINDS
+    from aeos.knowledge import packs
+    from aeos.portfolio.reclassify import EXEMPT_PROBE_KINDS
+
+    root = repo_root() / "backend" / "aeos"
+    files = [p for d in ("knowledge", "worker_runtime", "docs_engine", "planning", "claude_bridge")
+             for p in sorted((root / d).glob("*.py"))]
+    assert len(files) > 30
+    assert _exempt_kind_readers(files) == []
+    assert not set(SIGNAL_EVIDENCE_KINDS) & EXEMPT_PROBE_KINDS
+    assert "EvidenceArtifact.task_id == task.id" in inspect.getsource(packs._collect_runtime)
+
+
+def test_bite_the_probe_ratchet_sees_a_builder_that_names_an_exempt_kind(tmp_path):
+    bad = tmp_path / "packs.py"
+    bad.write_text('q = q.where(EvidenceArtifact.kind == "PROVIDER_CAPABILITY")\n', encoding="utf-8")
+    ok = tmp_path / "executor.py"  # near miss: other evidence kinds
+    ok.write_text('q = q.where(EvidenceArtifact.kind == "TEST_REPORT")\n', encoding="utf-8")
+    assert _exempt_kind_readers([bad, ok]) == [f"{bad}:1"]

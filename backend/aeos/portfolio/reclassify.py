@@ -157,11 +157,27 @@ CONTENT_TABLES: tuple[tuple[str, str], ...] = (
 # append-only (DB triggers, core.db.APPEND_ONLY_TABLES): rows there can never be deleted
 APPEND_ONLY_CONTENT = frozenset({"plan_versions", "task_specs", "evidence_artifacts"})
 LOWERING_BLOCKED = "LOWERING_BLOCKED_BY_CONTENT"
+# ADR-0133 decision 19: evidence rows that are platform probes are not project content - an explicit allow-list of
+# probe kinds, counted out only without a run and a task. PROVIDER_CAPABILITY: the code host's merge-gate capability
+# probe (delivery.provider, `aeos delivery capabilities --record`, origin collector) - platform metadata, read by the
+# Doctor and the PR bundle only. It never reaches a worker: a task pack selects only that task's own evidence, the
+# documentation engine selects SIGNAL_EVIDENCE_KINDS only, planning and the Claude bridge read no evidence, and the one
+# copy (the PR bundle evidence) is stored INTERNAL, which the pack ceiling withholds from a lower-class task.
+# tests/unit/test_context_classification.py proves it and fails when a pack/prompt builder starts selecting it.
+EXEMPT_PROBE_KINDS: frozenset[str] = frozenset({"PROVIDER_CAPABILITY"})
+
+
+def _exempt_probe(table: Any) -> Any:
+    """SQL condition: an evidence row that is an exempt platform probe (decision 19)."""
+    from sqlalchemy import and_
+
+    return and_(table.c.run_id.is_(None), table.c.task_id.is_(None), table.c.kind.in_(sorted(EXEMPT_PROBE_KINDS)))
 
 
 def existing_content(session: Session, project_id: str) -> dict[str, int]:
-    """Rows of each content table that belong to the project (only the kinds that have any)."""
-    from sqlalchemy import func
+    """Rows of each content table that belong to the project (only the kinds that have any); exempt platform probe
+    evidence (decision 19) is not counted."""
+    from sqlalchemy import func, not_
 
     from aeos.core.db import Base, import_all_models
 
@@ -169,20 +185,40 @@ def existing_content(session: Session, project_id: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for label, name in CONTENT_TABLES:
         table = Base.metadata.tables[name]  # a renamed table fails loudly here (tests pin the list), never skipped
-        n = int(session.scalar(select(func.count()).select_from(table).where(table.c.project_id == project_id)) or 0)
+        cond = table.c.project_id == project_id
+        if name == "evidence_artifacts":
+            cond = cond & not_(_exempt_probe(table))
+        n = int(session.scalar(select(func.count()).select_from(table).where(cond)) or 0)
         if n:
             out[label] = n
     return out
 
 
-def lowering_blocked_message(key: str, old: str, new: str, content: dict[str, int]) -> str:
+def exempt_probes(session: Session, project_id: str) -> int:
+    """Platform probe evidence rows of the project that are not counted as content (decision 19)."""
+    from sqlalchemy import func
+
+    from aeos.core.db import Base, import_all_models
+
+    import_all_models()
+    table = Base.metadata.tables["evidence_artifacts"]
+    return int(session.scalar(select(func.count()).select_from(table).where(
+        table.c.project_id == project_id, _exempt_probe(table))) or 0)
+
+
+def exemption_note(n: int) -> str:
+    return (f" Not counted: {n} platform probe evidence record(s) ({', '.join(sorted(EXEMPT_PROBE_KINDS))} without a "
+            "run or task), which never reach a task's context." if n else "")
+
+
+def lowering_blocked_message(key: str, old: str, new: str, content: dict[str, int], exempt: int = 0) -> str:
     counts = ", ".join(f"{label} {n}" for label, n in content.items())
     fixed = sorted(label for label, name in CONTENT_TABLES if name in APPEND_ONLY_CONTENT and label in content)
     tail = (f" Append-only, never deleted: {', '.join(fixed)}; a project that has them keeps its class (create a new "
             f"project at {new} for the work that may be {new})." if fixed else "")
     return (f"project {key} cannot be lowered from {old} to {new} while it has content recorded at {old}: {counts}. "
             f"Copies of it (compiled task inputs, re-rendered documents, context packs) would carry it to {new} tasks "
-            f"and routes. Archive or delete that content first; nothing was changed.{tail}")
+            f"and routes. Archive or delete that content first; nothing was changed.{tail}{exemption_note(exempt)}")
 
 
 def in_flight(session: Session, project_id: str) -> dict[str, Any]:
@@ -268,13 +304,15 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
         _deny(session, actor_id=actor_user_id, project=project, code="OFFICE_LOWERING_DENIED", reason=OFFICE_REFUSAL,
               details={"from": old, "to": new})
     user = _check_actor(session, actor=actor, actor_user_id=actor_user_id, project=project, direction=direction)
+    exempt = 0
     if direction == LOWER:
         require_writable(project)  # an ARCHIVED/RETIRED project is read-only; raising stays possible
         content = existing_content(session, project.id)
+        exempt = exempt_probes(session, project.id)
         if content:  # ADR-0133 decision 17: only a project without content may be lowered
             _deny(session, actor_id=user.id, project=project, code=LOWERING_BLOCKED,
-                  reason=lowering_blocked_message(project.project_key, old, new, content),
-                  details={"from": old, "to": new, "content": content})
+                  reason=lowering_blocked_message(project.project_key, old, new, content, exempt),
+                  details={"from": old, "to": new, "content": content, "exempt_probe_evidence": exempt})
     flight = in_flight(session, project.id)
     decision_id: str | None = None
     restore_to: str | None = None
@@ -288,7 +326,7 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
                      # stated, never implied: the CLI names the actor and asks no password; the owner's approval
                      # (chat, owner rule R43) is what allows it, and approval_ref says where it was given
                      "actor_check": ACTOR_CHECK, "approval_ref": approval, "from_label": from_label,
-                     "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
+                     "exempt_probe_evidence": exempt, "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
         decision_id = decision.id
         restore_to = str((decision.details or {}).get("restore_to") or old)
     project.data_classification = new
@@ -303,7 +341,7 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
         project_id=project.id, domain=project.domain, reason=reason_v,
         details={"from": old, "to": new, "direction": direction, "actor_username": user.username,
                  "approval_ref": approval, "actor_check": ACTOR_CHECK, "decision_id": decision_id,
-                 "ended_decisions": ended, "from_label": from_label,
+                 "ended_decisions": ended, "from_label": from_label, "exempt_probe_evidence": exempt,
                  "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
     events.emit(session, source="portfolio", kind=EVENT, entity_type="project", entity_id=project.id,
                 project_id=project.id, domain=project.domain,
@@ -311,7 +349,8 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
                          "actor": user.username, "reason": reason_v, "approval_ref": approval,
                          "decision_id": decision_id, "ended_decisions": ended})
     return {**base, "direction": direction, "actor": user.username, "decision_id": decision_id,
-            "restore_to": restore_to, "ended_decisions": ended, "audit_id": rec.event_id, "in_flight": flight}
+            "restore_to": restore_to, "ended_decisions": ended, "audit_id": rec.event_id, "in_flight": flight,
+            "exempt_probe_evidence": exempt}
 
 
 def on_decision_inactive(session: Session, decision: Decision) -> dict[str, Any] | None:
@@ -378,6 +417,8 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
     lines.append(f"Only plans and task DAGs compiled after this change use {new} as their floor: a task with no "
                  f"stated class gets {new}, a stated class can only raise it.")
     if result["direction"] == LOWER:
+        if result.get("exempt_probe_evidence"):
+            lines.append(exemption_note(int(result["exempt_probe_evidence"])).strip())
         restore = result.get("restore_to") or old
         lines.append(f"Undo: run this command again with --to {restore}, or revoke the decision "
                      f"(aeos policy revoke {result['decision_id']}), which restores {restore}.")

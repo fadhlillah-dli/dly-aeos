@@ -146,13 +146,27 @@
     effective class, in the pack and in the prompt. `_context_pack` checks the newest task pack against the task's
     effective class when it is used - a pack above it is never given to the worker, also when it was not rebuilt. The
     ratchet of decision 6 also scans `planning/dag.py` and `docs_engine/`.
+19. **Platform probe evidence is not content** (maintainer decision 2026-10-29 within the owner's R46). The content
+    check of decision 17 does not count an evidence row that is a platform probe: `run_id` and `task_id` both NULL and
+    its kind on an explicit allow-list, `portfolio.reclassify.EXEMPT_PROBE_KINDS`, which holds `PROVIDER_CAPABILITY`
+    only - the code host's merge-gate capability probe (`aeos delivery capabilities --record`, origin collector),
+    platform metadata read by the Doctor and the PR bundle. It is safe because it never reaches a worker: a task pack
+    selects only that task's own evidence; the documentation engine selects `SIGNAL_EVIDENCE_KINDS`, which exclude
+    it; planning and the Claude bridge read no evidence; and its one copy, the PR bundle evidence, is stored INTERNAL,
+    which the pack ceiling withholds from a lower-class task. `PROBE` was considered and left out: several collectors
+    write it (route feasibility, the Claude bridge test, containment), so it is not one kind of platform metadata.
+    Everything else still blocks - an allow-listed kind with a run or a task, and any other kind. The refusal and the
+    success output state how many probe records were not counted, and the decision and audit record carry
+    `exempt_probe_evidence`. A test builds a task pack and the worker prompt for a project holding such a probe and
+    finds no trace of it, and a ratchet fails when a pack or prompt builder (knowledge, worker runtime, documentation
+    engine, planning, Claude bridge) names an exempt kind or the task-pack runtime collector stops selecting only the
+    task's own evidence.
 
 ## Consequences
 
-* On this Mac the DLY AEOS project holds one evidence record and nothing else (read-only count, 2026-10-29), so the
-  owner's command is refused (decision 17) and, evidence being append-only, cannot be made to pass by deleting: the
-  owner decides how to proceed (for example a new PUBLIC project for the work that may be PUBLIC). A project without
-  content that is lowered becomes PUBLIC; plans compiled afterwards produce PUBLIC tasks unless the plan states a
+* On this Mac the DLY AEOS project holds no content and one `PROVIDER_CAPABILITY` probe without a run or task
+  (read-only count, 2026-10-29), so with decision 19 the owner's command goes through; once the project has plans or
+  tasks a lowering is refused. A project without content that is lowered becomes PUBLIC; plans compiled afterwards produce PUBLIC tasks unless the plan states a
   higher class for a task, and DeepSeek on OpenCode Go and the free OpenRouter WORKER routes may take them (ADR-0041
   decision C, ADR-0124 ordering). The outgoing request guard (ADR-0127) still refuses any request carrying a
   credential, whatever the class.

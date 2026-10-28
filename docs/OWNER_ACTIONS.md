@@ -1201,25 +1201,32 @@ audit record say so and name your approval (`--approval-ref`). `<admin>` is your
 versions, planning contexts or runs, task specs, worker runs, reviews, documents or document revisions (checkpoints
 included), memory records, attachments, evidence, context packs, decision requests, eval case candidates, export
 snapshots or change proposals: copies of older content (compiled task inputs, re-rendered documents, context packs)
-would otherwise reach PUBLIC tasks and routes (ADR-0133 decision 17). Repositories and integrations are not content.
-When content exists the command changes nothing, exits with 1 and prints, for example:
+would otherwise reach PUBLIC tasks and routes (ADR-0133 decision 17). Repositories and integrations are not content,
+and neither is platform probe evidence: a `PROVIDER_CAPABILITY` record (the code host's merge-gate capability probe)
+without a run or a task is metadata about the platform that never reaches a task's context (ADR-0133 decision 19); the
+output says how many such records it did not count. When content exists the command changes nothing, exits with 1
+and prints, for example:
 
 <!-- paste-safe: file-content -->
 ```text
 LOWERING_BLOCKED_BY_CONTENT: project dly-aeos cannot be lowered from INTERNAL to
-PUBLIC while it has content recorded at INTERNAL: evidence 1. Copies of it
-(compiled task inputs, re-rendered documents, context packs) would carry it to
-PUBLIC tasks and routes. Archive or delete that content first; nothing was
-changed. Append-only, never deleted: evidence; a project that has them keeps its
-class (create a new project at PUBLIC for the work that may be PUBLIC).
+PUBLIC while it has content recorded at INTERNAL: plans 1, plan versions 1, task
+specs 2, evidence 1. Copies of it (compiled task inputs, re-rendered documents,
+context packs) would carry it to PUBLIC tasks and routes. Archive or delete that
+content first; nothing was changed. Append-only, never deleted: evidence, plan
+versions, task specs; a project that has them keeps its class (create a new
+project at PUBLIC for the work that may be PUBLIC). Not counted: 1 platform
+probe evidence record(s) (PROVIDER_CAPABILITY without a run or task), which
+never reach a task's context.
 Nothing was changed.
 ```
 
 What to do: archive or delete the listed content first (there is no archive command for this yet). Plan versions,
 task specs and evidence are append-only and can never be deleted, so a project that has any of them keeps its class;
 the work that may be PUBLIC then needs a new project created at PUBLIC. On this Mac (checked read-only on
-2026-10-29) the DLY AEOS project has exactly one evidence record and nothing else, so this command is refused here
-until you decide how to proceed.
+2026-10-29) the DLY AEOS project holds no content and one `PROVIDER_CAPABILITY` probe record, which is not counted,
+so the command above goes through here (its output then reads "Not counted: 1 platform probe evidence record(s)").
+Run it before the project gets plans or tasks: after that, a lowering is refused.
 
 When it succeeds it records a POLICY decision on `project_classification:<project id>` naming the old class
 INTERNAL, the new class PUBLIC, your reason, your username and the approval reference, plus the audit record
