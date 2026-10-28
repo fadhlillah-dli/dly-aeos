@@ -107,6 +107,13 @@ class Settings(BaseSettings):
     go_max_active_total: int = 2
     openrouter_free_max_active: int = 1
     route_reselect_after_minutes: int = 30
+    # ADR-0128 (owner decision R34, 2026-10-28): a per-token paid route (OpenRouter credits) may take an INTERNAL task
+    # only by ESCALATION (after 2 quality failures of the task on $0-marginal routes) or OVERFLOW (every $0-marginal
+    # route eligible for the task is busy, out of allowance fit or cooling down). Each switch turns its path off; both
+    # are on by default (the owner's answer). PUBLIC tasks are never paid, whatever these say. Owner settings, never a
+    # route's configuration identity nor policy/.
+    paid_escalation: bool = True
+    paid_overflow: bool = True
 
     # §02/§08 canonical MCI_V2 source: owner-supplied and never committed (the platform repository is public). By
     # default it is read from <data dir>/policy/canonical/<file> (policy/mci-reference.yaml ``location:

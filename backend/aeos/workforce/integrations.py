@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from aeos.core.enums import Capability, Domain
-from aeos.core.errors import Blocked
+from aeos.core.errors import AeosError, Blocked
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.decisions import Decision
 from aeos.models.planning import PlanVersion, TaskSpec
@@ -255,6 +255,29 @@ def route_capacity(session: Session, task: TaskSpec, route: ModelRoute) -> dict[
     except (ImportError, AttributeError) as exc:
         return {"route_key": route.route_key, "status": "UNAVAILABLE", "reason": _unavailable("routing", exc),
                 "hold": None}
+
+
+PAID_NOT_ADMITTED = "PAID_NOT_ADMITTED"
+
+
+def paid_admission(session: Session, task: TaskSpec, route: ModelRoute) -> dict[str, Any] | None:
+    """ADR-0128: the admission re-check of a selected per-token paid route (``admitted`` with ``reason`` ESCALATION or
+    OVERFLOW, else ``code``/``why``); None for a route that is not per-token paid. Routing unavailable or the check
+    failing -> a route that looks paid (not free, not a SUBSCRIPTION, not a LOCAL route) is not admitted (fail
+    closed)."""
+    try:
+        from aeos.routing import facade as routing
+
+        return routing.paid_admission(session, task=task, route=route)
+    except (ImportError, AttributeError, AeosError) as exc:
+        looks_paid = (route.is_free != "YES" and (route.pricing or {}).get("billing") != "SUBSCRIPTION"
+                      and not (route.pool == "LOCAL" and route.provider == "local"))
+        if not looks_paid:
+            return None
+        why = exc.message if isinstance(exc, AeosError) else _unavailable("routing", exc)
+        return {"route_key": route.route_key, "admitted": False, "reason": None, "code": PAID_NOT_ADMITTED,
+                "why": f"paid route {route.route_key} cannot be checked for ESCALATION or OVERFLOW ({why}); the task "
+                       "waits (fail closed, ADR-0128)"}
 
 
 def zero_marginal(route: ModelRoute) -> bool:
