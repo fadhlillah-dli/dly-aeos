@@ -3,6 +3,8 @@
 ``controller`` says which code this process runs (§09 zones): ``release`` = an extracted, verified release
 under the data dir; ``checkout`` = the editable source tree. Release id and commit are not sensitive.
 ``ui_build`` says whether ``aeos serve`` found the Control Center bundle fresh, rebuilt it or serves a STALE one.
+``freshness`` (cached for 30 s) carries the build stamp of the bundle served now and the code drift of this server, so
+the Control Center can tell the owner to reload the page or restart ``aeos serve``.
 """
 
 from __future__ import annotations
@@ -51,8 +53,20 @@ def ui_build_status(settings: Settings) -> dict[str, Any]:
         return {"status": "UNKNOWN", "reason": "the freshness record could not be read"}
 
 
+def freshness_status(settings: Settings) -> dict[str, Any]:
+    """Served bundle stamp + code drift of this server (R28), cached; never raises."""
+    try:
+        from aeos.api.app import _frontend_dist
+        from aeos.operations.freshness import health_freshness
+
+        return health_freshness(settings, _frontend_dist())
+    except Exception:
+        return {"served_bundle": {"frontend_tree": None}, "code_drift": {"status": "UNKNOWN"},
+                "reason": "the freshness block could not be computed"}
+
+
 @router.get("/api/health")
 def health() -> dict[str, Any]:
     s = get_settings()
     return {"status": "ok", "version": __version__, "schema_version": SCHEMA_VERSION, "environment": s.environment,
-            "controller": controller_status(s), "ui_build": ui_build_status(s)}
+            "controller": controller_status(s), "ui_build": ui_build_status(s), "freshness": freshness_status(s)}

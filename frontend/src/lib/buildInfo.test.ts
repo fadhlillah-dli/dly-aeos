@@ -37,6 +37,17 @@ describe("aeos-build-info plugin", () => {
     expect(existsSync(join(root, "dist", "aeos-build.json"))).toBe(false);
   });
 
+  it("bakes the same frontend tree into the bundle that aeos-build.json records", () => {
+    mkdirSync(join(root, "dist"));
+    const plugin = aeosBuildInfo();
+    const config = (plugin.config as (...args: unknown[]) => { define: Record<string, string> })({}, { command: "build", mode: "production" });
+    (plugin.configResolved as Hook)({ root, build: { outDir: "dist" } });
+    (plugin.closeBundle as Hook).call({});
+    const info = JSON.parse(readFileSync(join(root, "dist", "aeos-build.json"), "utf8"));
+    expect(config.define.__AEOS_FRONTEND_TREE__).toBe(JSON.stringify(info.frontend_tree));
+    expect(info.frontend_tree).toMatch(/^[0-9a-f]{40}$/); // the test runs inside the frontend/ checkout
+  });
+
   it("keeps the default dist outDir", () => {
     mkdirSync(join(root, "dist"));
     run(root, "dist");

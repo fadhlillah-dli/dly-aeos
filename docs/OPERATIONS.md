@@ -248,14 +248,17 @@ HEAD does serve rename `frontend/dist` to `frontend/dist.prev`, `frontend/dist.n
 `frontend/dist.prev`. A failed, killed or timed-out build leaves `frontend/dist` untouched and deletes the partial
 `dist.next`. When a rename fails (on Windows a file in `frontend/dist` can be locked by another server, an editor or a
 virus scanner), serve undoes the renames it made, reports the failure and still starts. Both directories are
-gitignored; a leftover `dist.prev` is put back (when `dist` has no `index.html`) or deleted at the next start.
+gitignored. At the next start a leftover `dist.prev` is put back when `dist` has no `index.html`, before the safety
+checks above (restoring needs no npm), so the old bundle is served even with `--no-ui-build`, an out-of-date
+`node_modules`, a changed `frontend/` or no npm; `ui_build.note` then says it was restored. A leftover `dist.prev` next
+to a complete `dist`, and any `dist.next`, are deleted before the next rebuild.
 
-Whatever failed, serve then looks at `frontend/dist/index.html` again: present, it starts with the old bundle and
-reports `ui_build` STALE or UNVERIFIED with the reason; absent, it reports `ui_build` MISSING with the remedy (the
-Control Center pages return `FRONTEND_NOT_BUILT`, the API runs). `ui_build.status` in `GET /api/health` is FRESH,
-REBUILT (with `previous_status`), STALE, UNVERIFIED, MISSING or NOT_RECORDED (the server was not started by
-`aeos serve` from a checkout); `note` says when the old bundle in `dist.prev` could not be deleted. The manual
-rebuild, from the repository root:
+Whatever failed, serve then judges `frontend/dist` as it is on disk now (after a restore and after the build): a bundle
+is there, it starts with it and reports `ui_build` STALE or UNVERIFIED with the reason; no `index.html`, it reports
+`ui_build` MISSING with the remedy (the Control Center pages return `FRONTEND_NOT_BUILT`, the API runs).
+`ui_build.status` in `GET /api/health` is FRESH, REBUILT (with `previous_status`), STALE, UNVERIFIED, MISSING or
+NOT_RECORDED (the server was not started by `aeos serve` from a checkout); `note` says when the old bundle was
+restored from `dist.prev` or could not be deleted. The manual rebuild, from the repository root:
 
 ```bash
 cd frontend && npm ci --no-audit --no-fund && npm run build
@@ -283,14 +286,33 @@ hash of `requirements.lock`, so a pull that changes them marks the previous resu
 `runtime.frontend_fresh` VERIFIED. Caching: `index.html`, the SPA fallback and `aeos-build.json` are sent with
 `Cache-Control: no-cache`, the content-hashed `/assets/*` with `public, max-age=31536000, immutable`, `/api/*` keeps
 `no-store`, and a missing `/assets/*` file is a 404 (not `index.html`). A tab still on an older build reloads once on
-the `vite:preloadError` event (a time marker in `sessionStorage` stops a reload loop). The `post-merge` hook prints its
+the `vite:preloadError` event (a time marker in `sessionStorage` stops a reload loop).
+
+The Control Center says it too. `GET /api/health` carries `freshness` (additive; computed at most once per 30 s per
+server, so a refetch makes no git call inside the window and at most two git calls of at most 5 s each outside it):
+`served_bundle.frontend_tree` (the build record of the bundle served now, read from disk), `code_drift` of this server
+process (CURRENT, OUTSIDE_BACKEND, DRIFT with `loaded_commit`, `head_commit` and `changed_count`, RELOAD, UNKNOWN or
+NOT_RECORDED; the file names stay in the Doctor), `checked_at` and `max_age_seconds`. The Vite build bakes the frontend
+tree into the bundle (`__AEOS_FRONTEND_TREE__`, the same value as `aeos-build.json`). The header reads health with the
+normal query (refetched on window focus after 30 s, no polling) and shows a banner (text, icon, colour) only when:
+
+| Condition | Banner |
+|---|---|
+| the tree in the browser's bundle differs from `served_bundle.frontend_tree` | "Tampilan lebih lama dari server: muat ulang halaman" with a "Muat ulang" button |
+| `freshness.code_drift.status` is DRIFT | "Server menjalankan kode lama (<sha>): restart ./aeos serve" |
+| `ui_build.status` is STALE or MISSING | "Server menyajikan bundle tampilan usang (STALE): restart ./aeos serve atau build ulang frontend" (the reason and remedy in the tooltip) |
+
+In the Vite dev server (no baked tree), or when the served bundle has no build record, nothing is compared. The
+`post-merge` hook prints its
 reminder with `printf '%s\n'` (sh's `echo` turned the `\a` of `.\aeos.ps1` into a BEL character) and CI lints it with
 `shellcheck` like the `pre-push` hook.
 
 NOT-PROVEN: the rebuild, the directory swap on a locked file and the hook on Windows and macOS Intel (unit and
 git-subprocess tests with a fake build runner and a fake failing rename ran on macOS arm64 only; one real
 `npm run build -- --outDir dist.next` ran there); uncommitted backend edits are not code drift (only commits are
-compared).
+compared); a `git pull` that changes only `frontend/` while the server runs is not shown by the banner (the served
+bundle is unchanged until the restart rebuilds it; the `post-merge` hook and `runtime.frontend_fresh` report it); the
+banner is proven by component tests with a mocked health response, not in a browser against a real rebuild.
 
 ## SLIs and alerts
 

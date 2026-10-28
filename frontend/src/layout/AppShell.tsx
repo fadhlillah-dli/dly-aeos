@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { clsx } from "clsx";
-import { Building2, LogOut, Menu, Moon, Radio, Sun, User, X } from "lucide-react";
+import { AlertTriangle, Building2, LogOut, Menu, Moon, Radio, RefreshCw, Sun, User, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { get } from "../api/client";
@@ -9,6 +9,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { Button } from "../components/ui";
 import { useEventStream, type StreamStatus } from "../lib/events";
 import { absoluteTime, relativeTime } from "../lib/format";
+import { bundleFrontendTree, freshnessNotices, type Health } from "../lib/freshness";
 import { useTheme } from "../lib/theme";
 import type { Overview } from "../pages/overview/types";
 import { Breadcrumb } from "./Breadcrumb";
@@ -95,14 +96,43 @@ const MODE_LABEL: Record<string, string> = {
   DEMO: "DEMO",
 };
 
+/** One health query for the header and the freshness banner: refetched on window focus once it is older than the
+ * server's own freshness cache (30 s); no polling interval. */
+function useHealth() {
+  return useQuery({
+    queryKey: ["health"],
+    queryFn: () => get<Health>("/api/health"),
+    staleTime: 30_000,
+  });
+}
+
+/** R28: the page or the server is out of date (text + icon + colour; reload only on the owner's click). */
+export function FreshnessBanner({ bundleTree = bundleFrontendTree() }: { bundleTree?: string | null }) {
+  const health = useHealth();
+  const notices = freshnessNotices(health.data, bundleTree);
+  if (notices.length === 0) return null;
+  return (
+    <div data-testid="freshness-banner" role="status" className="mb-3 space-y-1 rounded-md border border-warn bg-warn-bg px-3 py-2 text-sm text-warn">
+      {notices.map((n) => (
+        <div key={n.kind} className="flex flex-wrap items-center gap-2" title={n.detail}>
+          <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">{n.text}</span>
+          {n.kind === "reload" && (
+            <Button variant="ghost" className="px-2 py-1 text-xs" onClick={() => window.location.reload()}>
+              <RefreshCw className="h-3.5 w-3.5" aria-hidden />
+              Muat ulang
+            </Button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** §35 header: environment, data freshness and LIVE/MOCK mode, computed from records (never assumed). */
 function ContextStatus({ stream, lastSeenAt, className }: { stream: StreamStatus; lastSeenAt: string | null; className?: string }) {
   const { domain, projectId } = useAuth();
-  const health = useQuery({
-    queryKey: ["health"],
-    queryFn: () => get<{ environment: string; version: string }>("/api/health"),
-    staleTime: 300_000,
-  });
+  const health = useHealth();
   // Same key and endpoint as the Ringkasan page, so both share one cached projection.
   const ov = useQuery({
     queryKey: ["cc-overview", domain, projectId],
@@ -301,6 +331,7 @@ export function AppShell() {
           </div>
         </header>
         <main className="min-w-0 flex-1 p-4 md:p-5">
+          <FreshnessBanner />
           <Breadcrumb />
           <Outlet />
         </main>

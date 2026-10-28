@@ -450,6 +450,55 @@ def test_a_release_install_is_never_rebuilt(settings, monkeypatch):
     assert fake.calls == [] and rec["status"] == "UNVERIFIED" and rec["basis"] == "release"
 
 
+def _interrupted_swap(repo: Path) -> None:
+    """What a swap stopped between its two renames leaves: the old (STALE) bundle in dist.prev, no dist."""
+    _stamp(repo, "f" * 40)
+    os.rename(repo / "frontend" / "dist", repo / "frontend" / "dist.prev")
+
+
+def test_a_restored_bundle_whose_rebuild_then_fails_is_stale_never_missing(settings, repo, monkeypatch):
+    """Round-3 bite: the leftover dist.prev is put back, the rebuild exits 1; the record must describe dist as it is
+    now (the restored, STALE bundle is served), not the MISSING status from before the restore."""
+    _interrupted_swap(repo)
+    _install(repo)
+    fake = FakeBuild(repo, code=1)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
+    rec, lines = _ensure(settings, repo)
+    assert len(fake.calls) == 1 and _index(repo) == OLD_INDEX
+    assert rec["status"] == "STALE", rec
+    assert "exited with 1" in rec["reason"] and "restored from frontend/dist.prev" in rec["note"]
+    assert rec["bundle_frontend_tree"] == "f" * 40
+    assert "Serving the old bundle" in lines[-1] and "No bundle to serve" not in lines[-1]
+
+
+@pytest.mark.parametrize("case", ["disabled", "no_npm", "dirty", "no_node_modules"])
+def test_a_leftover_old_bundle_is_restored_even_when_no_rebuild_is_allowed(settings, repo, monkeypatch, case):
+    """Round-3 bite: restoring dist.prev needs no npm, so it happens before the safety gate; otherwise every page
+    returned 503 FRONTEND_NOT_BUILT although a valid bundle was on disk."""
+    _interrupted_swap(repo)
+    if case != "no_node_modules":
+        _install(repo)
+    if case == "dirty":
+        (repo / "frontend" / "src" / "draft.ts").write_text("x\n", encoding="utf-8")
+    fake = FakeBuild(repo)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
+    lines: list[str] = []
+    rec = freshness.ensure_ui_fresh(settings, repo, remedy="REMEDY", enabled=case != "disabled", echo=lines.append,
+                                    which=(lambda n: None) if case == "no_npm" else (lambda n: f"/fake/bin/{n}"))
+    assert _index(repo) == OLD_INDEX, f"the old bundle in dist.prev was not restored: {rec}"
+    assert fake.calls == [] and not (repo / "frontend" / "dist.prev").exists()
+    assert rec["status"] == "STALE" and "not rebuilt" in rec["reason"], rec
+    assert "restored from frontend/dist.prev" in rec["note"] and "Serving the old bundle" in lines[0]
+
+
+def test_a_leftover_without_index_html_is_not_restored(settings, repo, monkeypatch):
+    """Near miss: a dist.prev without index.html is not a bundle; dist stays MISSING (nothing is invented)."""
+    _interrupted_swap(repo)
+    (repo / "frontend" / "dist.prev" / "index.html").unlink()
+    rec, _ = _ensure(settings, repo, enabled=False)
+    assert rec["status"] == "MISSING" and _index(repo) is None and "note" not in rec
+
+
 def _serve(settings, repo: Path, monkeypatch, *flags: str) -> tuple[Any, dict[str, Any]]:
     import uvicorn
     from typer.testing import CliRunner
@@ -518,6 +567,79 @@ def test_the_repository_ignores_the_temporary_build_directories():
 def test_health_without_a_serve_record_says_not_recorded(settings):
     with TestClient(make_app(settings), base_url="http://testserver") as c:
         assert c.get("/api/health").json()["ui_build"]["status"] == "NOT_RECORDED"
+
+
+# ----------------------------------------------------------------------------------------- /api/health freshness
+
+
+class GitCounter:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.real = freshness._git
+
+    def __call__(self, repo: Path, *args: str, timeout: float = 30) -> str | None:
+        self.calls.append(args)
+        return self.real(repo, *args, timeout=timeout)
+
+
+@pytest.fixture
+def health(settings, repo, monkeypatch):
+    """GET /api/health of a server started from *repo* (its dist is the served bundle), with a controllable clock."""
+    from aeos.api import app as app_mod
+
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(freshness, "CLOCK", lambda: clock["now"])
+    monkeypatch.setattr(app_mod, "_frontend_dist", lambda: repo / "frontend" / "dist")
+    counter = GitCounter()
+    with TestClient(make_app(settings), base_url="http://testserver") as c:
+        def get() -> dict[str, Any]:
+            monkeypatch.setattr(freshness, "_git", counter)
+            try:
+                return c.get("/api/health").json()
+            finally:
+                monkeypatch.setattr(freshness, "_git", counter.real)
+        yield get, clock, counter
+
+
+def test_health_freshness_reports_the_served_stamp_and_current_code(settings, repo, health):
+    get, _, _ = health
+    _stamp(repo, _head_tree(repo))
+    freshness.record_serve_start(settings, repo, ui_build=None)
+    body = get()
+    block = body["freshness"]
+    assert block["served_bundle"]["frontend_tree"] == _head_tree(repo)
+    assert block["code_drift"]["status"] == "CURRENT" and block["max_age_seconds"] == 30
+    assert "changed" not in block["code_drift"]  # file names stay in the Doctor
+    assert body["ui_build"] and body["controller"]  # additive: the existing fields stay
+
+
+def test_health_freshness_reports_backend_drift_with_the_loaded_commit(settings, repo, health):
+    get, _, _ = health
+    loaded = _git(repo, "rev-parse", "HEAD")
+    freshness.record_serve_start(settings, repo, ui_build=None)
+    _commit(repo, "backend/app.py", "V = 3\n")
+    drift = get()["freshness"]["code_drift"]
+    assert drift["status"] == "DRIFT" and drift["loaded_commit"] == loaded and drift["changed_count"] == 1
+
+
+def test_health_freshness_is_cached_one_git_call_per_window(settings, repo, health):
+    """Bite: health is refetched on every focus; within the 30 s window it makes no git call at all."""
+    get, clock, counter = health
+    freshness.record_serve_start(settings, repo, ui_build=None)
+    first = get()["freshness"]
+    assert counter.calls == [("rev-parse", "HEAD")]
+    clock["now"] += 29
+    _commit(repo, "backend/app.py", "V = 4\n")
+    assert get()["freshness"] == first and len(counter.calls) == 1  # cached: same block, no git call
+    clock["now"] += 2
+    assert get()["freshness"]["code_drift"]["status"] == "DRIFT" and len(counter.calls) == 3  # rev-parse + diff
+
+
+def test_health_freshness_without_a_serve_record_says_not_recorded(settings, health):
+    get, _, counter = health
+    block = get()["freshness"]
+    assert block["code_drift"]["status"] == "NOT_RECORDED" and counter.calls == []
+    assert block["served_bundle"]["frontend_tree"] is None  # the fixture bundle has no build record
 
 
 # ----------------------------------------------------------------------------------------- cache headers

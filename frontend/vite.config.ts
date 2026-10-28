@@ -21,19 +21,27 @@ export function aeosBuildInfo(): Plugin {
     }
   };
   let outDir = resolve(process.cwd(), "dist");
+  // Read once per build: the tree baked into the bundle and the one in aeos-build.json are the same value.
+  let stamp: { tree: string | null; head: string | null } | null = null;
+  const read = () => (stamp ??= { tree: git("rev-parse", "HEAD:./"), head: git("rev-parse", "HEAD") });
   return {
     name: "aeos-build-info",
     apply: "build",
+    // R28: the bundle knows the frontend tree it was built from, so the running page can compare it with the stamp
+    // of the bundle the server serves now (/api/health freshness.served_bundle) and ask for a reload.
+    config() {
+      return { define: { __AEOS_FRONTEND_TREE__: JSON.stringify(read().tree) } };
+    },
     configResolved(config) {
       outDir = resolve(config.root, config.build.outDir);
     },
     closeBundle() {
-      const tree = git("rev-parse", "HEAD:./");
+      const { tree, head } = read();
       const status = git("status", "--porcelain", "--untracked-files=normal", "--", ".");
       const info = {
         schema: 1,
         frontend_tree: tree,
-        head: git("rev-parse", "HEAD"),
+        head,
         clean: status === "",
         built_at: new Date().toISOString(),
         note: tree ? null : "not built inside a git checkout: correspondence to a commit cannot be shown",
