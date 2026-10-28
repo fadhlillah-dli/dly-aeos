@@ -219,11 +219,10 @@ def _project_visible(session: Session, principal: Principal, domain: str) -> Cal
     return visible
 
 
-def _credential_block(session: Session, r: ModelRoute, principal: Principal,
-                      states: dict[str, str] | None) -> dict[str, Any]:
-    domain = _credential_domain(r, principal)
-    return service.credential_view(r, domain=domain, states=states,
-                                   project_visible=_project_visible(session, principal, domain))
+def _withheld(session: Session, routes: list[ModelRoute], principal: Principal, domain: str) -> dict[str, str]:
+    """The credential reference names of *routes* this viewer of *domain* may not see (service.withheld_refs: the one
+    rule of the credential block), to replace in every route payload (L12)."""
+    return service.withheld_refs(routes, domain=domain, project_visible=_project_visible(session, principal, domain))
 
 
 def _counts_as_active(item: dict[str, Any]) -> bool:
@@ -242,7 +241,9 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         r.config_hash = service.compute_config_hash(r)
     runtime = runtime if runtime is not None else service.runtime_context()
     q = service.quota_exhausted(session, r)
-    return {
+    domain = _credential_domain(r, principal)
+    visible = _project_visible(session, principal, domain)
+    view = {
         "route_key": r.route_key, "pool": r.pool, "provider": r.provider, "endpoint": r.endpoint,
         "model_id": r.model_id, "alias": r.alias, "display_name": r.display_name,
         "resolved_version": r.resolved_version or "UNKNOWN", "resolved_observed_at": _iso(r.resolved_observed_at),
@@ -261,7 +262,7 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "active_decision": _active_decision_view(session, r),
         # metadata only (stored or not, never the value; no provider call): the router rejects a route whose key is
         # not stored or whose store cannot answer, so the dashboard must not show it as usable
-        "credential": _credential_block(session, r, principal, credential_states),
+        "credential": service.credential_view(r, domain=domain, states=credential_states, project_visible=visible),
         "quota": ({"state": "EXHAUSTED", "scope": q.scope, "resets_at": _iso(q.resets_at), "source": q.source}
                   if q else {"state": "UNKNOWN_OR_OK", "note": "tidak ada observasi kuota habis"}),
         "source_refs": r.source_refs, "notes": r.notes,
@@ -281,6 +282,8 @@ def route_view(session: Session, r: ModelRoute, principal: Principal,
         "subscription": _subscription_view(session, r, principal),
         "free_tier": _free_tier_view(session, r),
     }
+    # a reference name private to another domain or to a project the viewer cannot see never leaves (L12)
+    return service.withhold_refs(view, service.withheld_refs([r], domain=domain, project_visible=visible))
 
 
 def _free_tier_view(session: Session, r: ModelRoute) -> dict[str, Any] | None:
@@ -346,14 +349,20 @@ def route_eligibility(
     decision = service.eligible_routes(db, domain=domain, data_classification=classification, needs_tools=needs_tools,
                                        min_context=min_context, pool=pool, tools=tools)
     ranked = service.rank(db, decision.eligible, role) if decision.eligible else []
+    # rejection reasons quote credential references: names private to another domain (the session's selected domain
+    # wins over the queried one) or to a project the viewer cannot see are withheld (L12)
+    active = getattr(principal, "active_domain", None)
+    keys = list(decision.rejected)
+    routes = list(db.scalars(select(ModelRoute).where(ModelRoute.route_key.in_(keys)))) if keys else []
+    withheld = _withheld(db, routes, principal, Domain(active).value if active is not None else domain)
     db.rollback()  # read-only: never persist incidental hash backfills from a GET
-    return {
+    return service.withhold_refs({
         "domain": domain, "classification": classification, "role": role, "pool": pool,
         "eligible": [{"route_key": r.route_key, "rank": i + 1, "basis": r.basis, "score": r.score,
                       "priority": r.priority} for i, r in enumerate(ranked)],
         "rejected": decision.rejected, "reason": decision.reason,
         "checked_at": utcnow().isoformat(), "source": "routing hard filters (§23)", "mode": "LIVE",
-    }
+    }, withheld)
 
 
 @router.post("/api/routes/refresh-catalog")
@@ -392,10 +401,13 @@ def get_route(route_key: str, db: DB, principal: CurrentPrincipal) -> dict[str, 
          "resets_at": _iso(q.resets_at)}
         for q in db.scalars(select(QuotaState).where(QuotaState.provider == r.provider))
     ]
+    # config (mode_params.credential_ref) and decision rationales may quote a reference name: the same rule as the
+    # credential block withholds a name private to another domain or to a project the viewer cannot see (L12)
+    withheld = _withheld(db, [r], principal, _credential_domain(r, principal))
     db.rollback()
     # checked_at = the route's last catalog/pricing check (null = never checked); generated_at = read time
-    return {**view, "source": "model_routes + decisions + quota_states",
-            "checked_at": _iso(r.pricing_checked_at), "generated_at": _iso(utcnow())}
+    return service.withhold_refs({**view, "source": "model_routes + decisions + quota_states",
+                                  "checked_at": _iso(r.pricing_checked_at), "generated_at": _iso(utcnow())}, withheld)
 
 
 class TermsRecordBody(BaseModel):

@@ -71,6 +71,12 @@
   },
   "last_used": null,
   "active_decision": null,
+  "credential": {
+    "state": "MISSING",
+    "ref": "workers/opencode-zen",
+    "reason": "credential workers/opencode-zen not stored: aeos secrets set workers/opencode-zen",
+    "domain": "PERSONAL"
+  },
   "quota": {
     "state": "UNKNOWN_OR_OK",
     "note": "tidak ada observasi kuota habis"

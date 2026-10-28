@@ -30,7 +30,7 @@ observe -> record with incident -> count strikes -> threshold -> tool -> bite te
 
 `level` is the strongest control that exists today: written-rule, memory, process, test, ci-gate,
 git-hook, harness-hook or tool-refusal. A `PENDING:` tool raises it once merged.
-Evidence: rows describe incidents of 2026-10-26 and 2026-10-27; E1 = static reading, E2 = unit run on macOS arm64.
+Evidence: rows describe incidents of 2026-10-26 to 2026-10-28; E1 = static reading, E2 = unit run on macOS arm64.
 Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PROVEN).
 
 ## Table 1 - Rules with incidents
@@ -48,7 +48,7 @@ Nothing here is proven on Windows or macOS Intel unless a CI run says so (NOT-PR
 | L9 | 2026-10-26 | A test file committed literal AI-attribution samples and tripped the repository hygiene scan | public-exposure | 1 | test | tests/unit/test_repository_hygiene.py | yes | Samples come from one shared builder that assembles them from parts |
 | L10 | 2026-10-26 | An agent re-implemented attribution regexes instead of reusing aeos.core.attribution; on 2026-10-27 two parallel branches each implemented the changelog fragment format | process | 2 | test | tests/unit/test_repository_hygiene.py | yes | Only one module defines attribution patterns and a test fails on a second copy |
 | L11 | 2026-10-26 | An agent widened the scope of an owner decision beyond what the owner said | process | 1 | written-rule | - | yes | Decisions are recorded with an exact scope that tools compare against the change |
-| L12 | 2026-10-26 | An inventory change leaked one domain's decision into the other domain's view | process | 1 | written-rule | - | yes | A differential domain test fails on any cross-domain leak |
+| L12 | 2026-10-26 | An inventory change leaked one domain's decision into the other domain's view; on 2026-10-28 the route detail config and the eligibility rejection reasons quoted office/ credential reference names to PERSONAL sessions although the credential block withheld them (pre-existing, found in review) | process | 2 | written-rule | - | yes | A differential domain test fails on any cross-domain leak |
 | L13 | 2026-10-26 | Owner-run scripts failed twice on validation rules that could have been checked first | process | 2 | written-rule | - | yes | A dry-run harness runs every owner script against a temporary database automatically |
 | L14 | 2026-10-26 | Background test runs failed on a missing dependency and on zsh not word-splitting a variable, then again in a 'set -- $var' loop, and a third time on 2026-10-27 in the session itself | process | 3 | tool-refusal | scripts/run_tests.sh | yes | One test-runner script owns environment, deadline and failure marker |
 | L15 | 2026-10-26 | Verifier runs were QUARANTINED at random under load and were re-run, not fixed; the cause was not timing: psutil raised SystemError reading a dying unrelated process and it escaped the process sweep; on 2026-10-27 a memory-cap test that flaked under load was first 'fixed' as a timeout race, and its own diagnostics then showed macOS compressing the hog's zero-filled memory so the cap never fired | correctness | 5 | test | backend/aeos/verification/procgroup.py | yes | The sweep or psutil changes; re-run the churn tests in tests/unit/test_verification_procs.py |

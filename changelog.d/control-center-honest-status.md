@@ -27,7 +27,13 @@
   looked up (an OFFICE-only route in a PERSONAL session reads "TRIAL · aktif hanya di domain lain", not "tidak dapat
   dipakai", and no remedy). A reference name private to another domain (`office/` outside OFFICE) or to a project the
   viewer cannot see is never quoted (a path problem keeps its reason with the name replaced; an otherwise usable
-  `projects/` reference is `WITHHELD`: neither its name nor its status); `counts.approved` and the Models page count a route as active only with PRESENT or
+  `projects/` reference is `WITHHELD`: neither its name nor its status). The same rule (one owner,
+  `routing.service.withheld_refs`) covers every route payload: the route detail `config`
+  (`mode_params.credential_ref`), the `/api/routes/eligibility` rejection reasons and the decision rationales show
+  `<office/ reference, name withheld>` (or the `projects/` equivalent) to a session that may not see the name, the
+  session's selected domain deciding over a queried one; OFFICE sessions and project members still see it, and a
+  `workers/` name is quoted as before (these two leaks were pre-existing, found in review; LESSONS L12 strike 2).
+  `counts.approved` and the Models page count a route as active only with PRESENT or
   NOT_NEEDED and otherwise show "Aktif, tidak dapat dipakai: kunci belum disimpan" (or "... vault terkunci"), not
   sorted first, with `aeos secrets set <ref>` (or `aeos vault unseal`) in the drawer. `secret.presence_changed` and
   `secret.store_changed` (source `secrets`) now refresh routes, route detail and Readiness; the Models page refetches

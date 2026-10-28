@@ -109,6 +109,12 @@
     "status": "LAST_USED"
   },
   "active_decision": null,
+  "credential": {
+    "state": "MISSING",
+    "ref": "workers/opencode-go",
+    "reason": "credential workers/opencode-go not stored: aeos secrets set workers/opencode-go",
+    "domain": "PERSONAL"
+  },
   "quota": {
     "state": "UNKNOWN_OR_OK",
     "note": "tidak ada observasi kuota habis"

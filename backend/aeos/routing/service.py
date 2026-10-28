@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -573,6 +573,46 @@ def _ref_withheld(ref: str, *, domain: str, project_visible: Callable[[str], boo
     return not (project and project_visible is not None and project_visible(project))
 
 
+def withheld_ref_label(ref: str) -> str:
+    """What a payload shows in place of a reference name the viewer may not see: the namespace, never the name."""
+    return f"<{ref.partition('/')[0]}/ reference, name withheld>"
+
+
+def withheld_refs(routes: Iterable[ModelRoute], *, domain: str,
+                  project_visible: Callable[[str], bool] | None) -> dict[str, str]:
+    """{configured ``mode_params.credential_ref``: label} of *routes* whose name the viewer of *domain* may not see
+    (``_ref_withheld``, the one rule of the credential block). Empty when every name may be quoted."""
+    out: dict[str, str] = {}
+    for route in routes:
+        ref = (route.mode_params or {}).get("credential_ref")
+        name = str(ref) if ref else ""
+        if name and name not in out and _ref_withheld(name, domain=domain, project_visible=project_visible):
+            out[name] = withheld_ref_label(name)
+    return out
+
+
+def withhold_refs(payload: Any, names: dict[str, str]) -> Any:
+    """*payload* with every name of *names* (``withheld_refs``) replaced by its label in every string, keys and values,
+    at any depth: a route payload (view, config, eligibility reasons, decision rationales) never quotes a reference
+    name private to another domain or to a project the viewer cannot see (L12)."""
+    if not names:
+        return payload
+    ordered = sorted(names, key=len, reverse=True)  # a longer name first: never a partial replacement of it
+
+    def walk(value: Any) -> Any:
+        if isinstance(value, str):
+            for name in ordered:
+                value = value.replace(name, names[name])
+            return value
+        if isinstance(value, dict):
+            return {walk(k): walk(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [walk(v) for v in value]
+        return value
+
+    return walk(payload)
+
+
 def credential_view(route: ModelRoute, *, domain: str, states: dict[str, str] | None = None,
                     project_visible: Callable[[str], bool] | None = None) -> dict[str, Any]:
     """{state, ref, reason, domain} for *route* in *domain*, built from the same rules as ``credential_rejections``
@@ -595,8 +635,7 @@ def credential_view(route: ModelRoute, *, domain: str, states: dict[str, str] | 
     if problems:
         reason = problems[0]
         if withheld and configured is not None:
-            ns = configured.partition("/")[0]
-            reason = reason.replace(configured, f"<{ns}/ reference, name withheld>")
+            reason = reason.replace(configured, withheld_ref_label(configured))
         return {"state": VIEW_CREDENTIAL_MISSING, "ref": None if withheld else configured,
                 "reason": reason, "domain": domain}
     if not refs:
