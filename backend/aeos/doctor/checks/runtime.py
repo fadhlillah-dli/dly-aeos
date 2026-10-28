@@ -134,11 +134,14 @@ def _served_dist(ctx: CheckContext) -> Path | None:
 
 
 def _dist_fp(ctx: CheckContext) -> dict[str, Any]:
+    return {"dist": ctx.runner.stat(str(ctx.repo / "frontend" / "dist" / "index.html")) or {"present": False}}
+
+
+def _fresh_fp(ctx: CheckContext) -> dict[str, Any]:
     """Bundle files plus the committed frontend tree of HEAD: a git pull that changes ``frontend/`` re-runs the check,
     a backend-only commit does not."""
     dist = ctx.repo / "frontend" / "dist"
-    return {"dist": ctx.runner.stat(str(dist / "index.html")) or {"present": False},
-            "build_record": ctx.runner.stat(str(dist / "aeos-build.json")) or {"present": False},
+    return {**_dist_fp(ctx), "build_record": ctx.runner.stat(str(dist / "aeos-build.json")) or {"present": False},
             "head_frontend_tree": _ops().frontend_head_tree(ctx.repo)}
 
 
@@ -150,6 +153,9 @@ def _rebuild_remedy(evidence: str) -> Remedy:
                   rollback="build ulang dari commit sebelumnya", evidence_to_collect=evidence)
 
 
+# R28: existence and freshness are two checks. Only a missing bundle stops the dashboard from opening (critical for
+# CAN_OPEN_DASHBOARD, doctor exit 1); a stale or unverified one still opens it with an older UI, so
+# runtime.frontend_fresh sits in the required tier: CAN_OPEN_DASHBOARD DEGRADED, never BLOCKED, exit 0.
 @check("runtime.frontend_dist", "RUNTIME", "Control Center sudah di-build", component_id="control-center-frontend",
        ttl_seconds=3600, severity_fail="CRITICAL", fingerprint=_dist_fp, observation="installation",
        invalidators=("repo:lockfile",))
@@ -158,23 +164,39 @@ def runtime_frontend_dist(ctx: CheckContext) -> Outcome:
     if dist is None:
         return Outcome("MISSING", "Frontend belum di-build; dashboard tidak dapat dibuka (API tetap berjalan).",
                        evidence={"looked_in": ["<repo>/frontend/dist"]}, error_code="FRONTEND_NOT_BUILT",
-                       remedy=Remedy(operation="Build Control Center dari lockfile (dari root repo)",
+                       remedy=Remedy(operation="Build Control Center dari lockfile (dari root repo); aeos serve dari "
+                                               "checkout git membangunnya sekali bila node_modules sesuai lockfile",
                                      command=frontend_build_command(),
                                      source="frontend/package-lock.json", target="<repo>/frontend/dist",
                                      privilege="pengguna lokal", rollback="hapus frontend/dist",
                                      evidence_to_collect="frontend/dist/index.html ada"))
+    return Outcome("VERIFIED", "Build Control Center tersedia (kesesuaian dengan kode: runtime.frontend_fresh).",
+                   evidence={"dist": logical(ctx, dist)}, target_identity=logical(ctx, dist))
+
+
+@check("runtime.frontend_fresh", "RUNTIME", "Bundle Control Center sesuai kode", component_id="control-center-frontend",
+       ttl_seconds=3600, fingerprint=_fresh_fp, observation="installation", invalidators=("repo:lockfile",),
+       ok={"VERIFIED", "NOT_APPLICABLE"},
+       description="frontend/dist/aeos-build.json harus mencatat build bersih dari git rev-parse HEAD:frontend (rilis: "
+                   "kesesuaian dari provenance). Usang atau UNVERIFIED: dashboard tetap terbuka dengan UI lama "
+                   "(DEGRADED, bukan BLOCKED).")
+def runtime_frontend_fresh(ctx: CheckContext) -> Outcome:
+    dist = _served_dist(ctx)
+    if dist is None:
+        return Outcome("NOT_APPLICABLE", "Belum ada bundle untuk dibandingkan; runtime.frontend_dist melaporkan build "
+                                         "yang hilang.", evidence={"looked_in": ["<repo>/frontend/dist"]})
     state = _ops().ui_bundle_state(ctx.settings, ctx.repo, dist)
     evidence: dict[str, Any] = {"dist": logical(ctx, dist), **{k: state.get(k) for k in (
         "basis", "bundle_frontend_tree", "head_frontend_tree", "release_id", "built_at", "clean", "reason")
         if state.get(k) is not None}}
     if state["status"] == "FRESH":
         tree = str(state.get("bundle_frontend_tree") or "")[:12]
-        return Outcome("VERIFIED", f"Build Control Center tersedia dan sesuai frontend {state['basis']} ({tree}).",
+        return Outcome("VERIFIED", f"Bundle Control Center sesuai frontend {state['basis']} ({tree}).",
                        evidence=evidence, target_identity=logical(ctx, dist))
     if state["status"] == "STALE":
         return Outcome("CONFIGURED", f"Bundle Control Center usang: {state['reason']}. Dashboard menyajikan UI lama.",
                        evidence=evidence, error_code="FRONTEND_STALE", target_identity=logical(ctx, dist),
-                       remedy=_rebuild_remedy("runtime.frontend_dist VERIFIED (frontend_tree build = HEAD:frontend)"))
+                       remedy=_rebuild_remedy("runtime.frontend_fresh VERIFIED (frontend_tree build = HEAD:frontend)"))
     return Outcome("UNKNOWN", f"Bundle Control Center UNVERIFIED: {state.get('reason')}.", evidence=evidence,
                    error_code="FRONTEND_BUILD_UNVERIFIED", target_identity=logical(ctx, dist),
                    remedy=_rebuild_remedy("frontend/dist/aeos-build.json bersih dan sama dengan HEAD:frontend"))

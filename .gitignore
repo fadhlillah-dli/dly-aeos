@@ -15,6 +15,9 @@ dist/
 # Node / frontend
 node_modules/
 frontend/dist/
+# aeos serve builds into dist.next and swaps it in; dist.prev is the old bundle until deleted (R28)
+frontend/dist.next/
+frontend/dist.prev/
 *.tsbuildinfo
 .vite/
 

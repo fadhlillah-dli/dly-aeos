@@ -8,9 +8,11 @@ imported at start. This module is the single owner of both questions:
   commit ``HEAD`` (one implementation for checkouts and release builds). An extracted release uses the verdict its
   provenance recorded at build time (the same function, run when the release was built). No record, a dirty build or
   no git -> UNVERIFIED, never FRESH.
-* **Self-heal at start** (``ensure_ui_fresh``): ``aeos serve`` rebuilds a STALE bundle once, only when
-  ``frontend/node_modules`` was installed from the current lockfile and ``frontend/`` has no local change; it never
-  runs ``npm ci``/``npm install`` (AGENTS.md: no auto-install) and never blocks the start.
+* **Self-heal at start** (``ensure_ui_fresh``): ``aeos serve`` rebuilds a STALE, MISSING or UNVERIFIED bundle of a
+  git checkout once, only when ``frontend/node_modules`` was installed from the current lockfile and ``frontend/`` has
+  no local change; it builds into ``frontend/dist.next`` and swaps that in only after success (a failed build leaves
+  the old bundle untouched), never runs ``npm ci``/``npm install`` (AGENTS.md: no auto-install) and never blocks the
+  start.
 * **Code drift** (``code_drift``): ``aeos serve`` records the commit it loaded (``<data>/run/serve.json``); a later
   HEAD that changes backend-relevant paths means the server runs old code until it is restarted.
 """
@@ -167,10 +169,18 @@ def _run_build(argv: list[str], cwd: Path, timeout: float, log_path: Path) -> in
             raise
 
 
-# The runner and the PATH lookup ``ensure_ui_fresh`` uses; tests replace them (tests/conftest.py refuses a real
-# npm build).
+# The runner, the PATH lookup and the directory rename ``ensure_ui_fresh`` uses; tests replace them
+# (tests/conftest.py refuses a real npm build).
 BUILD_RUNNER: BuildRunner = _run_build
 WHICH: Callable[[str], str | None] = shutil.which
+RENAME: Callable[[Path, Path], None] = os.rename
+
+# Vite empties its outDir when it starts writing, so a build killed or failing after that point would leave no
+# index.html. ``aeos serve`` builds into NEXT_DIR and swaps it in only after the build succeeded (PREV_DIR holds the
+# old bundle between the two renames). Both are gitignored, so they never make frontend/ dirty.
+NEXT_DIR = "dist.next"
+PREV_DIR = "dist.prev"
+REBUILDABLE = frozenset({"STALE", "MISSING", "UNVERIFIED"})
 
 
 def _ui_record(status: str, state: dict[str, Any], reason: str | None = None, **extra: Any) -> dict[str, Any]:
@@ -182,62 +192,166 @@ def _ui_record(status: str, state: dict[str, Any], reason: str | None = None, **
     return rec
 
 
+def _err(exc: BaseException) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _remove_tree(path: Path) -> str | None:
+    """Delete *path* (a directory); the failure text, or None. Windows: a locked file makes this fail."""
+    if not path.exists():
+        return None
+    try:
+        shutil.rmtree(path)
+    except OSError as exc:
+        return _err(exc)
+    return None
+
+
+def _clear_leftovers(frontend: Path) -> str | None:
+    """Remove what an earlier, interrupted rebuild left behind. An old bundle moved aside (PREV_DIR) is put back
+    when ``dist`` has no index.html (the swap stopped between its two renames). Returns the failure, or None."""
+    dist, nxt, prev = frontend / "dist", frontend / NEXT_DIR, frontend / PREV_DIR
+    if prev.exists():
+        if not (dist / "index.html").is_file() and (prev / "index.html").is_file():
+            failed = _remove_tree(dist)
+            if failed is None:
+                try:
+                    RENAME(prev, dist)
+                except OSError as exc:
+                    failed = _err(exc)
+            if failed is not None:
+                return f"could not restore the old bundle from frontend/{PREV_DIR} ({failed})"
+        else:
+            failed = _remove_tree(prev)
+            if failed is not None:
+                return f"could not delete frontend/{PREV_DIR} left by an earlier rebuild ({failed})"
+    failed = _remove_tree(nxt)
+    if failed is not None:
+        return f"could not delete frontend/{NEXT_DIR} left by an earlier build ({failed})"
+    return None
+
+
+def _swap_in(frontend: Path) -> tuple[str | None, str | None]:
+    """Move NEXT_DIR to ``dist`` (the old ``dist`` via PREV_DIR, deleted afterwards). Returns (failure, note): on a
+    failure every rename done so far is undone where possible; the note says what could not be cleaned up."""
+    dist, nxt, prev = frontend / "dist", frontend / NEXT_DIR, frontend / PREV_DIR
+    had_old = dist.exists()
+    if had_old:
+        try:
+            RENAME(dist, prev)
+        except OSError as exc:  # Windows: a file in dist is open (another server, an editor, a virus scanner)
+            note = _remove_tree(nxt)
+            return (f"could not move frontend/dist aside ({_err(exc)}); a file in it may be locked",
+                    f"frontend/{NEXT_DIR} could not be deleted ({note})" if note else None)
+    try:
+        RENAME(nxt, dist)
+    except OSError as exc:
+        failure = f"could not move frontend/{NEXT_DIR} to frontend/dist ({_err(exc)})"
+        if had_old:
+            try:
+                RENAME(prev, dist)
+            except OSError as exc2:
+                failure += f"; restoring the old bundle failed too ({_err(exc2)}), it is in frontend/{PREV_DIR}"
+        return failure, None
+    if had_old:
+        failed = _remove_tree(prev)
+        if failed is not None:
+            return None, (f"the old bundle in frontend/{PREV_DIR} could not be deleted ({failed}); the next rebuild "
+                          "deletes it")
+    return None, None
+
+
+def _blocked(repo: Path, enabled: bool, npm: str | None) -> str | None:
+    """Why a rebuild is not safe now, or None. Never installs anything (AGENTS.md: no auto-install)."""
+    frontend = repo / "frontend"
+    if not enabled:
+        return "--no-ui-build"
+    if not (frontend / "node_modules").is_dir():
+        return "frontend/node_modules is missing (npm ci is never run automatically)"
+    ok, why = lockfile_matches_install(frontend)
+    if not ok:
+        return f"{why}; run npm ci first"
+    ok, why = frontend_source_clean(repo)
+    if not ok:
+        return why
+    if npm is None:
+        return "npm not found on PATH"
+    return None
+
+
+def _serving(status: str) -> str:
+    return ("No bundle to serve: the Control Center pages return FRONTEND_NOT_BUILT" if status == "MISSING"
+            else "Serving the old bundle")
+
+
 def ensure_ui_fresh(settings: Settings, repo: Path, *, remedy: str, enabled: bool = True,
                     which: Callable[[str], str | None] | None = None, timeout: float = UI_BUILD_TIMEOUT_SECONDS,
                     echo: Callable[[str], None] = print) -> dict[str, Any]:
-    """Rebuild a STALE bundle once before the server starts, when that is safe; never raises, never blocks.
+    """Rebuild a STALE, MISSING or UNVERIFIED bundle of a git checkout once before the server starts, when that is
+    safe; never raises, never blocks.
 
-    *remedy* is the operator's way out, printed and reported when the bundle stays STALE.
+    The build goes to ``frontend/dist.next`` and replaces ``frontend/dist`` only after it succeeded and its build
+    record matches HEAD, so a failed, killed or timed-out build leaves the old bundle untouched. *remedy* is the
+    operator's way out, printed and reported when the bundle is not current.
 
-    Returns the ``ui_build`` record: FRESH (nothing to do), REBUILT, STALE (not rebuilt or the build failed; the old
-    bundle is served), UNVERIFIED or MISSING (left as they are, with the reason)."""
+    Returns the ``ui_build`` record: FRESH (nothing to do), REBUILT, or STALE / UNVERIFIED / MISSING (not rebuilt or
+    the build failed, with the reason; MISSING whenever ``frontend/dist/index.html`` is absent afterwards)."""
+    from aeos.operations import release
+
     try:
         state = bundle_state(settings, repo)
     except Exception as exc:  # never block the start on the check itself
         return _ui_record("UNVERIFIED", {}, f"freshness check failed ({type(exc).__name__})")
-    if state["status"] != "STALE":
-        return _ui_record(state["status"], state)
+    status = state["status"]
+    if status not in REBUILDABLE:
+        return _ui_record(status, state)
+    # Only a git checkout can be rebuilt and then proven: a release keeps the bundle its provenance pins, and a tree
+    # without git (no HEAD:frontend) would be UNVERIFIED again after any build.
+    if release.release_id_of_root(settings, repo) is not None or frontend_head_tree(repo) is None:
+        return _ui_record(status, state, **({"remedy": remedy} if status == "MISSING" else {}))
     frontend = repo / "frontend"
-    blocked: str | None = None
     npm = (which or WHICH)("npm")  # Windows: npm.cmd through PATHEXT
-    if not enabled:
-        blocked = "--no-ui-build"
-    elif not (frontend / "node_modules").is_dir():
-        blocked = "frontend/node_modules is missing (npm ci is never run automatically)"
-    else:
-        ok, why = lockfile_matches_install(frontend)
-        if not ok:
-            blocked = f"{why}; run npm ci first"
-        else:
-            ok, why = frontend_source_clean(repo)
-            if not ok:
-                blocked = why
-            elif npm is None:
-                blocked = "npm not found on PATH"
+    blocked = _blocked(repo, enabled, npm)
     if blocked is not None:
         reason = f"{state['reason']}; not rebuilt: {blocked}"
-        echo(f"WARNING: Control Center bundle is STALE ({reason}). Serving the old bundle. Remedy: {remedy}")
-        return _ui_record("STALE", state, reason, remedy=remedy)
+        echo(f"WARNING: Control Center bundle is {status} ({reason}). {_serving(status)}. Remedy: {remedy}")
+        return _ui_record(status, state, reason, remedy=remedy)
     log_path = settings.layout.logs / UI_BUILD_LOG
-    echo(f"Control Center bundle is stale ({state['reason']}); running 'npm run build' once "
-         f"(timeout {int(timeout)}s, log <data>/logs/{UI_BUILD_LOG}).")
-    failure: str | None = None
-    try:
-        code = BUILD_RUNNER([str(npm), "run", "build"], frontend, timeout, log_path)
-        if code != 0:
-            failure = f"npm run build exited with {code}"
-    except subprocess.TimeoutExpired:
-        failure = f"npm run build timed out after {int(timeout)}s"
-    except Exception as exc:
-        failure = f"npm run build could not run ({type(exc).__name__}: {exc})"
+    log = f"<data>/logs/{UI_BUILD_LOG}"
+    echo(f"Control Center bundle is {status} ({state['reason']}); running 'npm run build' once into "
+         f"frontend/{NEXT_DIR} (timeout {int(timeout)}s, log {log}).")
+    note: str | None = None
+    failure = _clear_leftovers(frontend)
+    if failure is None:
+        try:
+            code = BUILD_RUNNER([str(npm), "run", "build", "--", "--outDir", NEXT_DIR], frontend, timeout, log_path)
+            if code != 0:
+                failure = f"npm run build exited with {code}"
+        except subprocess.TimeoutExpired:
+            failure = f"npm run build timed out after {int(timeout)}s"
+        except Exception as exc:
+            failure = f"npm run build could not run ({_err(exc)})"
+    if failure is None:
+        built = bundle_state(settings, repo, frontend / NEXT_DIR)
+        if built["status"] != "FRESH":
+            failure = f"the build finished but frontend/{NEXT_DIR} is {built['status']}: {built.get('reason')}"
+        else:
+            failure, note = _swap_in(frontend)
     if failure is None:
         after = bundle_state(settings, repo)
         if after["status"] == "FRESH":
-            return _ui_record("REBUILT", after, None, log=f"<data>/logs/{UI_BUILD_LOG}")
-        failure = f"the build finished but the bundle is {after['status']}: {after.get('reason')}"
+            extra = {"log": log, "previous_status": status, **({"note": note} if note else {})}
+            return _ui_record("REBUILT", after, None, **extra)
+        failure = f"the swapped bundle is {after['status']}: {after.get('reason')}"
+    else:
+        cleanup = _remove_tree(frontend / NEXT_DIR)  # the old dist is untouched; drop the partial build
+        if cleanup is not None:
+            note = f"frontend/{NEXT_DIR} could not be deleted ({cleanup})"
+    # whatever failed, report what is on disk now: no index.html means MISSING, not "serving the old bundle"
+    final = "MISSING" if not (frontend / "dist" / "index.html").is_file() else status
     reason = f"{state['reason']}; rebuild failed: {failure}"
-    echo(f"WARNING: {reason}. Serving the old bundle. Log: <data>/logs/{UI_BUILD_LOG}. Remedy: {remedy}")
-    return _ui_record("STALE", state, reason, remedy=remedy, log=f"<data>/logs/{UI_BUILD_LOG}")
+    echo(f"WARNING: {reason}. {_serving(final)}. Log: {log}. Remedy: {remedy}")
+    return _ui_record(final, state, reason, remedy=remedy, log=log, **({"note": note} if note else {}))
 
 
 # ----------------------------------------------------------------------------------------- serve record / drift
@@ -292,7 +406,7 @@ def health_ui_build(settings: Settings) -> dict[str, Any]:
     ui = (rec or {}).get("ui_build")
     if isinstance(ui, dict):
         return {k: ui.get(k) for k in ("status", "reason", "basis", "bundle_frontend_tree", "head_frontend_tree",
-                                       "checked_at", "remedy", "log")}
+                                       "checked_at", "remedy", "log", "previous_status", "note")}
     return {"status": "NOT_RECORDED", "reason": "this server was not started by 'aeos serve' from a checkout"}
 
 

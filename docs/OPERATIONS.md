@@ -234,40 +234,63 @@ start it again. The `post-merge` hook in `scripts/git-hooks` prints `frontend/ba
 after a `git pull` or `git merge` that changed them (installed with `git config core.hooksPath scripts/git-hooks`; it
 only prints and never fails; `git pull --rebase` does not run it).
 
-On start, `aeos serve` (checkout mode, not `--release active`) compares the bundle with HEAD and rebuilds a stale one
-once (`npm run build`, 300 s timeout, one log line, output in `<data>/logs/ui-build.log`) only when
+On start, `aeos serve` (checkout mode, not `--release active`) compares the bundle with HEAD and builds it once when
+it is STALE (built from another frontend tree), MISSING (no `frontend/dist/index.html`) or UNVERIFIED (no build record,
+or a record of a build with uncommitted changes), and only when all of these hold: the tree is a git checkout,
 `frontend/node_modules` matches `frontend/package-lock.json` (the hidden lockfile `node_modules/.package-lock.json`
-lists the same versions) and `git status --porcelain -- frontend` is empty. It never runs `npm ci` or `npm install`.
-Otherwise, or when the build fails or times out, it starts with the old bundle, prints the remedy and reports
-`ui_build` STALE with the reason in `GET /api/health`. `--no-ui-build` skips the rebuild (`ui_build` then says STALE
-with `--no-ui-build` when the bundle is stale). `ui_build.status` is FRESH, REBUILT, STALE, UNVERIFIED, MISSING or
-NOT_RECORDED (the server was not started by `aeos serve` from a checkout). The manual rebuild, from the repository
-root:
+lists the same versions), `git status --porcelain -- frontend` is empty and `--no-ui-build` is not given. It never runs
+`npm ci` or `npm install`, and a release install is never rebuilt.
+
+The build is atomic: `npm run build -- --outDir dist.next` (300 s timeout, one log line, output in
+`<data>/logs/ui-build.log`) writes into `frontend/dist.next`, never into `frontend/dist`, because Vite empties its
+output directory before it writes. Only when the build exits 0 and `dist.next/aeos-build.json` names a clean build of
+HEAD does serve rename `frontend/dist` to `frontend/dist.prev`, `frontend/dist.next` to `frontend/dist`, and delete
+`frontend/dist.prev`. A failed, killed or timed-out build leaves `frontend/dist` untouched and deletes the partial
+`dist.next`. When a rename fails (on Windows a file in `frontend/dist` can be locked by another server, an editor or a
+virus scanner), serve undoes the renames it made, reports the failure and still starts. Both directories are
+gitignored; a leftover `dist.prev` is put back (when `dist` has no `index.html`) or deleted at the next start.
+
+Whatever failed, serve then looks at `frontend/dist/index.html` again: present, it starts with the old bundle and
+reports `ui_build` STALE or UNVERIFIED with the reason; absent, it reports `ui_build` MISSING with the remedy (the
+Control Center pages return `FRONTEND_NOT_BUILT`, the API runs). `ui_build.status` in `GET /api/health` is FRESH,
+REBUILT (with `previous_status`), STALE, UNVERIFIED, MISSING or NOT_RECORDED (the server was not started by
+`aeos serve` from a checkout); `note` says when the old bundle in `dist.prev` could not be deleted. The manual
+rebuild, from the repository root:
 
 ```bash
 cd frontend && npm ci --no-audit --no-fund && npm run build
 ```
 
-What the Doctor says:
+What the Doctor says. `runtime.frontend_dist` is the existence check and is critical for `CAN_OPEN_DASHBOARD`: without
+`index.html` the capability is BLOCKED and `aeos doctor` exits 1. `runtime.frontend_fresh` is in the required tier: a
+stale or unverified bundle still opens the dashboard with an older UI, so `CAN_OPEN_DASHBOARD` is DEGRADED, never
+BLOCKED, and `aeos doctor` exits 0.
 
 | Check | Status | Meaning |
 |---|---|---|
-| `runtime.frontend_dist` | VERIFIED | the build record `frontend/dist/aeos-build.json` names a clean build of `git rev-parse HEAD:frontend` (a release install: the correspondence its provenance recorded) |
-| `runtime.frontend_dist` | CONFIGURED `FRONTEND_STALE` | "bundle built from frontend tree <a>, HEAD has <b>": restart `aeos serve` or rebuild |
-| `runtime.frontend_dist` | UNKNOWN `FRONTEND_BUILD_UNVERIFIED` | no build record, a build of uncommitted changes or no git checkout: UNVERIFIED, never shown as a pass |
+| `runtime.frontend_dist` | VERIFIED | `frontend/dist/index.html` exists (whether it matches the code: `runtime.frontend_fresh`) |
+| `runtime.frontend_dist` | MISSING `FRONTEND_NOT_BUILT` | no built bundle: the dashboard cannot open (`CAN_OPEN_DASHBOARD` BLOCKED, exit 1) |
+| `runtime.frontend_fresh` | VERIFIED | the build record `frontend/dist/aeos-build.json` names a clean build of `git rev-parse HEAD:frontend` (a release install: the correspondence its provenance recorded) |
+| `runtime.frontend_fresh` | CONFIGURED `FRONTEND_STALE` | "bundle built from frontend tree <a>, HEAD has <b>": restart `aeos serve` or rebuild (`CAN_OPEN_DASHBOARD` DEGRADED) |
+| `runtime.frontend_fresh` | UNKNOWN `FRONTEND_BUILD_UNVERIFIED` | no build record, a build of uncommitted changes or no git checkout: UNVERIFIED, never shown as a pass (`CAN_OPEN_DASHBOARD` DEGRADED) |
+| `runtime.frontend_fresh` | NOT_APPLICABLE | no bundle to compare; `runtime.frontend_dist` reports it MISSING |
 | `runtime.code_drift` | CONFIGURED `CODE_DRIFT` | the running server loaded an older commit and HEAD changed `backend/`, `requirements.lock` or `pyproject.toml`: "restart aeos serve to load <sha>" |
 | `runtime.code_drift` | VERIFIED | the server runs HEAD, or HEAD changed only other paths (docs, frontend source) |
 | `runtime.code_drift` | NOT_APPLICABLE | no `aeos serve` from a checkout is running (the start record `<data>/run/serve.json` names a process that is gone), or `--reload` |
 
-The fingerprint of `runtime.frontend_dist` includes the HEAD frontend tree and that of `runtime.backend_deps` the
+The fingerprint of `runtime.frontend_fresh` includes the HEAD frontend tree and that of `runtime.backend_deps` the
 hash of `requirements.lock`, so a pull that changes them marks the previous result STALE. A backend-only commit keeps
-`runtime.frontend_dist` VERIFIED. Caching: `index.html`, the SPA fallback and `aeos-build.json` are sent with
+`runtime.frontend_fresh` VERIFIED. Caching: `index.html`, the SPA fallback and `aeos-build.json` are sent with
 `Cache-Control: no-cache`, the content-hashed `/assets/*` with `public, max-age=31536000, immutable`, `/api/*` keeps
 `no-store`, and a missing `/assets/*` file is a 404 (not `index.html`). A tab still on an older build reloads once on
-the `vite:preloadError` event (a time marker in `sessionStorage` stops a reload loop).
+the `vite:preloadError` event (a time marker in `sessionStorage` stops a reload loop). The `post-merge` hook prints its
+reminder with `printf '%s\n'` (sh's `echo` turned the `\a` of `.\aeos.ps1` into a BEL character) and CI lints it with
+`shellcheck` like the `pre-push` hook.
 
-NOT-PROVEN: the rebuild and the hook on Windows and macOS Intel (unit and git-subprocess tests ran on macOS arm64
-only); uncommitted backend edits are not code drift (only commits are compared).
+NOT-PROVEN: the rebuild, the directory swap on a locked file and the hook on Windows and macOS Intel (unit and
+git-subprocess tests with a fake build runner and a fake failing rename ran on macOS arm64 only; one real
+`npm run build -- --outDir dist.next` ran there); uncommitted backend edits are not code drift (only commits are
+compared).
 
 ## SLIs and alerts
 

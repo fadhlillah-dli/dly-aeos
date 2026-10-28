@@ -9,8 +9,10 @@ import { defineConfig, type Plugin } from "vite";
 /**
  * §09 zones: record which committed frontend source tree a build came from (`dist/aeos-build.json`), so a release
  * can prove its Control Center bundle corresponds to the release commit (git tree of `frontend/` at that commit).
+ * The record goes into the configured outDir: `aeos serve` builds into `dist.next` (`--outDir dist.next`) and swaps
+ * it in only after the build succeeded, so a failed build never leaves `dist` empty (R28).
  */
-function aeosBuildInfo(): Plugin {
+export function aeosBuildInfo(): Plugin {
   const git = (...args: string[]): string | null => {
     try {
       return execFileSync("git", args, { cwd: process.cwd(), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
@@ -18,9 +20,13 @@ function aeosBuildInfo(): Plugin {
       return null;
     }
   };
+  let outDir = resolve(process.cwd(), "dist");
   return {
     name: "aeos-build-info",
     apply: "build",
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
     closeBundle() {
       const tree = git("rev-parse", "HEAD:./");
       const status = git("status", "--porcelain", "--untracked-files=normal", "--", ".");
@@ -32,7 +38,7 @@ function aeosBuildInfo(): Plugin {
         built_at: new Date().toISOString(),
         note: tree ? null : "not built inside a git checkout: correspondence to a commit cannot be shown",
       };
-      writeFileSync(resolve(process.cwd(), "dist", "aeos-build.json"), JSON.stringify(info, null, 2) + "\n", "utf8");
+      writeFileSync(resolve(outDir, "aeos-build.json"), JSON.stringify(info, null, 2) + "\n", "utf8");
     },
   };
 }

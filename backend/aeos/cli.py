@@ -136,8 +136,8 @@ def serve(
         help="Allow --dev/--reload with the default data dir and keyring service (real credentials)"),
     no_ui_build: bool = typer.Option(
         False, "--no-ui-build",
-        help="Checkout mode: do not rebuild a stale Control Center bundle at start (the old bundle is served and "
-             "/api/health reports ui_build STALE)"),
+        help="Checkout mode: do not rebuild a stale, missing or unverified Control Center bundle at start (what "
+             "is on disk is served and /api/health reports ui_build with the reason)"),
 ) -> None:
     """Start the control plane on 127.0.0.1 (loopback only)."""
     import os
@@ -219,8 +219,9 @@ def serve(
     from aeos.doctor.model import frontend_build_command
     from aeos.operations import freshness
 
-    # R28: a git pull changes frontend/ but not frontend/dist; rebuild a stale bundle once when that is safe, never
-    # install anything and never block the start (the old bundle is served and /api/health says ui_build STALE).
+    # R28: a git pull changes frontend/ but not frontend/dist; rebuild a stale, missing or unverified bundle once when
+    # that is safe (into frontend/dist.next, swapped in after success), never install anything and never block the
+    # start (/api/health says ui_build and why).
     ui_build = freshness.ensure_ui_fresh(
         settings, _repo_root(), enabled=not no_ui_build,
         remedy=f"restart aeos serve, or rebuild: {frontend_build_command()}",

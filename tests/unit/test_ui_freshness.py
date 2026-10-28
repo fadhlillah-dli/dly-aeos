@@ -1,9 +1,11 @@
 """R28 / LESSONS L23: what ``aeos serve`` serves stays current after a ``git pull``.
 
-* Doctor ``runtime.frontend_dist`` compares the build record with ``HEAD:frontend`` (FRONTEND_STALE when it
-  differs, UNVERIFIED without a clean record, VERIFIED after a backend-only commit).
-* ``aeos serve`` rebuilds a stale bundle once when node_modules matches the lockfile and frontend/ is clean, never
-  installs anything and never blocks the start; /api/health reports ``ui_build``.
+* Doctor ``runtime.frontend_dist`` is the existence check (critical: MISSING blocks CAN_OPEN_DASHBOARD, exit 1);
+  ``runtime.frontend_fresh`` compares the build record with ``HEAD:frontend`` (FRONTEND_STALE when it differs,
+  UNVERIFIED without a clean record, VERIFIED after a backend-only commit) and only DEGRADES the capability.
+* ``aeos serve`` rebuilds a STALE, MISSING or UNVERIFIED bundle once when node_modules matches the lockfile and
+  frontend/ is clean, never installs anything and never blocks the start; /api/health reports ``ui_build``. The build
+  goes to frontend/dist.next and is swapped in only after success: a failed or killed build leaves dist untouched.
 * Cache headers: index.html and the SPA fallback revalidate, hashed assets are immutable, a missing asset is 404.
 * Doctor ``runtime.code_drift``: the running server's loaded commit against HEAD (backend paths only).
 
@@ -13,6 +15,7 @@ Tests never run a real npm build (tests/conftest.py refuses one; these tests inj
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -63,7 +66,8 @@ def repo(tmp_path: Path) -> Path:
     (r / "backend" / "app.py").write_text("V = 1\n", encoding="utf-8")
     (r / "docs").mkdir()
     (r / "docs" / "a.md").write_text("a\n", encoding="utf-8")
-    (r / ".gitignore").write_text("frontend/dist/\nfrontend/node_modules/\n", encoding="utf-8")
+    (r / ".gitignore").write_text("frontend/dist/\nfrontend/dist.next/\nfrontend/dist.prev/\nfrontend/node_modules/\n",
+                                  encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(r)], check=True)
     _git(r, "add", "-A")
     _git(r, "commit", "-q", "-m", "init")
@@ -73,8 +77,8 @@ def repo(tmp_path: Path) -> Path:
     return r
 
 
-def _stamp(repo: Path, tree: str | None, clean: bool = True) -> None:
-    (repo / "frontend" / "dist" / "aeos-build.json").write_text(
+def _stamp(repo: Path, tree: str | None, clean: bool = True, dist: Path | None = None) -> None:
+    (dist or repo / "frontend" / "dist").joinpath("aeos-build.json").write_text(
         json.dumps({"schema": 1, "frontend_tree": tree, "clean": clean, "head": None}), encoding="utf-8")
 
 
@@ -102,17 +106,19 @@ def _doctor(settings, db, cid: str, repo: Path):
 
 def test_a_bundle_from_another_frontend_tree_is_frontend_stale(settings, db, repo):
     _stamp(repo, "f" * 40)
-    res = _doctor(settings, db, "runtime.frontend_dist", repo)
+    res = _doctor(settings, db, "runtime.frontend_fresh", repo)
     assert res.status == "CONFIGURED" and res.error_code == "FRONTEND_STALE"
     assert f"bundle built from frontend tree ffffffffffff, HEAD has {_head_tree(repo)[:12]}" in res.summary
     assert "npm" in res.remediation["command"] and "run build" in res.remediation["command"]
     assert "Restart aeos serve" in res.remediation["operation"]
+    # the existence check stays VERIFIED: the dashboard opens, with an older UI
+    assert _doctor(settings, db, "runtime.frontend_dist", repo).status == "VERIFIED"
 
 
 def test_a_backend_only_commit_stays_verified_and_keeps_the_fingerprint(settings, db, repo):
     _stamp(repo, _head_tree(repo))
     load_all()
-    spec = REGISTRY["runtime.frontend_dist"]
+    spec = REGISTRY["runtime.frontend_fresh"]
     ctx = make_context(settings, db, runner=base_runner(), repo=repo)
     assert run_check(spec, ctx).status == "VERIFIED"
     before = compute_fingerprint(spec, ctx)
@@ -126,11 +132,53 @@ def test_a_backend_only_commit_stays_verified_and_keeps_the_fingerprint(settings
 
 
 def test_no_build_record_or_a_dirty_build_is_unverified_never_verified(settings, db, repo):
-    res = _doctor(settings, db, "runtime.frontend_dist", repo)
+    res = _doctor(settings, db, "runtime.frontend_fresh", repo)
     assert res.status == "UNKNOWN" and res.error_code == "FRONTEND_BUILD_UNVERIFIED" and "UNVERIFIED" in res.summary
     _stamp(repo, _head_tree(repo), clean=False)
-    res = _doctor(settings, db, "runtime.frontend_dist", repo)
+    res = _doctor(settings, db, "runtime.frontend_fresh", repo)
     assert res.status == "UNKNOWN" and "uncommitted" in res.summary
+
+
+def test_without_a_bundle_freshness_is_not_applicable_and_existence_is_missing(settings, db, repo):
+    shutil.rmtree(repo / "frontend" / "dist")
+    assert _doctor(settings, db, "runtime.frontend_fresh", repo).status == "NOT_APPLICABLE"
+    res = _doctor(settings, db, "runtime.frontend_dist", repo)
+    assert res.status == "MISSING" and res.error_code == "FRONTEND_NOT_BUILT"
+
+
+def _dashboard(settings, db, repo: Path) -> tuple[str, list[str], list[str]]:
+    """(CAN_OPEN_DASHBOARD status, its reasons, the checks that make 'aeos doctor' exit 1) when every other check of
+    the capability is ok and the two frontend checks really ran against *repo*."""
+    from aeos.core.enums import Capability
+    from aeos.core.timeutil import utcnow
+    from aeos.doctor.capabilities import evaluate
+    from aeos.doctor.cli import dashboard_critical_failures
+    from tests.unit.test_doctor_capabilities import all_ok
+
+    rows = all_ok(Capability.CAN_OPEN_DASHBOARD)
+    results = [_doctor(settings, db, cid, repo) for cid in ("runtime.frontend_dist", "runtime.frontend_fresh")]
+    for r in results:
+        rows[r.check_id].update(status=r.status, summary=r.summary)
+    st = evaluate(Capability.CAN_OPEN_DASHBOARD, rows, now=utcnow(), fps={}, domain=None, session=None)
+    return st.status, st.reasons, dashboard_critical_failures(results)
+
+
+def test_a_stale_bundle_degrades_the_dashboard_and_never_blocks_it(settings, db, repo):
+    """Bite: in round 1 FRONTEND_STALE sat in the critical tier, blocked CAN_OPEN_DASHBOARD and made 'aeos doctor'
+    exit 1 although the dashboard opens; now it is DEGRADED with exit 0. Near miss: a missing index.html still
+    blocks with exit 1."""
+    _stamp(repo, "f" * 40)
+    status, reasons, exit1 = _dashboard(settings, db, repo)
+    assert status == "DEGRADED" and exit1 == [], (status, exit1)
+    assert any(r.startswith("runtime.frontend_fresh: CONFIGURED - Bundle Control Center usang") for r in reasons)
+    _stamp(repo, None)  # no record: UNVERIFIED is not a pass either, and not a block
+    assert _dashboard(settings, db, repo)[0] == "DEGRADED"
+    _stamp(repo, _head_tree(repo))
+    assert _dashboard(settings, db, repo)[:1] == ("READY",)
+    shutil.rmtree(repo / "frontend" / "dist")
+    status, reasons, exit1 = _dashboard(settings, db, repo)
+    assert status == "BLOCKED" and exit1 == ["runtime.frontend_dist"]
+    assert any(r.startswith("runtime.frontend_dist: MISSING") for r in reasons), reasons
 
 
 def test_the_checkout_comparison_is_release_ui_correspondence(settings, repo, monkeypatch):
@@ -173,20 +221,45 @@ def test_outside_a_git_checkout_the_bundle_is_unverified(settings, tmp_path):
 
 # ----------------------------------------------------------------------------------------- serve self-heal
 
+OLD_INDEX = "<!doctype html><title>AEOS</title>"  # the bundle the repo fixture built
+NEXT = ["/fake/bin/npm", "run", "build", "--", "--outDir", "dist.next"]
+
 
 class FakeBuild:
-    """Stands in for 'npm run build': records the call and writes the record a real build would write."""
+    """Stands in for 'npm run build -- --outDir <dir>'. Like Vite it first empties the outDir it is given (renderStart),
+    writes assets, then index.html and the build record. A failing run (exit code or exception) stops after the assets:
+    a partial outDir without index.html, as a killed or failing Vite build leaves it."""
 
-    def __init__(self, repo: Path, code: int = 0, exc: BaseException | None = None) -> None:
-        self.repo, self.code, self.exc, self.calls = repo, code, exc, []
+    def __init__(self, repo: Path, code: int = 0, exc: BaseException | None = None, tree: str | None = None) -> None:
+        self.repo, self.code, self.exc, self.tree, self.calls = repo, code, exc, tree, []
 
     def __call__(self, argv: list[str], cwd: Path, timeout: float, log_path: Path) -> int:
         self.calls.append(argv)
+        out = cwd / (argv[argv.index("--outDir") + 1] if "--outDir" in argv else "dist")
+        if out.exists():
+            shutil.rmtree(out)
+        (out / "assets").mkdir(parents=True)
+        (out / "assets" / "index-new.js").write_text("new", encoding="utf-8")
         if self.exc is not None:
             raise self.exc
-        if self.code == 0:
-            _stamp(self.repo, _head_tree(self.repo))
-        return self.code
+        if self.code != 0:
+            return self.code
+        (out / "index.html").write_text("<!doctype html><title>NEW</title>", encoding="utf-8")
+        _stamp(self.repo, self.tree or _head_tree(self.repo), dist=out)
+        return 0
+
+
+class FlakyRename:
+    """os.rename that raises PermissionError (a locked file on Windows) on the given call numbers (1-based)."""
+
+    def __init__(self, *fail_on: int) -> None:
+        self.fail_on, self.calls = set(fail_on), []
+
+    def __call__(self, src: Path, dst: Path) -> None:
+        self.calls.append((Path(src).name, Path(dst).name))
+        if len(self.calls) in self.fail_on:
+            raise PermissionError(13, "The process cannot access the file because it is being used", str(src))
+        os.rename(src, dst)
 
 
 def _ensure(settings, repo: Path, **kw: Any) -> tuple[dict[str, Any], list[str]]:
@@ -196,19 +269,47 @@ def _ensure(settings, repo: Path, **kw: Any) -> tuple[dict[str, Any], list[str]]
     return rec, lines
 
 
-def test_a_stale_bundle_is_rebuilt_once_with_the_injected_runner(settings, repo, monkeypatch):
-    _stamp(repo, "f" * 40)
+def _index(repo: Path) -> str | None:
+    index = repo / "frontend" / "dist" / "index.html"
+    return index.read_text(encoding="utf-8") if index.is_file() else None
+
+
+def _no_leftovers(repo: Path) -> bool:
+    return not (repo / "frontend" / "dist.next").exists() and not (repo / "frontend" / "dist.prev").exists()
+
+
+def _make_state(repo: Path, state: str) -> None:
+    if state == "STALE":
+        _stamp(repo, "f" * 40)
+    elif state == "UNVERIFIED_DIRTY":
+        _stamp(repo, _head_tree(repo), clean=False)
+    elif state == "MISSING":
+        shutil.rmtree(repo / "frontend" / "dist")
+    # UNVERIFIED (no record): the fixture's dist has no aeos-build.json
+
+
+STATES = ["STALE", "MISSING", "UNVERIFIED", "UNVERIFIED_DIRTY"]
+
+
+@pytest.mark.parametrize("state", STATES)
+def test_a_stale_missing_or_unverified_bundle_is_built_into_dist_next_and_swapped_in(settings, repo, monkeypatch,
+                                                                                     state):
+    _make_state(repo, state)
     _install(repo)
     fake = FakeBuild(repo)
     monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
     rec, lines = _ensure(settings, repo)
-    assert fake.calls == [["/fake/bin/npm", "run", "build"]]
-    assert rec["status"] == "REBUILT" and len(lines) == 1 and "running 'npm run build' once" in lines[0]
+    assert fake.calls == [NEXT]
+    assert rec["status"] == "REBUILT" and rec["previous_status"] == state.split("_")[0], rec
+    assert len(lines) == 1 and "running 'npm run build' once into frontend/dist.next" in lines[0]
+    assert "NEW" in str(_index(repo)) and _no_leftovers(repo)
+    assert freshness.bundle_state(settings, repo)["status"] == "FRESH"
 
 
+@pytest.mark.parametrize("state", ["STALE", "MISSING", "UNVERIFIED"])
 @pytest.mark.parametrize("case", ["dirty", "no_node_modules", "lock_changed", "disabled"])
-def test_a_stale_bundle_is_not_rebuilt_when_it_is_not_safe(settings, repo, monkeypatch, case):
-    _stamp(repo, "f" * 40)
+def test_a_bundle_is_not_rebuilt_when_it_is_not_safe(settings, repo, monkeypatch, case, state):
+    _make_state(repo, state)
     _install(repo)
     if case == "dirty":
         (repo / "frontend" / "src" / "draft.ts").write_text("x\n", encoding="utf-8")
@@ -221,10 +322,12 @@ def test_a_stale_bundle_is_not_rebuilt_when_it_is_not_safe(settings, repo, monke
     fake = FakeBuild(repo)
     monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
     rec, lines = _ensure(settings, repo, enabled=case != "disabled")
-    assert fake.calls == [] and rec["status"] == "STALE" and rec["remedy"] == "REMEDY"
+    assert fake.calls == [] and rec["status"] == state and rec["remedy"] == "REMEDY"
     expected = {"dirty": "local changes", "no_node_modules": "npm ci is never run automatically",
                 "lock_changed": "lockfile package not installed (node_modules/c)", "disabled": "--no-ui-build"}[case]
     assert expected in rec["reason"] and "WARNING" in lines[0] and "REMEDY" in lines[0]
+    serving = "No bundle to serve" if state == "MISSING" else "Serving the old bundle"
+    assert serving in lines[0]
 
 
 def test_a_matching_install_with_a_missing_optional_platform_package_counts_as_unchanged(repo):
@@ -238,26 +341,113 @@ def test_a_matching_install_with_a_missing_optional_platform_package_counts_as_u
     assert ok is False and "node_modules/a differs" in why
 
 
-@pytest.mark.parametrize("fake_kw", [{"code": 1}, {"exc": subprocess.TimeoutExpired(["npm"], 1)}])
-def test_a_failed_build_keeps_the_old_bundle_and_reports_stale(settings, repo, monkeypatch, fake_kw):
+@pytest.mark.parametrize(("fake_kw", "why"), [
+    ({"code": 1}, "exited with 1"),
+    ({"exc": subprocess.TimeoutExpired(["npm"], 1)}, "timed out"),
+    ({"tree": "e" * 40}, "the build finished but frontend/dist.next is STALE"),
+])
+def test_a_failed_or_killed_build_leaves_the_old_bundle_untouched(settings, repo, monkeypatch, fake_kw, why):
     _stamp(repo, "f" * 40)
     _install(repo)
     fake = FakeBuild(repo, **fake_kw)
     monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
     rec, lines = _ensure(settings, repo)
     assert len(fake.calls) == 1 and rec["status"] == "STALE" and "rebuild failed" in rec["reason"]
-    assert ("exited with 1" in rec["reason"]) or ("timed out" in rec["reason"])
+    assert why in rec["reason"] and "Serving the old bundle" in lines[-1]
+    assert _index(repo) == OLD_INDEX and _no_leftovers(repo)
+    assert json.loads((repo / "frontend" / "dist" / "aeos-build.json").read_text(encoding="utf-8"))[
+        "frontend_tree"] == "f" * 40
 
 
-@pytest.mark.parametrize("stamp", ["head", None])
-def test_a_fresh_or_unverified_bundle_is_never_rebuilt(settings, repo, monkeypatch, stamp):
-    if stamp:
-        _stamp(repo, _head_tree(repo))
+def test_a_build_into_dist_itself_is_reported_missing_never_serving_the_old_bundle(settings, repo, monkeypatch):
+    """Bite for the round-1 design: a build whose outDir is dist itself (Vite empties it first) and then fails leaves
+    no index.html. The health record must then say MISSING with the remedy, not 'serving the old bundle'."""
+    _stamp(repo, "f" * 40)
+    _install(repo)
+    monkeypatch.setattr(freshness, "NEXT_DIR", "dist")
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", FakeBuild(repo, code=1))
+    rec, lines = _ensure(settings, repo)
+    assert _index(repo) is None
+    assert rec["status"] == "MISSING" and rec["remedy"] == "REMEDY"
+    assert "No bundle to serve" in lines[-1] and "Serving the old bundle" not in lines[-1]
+
+
+@pytest.mark.parametrize(("fail_on", "status", "why"), [
+    ((1,), "STALE", "could not move frontend/dist aside (PermissionError"),
+    ((2,), "STALE", "could not move frontend/dist.next to frontend/dist (PermissionError"),
+    ((2, 3), "MISSING", "restoring the old bundle failed too (PermissionError"),
+])
+def test_a_rename_that_fails_on_a_locked_file_is_reported_and_restored(settings, repo, monkeypatch, fail_on, status,
+                                                                      why):
+    _stamp(repo, "f" * 40)
+    _install(repo)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", FakeBuild(repo))
+    flaky = FlakyRename(*fail_on)
+    monkeypatch.setattr(freshness, "RENAME", flaky)
+    rec, lines = _ensure(settings, repo)
+    assert rec["status"] == status and why in rec["reason"], rec
+    assert rec["remedy"] == "REMEDY" and "WARNING" in lines[-1]
+    if status == "STALE":
+        assert _index(repo) == OLD_INDEX and _no_leftovers(repo)
+        assert "Serving the old bundle" in lines[-1]
+    else:
+        assert _index(repo) is None and "it is in frontend/dist.prev" in rec["reason"]
+        assert "No bundle to serve" in lines[-1]
+        # the next start puts the old bundle back first, then rebuilds and swaps normally
+        monkeypatch.setattr(freshness, "RENAME", os.rename)
+        again, _ = _ensure(settings, repo)
+        assert again["status"] == "REBUILT" and "NEW" in str(_index(repo)) and _no_leftovers(repo)
+
+
+def test_an_old_bundle_that_cannot_be_deleted_after_the_swap_is_a_note_not_a_failure(settings, repo, monkeypatch):
+    _stamp(repo, "f" * 40)
+    _install(repo)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", FakeBuild(repo))
+    real = freshness._remove_tree
+
+    def locked(path: Path) -> str | None:
+        return "PermissionError: locked" if path.name == "dist.prev" and path.exists() else real(path)
+
+    monkeypatch.setattr(freshness, "_remove_tree", locked)
+    rec, _ = _ensure(settings, repo)
+    assert rec["status"] == "REBUILT" and "dist.prev could not be deleted" in rec["note"]
+    assert "NEW" in str(_index(repo))
+
+
+def test_a_fresh_bundle_is_never_rebuilt(settings, repo, monkeypatch):
+    _stamp(repo, _head_tree(repo))
     _install(repo)
     fake = FakeBuild(repo)
     monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
     rec, lines = _ensure(settings, repo)
-    assert fake.calls == [] and lines == [] and rec["status"] == ("FRESH" if stamp else "UNVERIFIED")
+    assert fake.calls == [] and lines == [] and rec["status"] == "FRESH"
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_a_tree_without_git_is_never_rebuilt(settings, tmp_path, monkeypatch, missing):
+    root = tmp_path / "plain"
+    (root / "frontend" / "dist").mkdir(parents=True)
+    (root / "frontend" / "package-lock.json").write_text(json.dumps(LOCK), encoding="utf-8")
+    if missing:
+        (root / "frontend" / "dist").rmdir()
+    else:
+        (root / "frontend" / "dist" / "index.html").write_text(OLD_INDEX, encoding="utf-8")
+    _install(root)
+    fake = FakeBuild(root)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
+    rec, _ = _ensure(settings, root)
+    assert fake.calls == [] and rec["status"] == ("MISSING" if missing else "UNVERIFIED")
+
+
+def test_a_release_install_is_never_rebuilt(settings, monkeypatch):
+    root = settings.layout.released_controller / "0.1.0-abcdef123456"
+    (root / "frontend" / "dist").mkdir(parents=True)
+    (root / "frontend" / "dist" / "index.html").write_text(OLD_INDEX, encoding="utf-8")
+    _install(root)
+    fake = FakeBuild(root)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
+    rec, _ = _ensure(settings, root)
+    assert fake.calls == [] and rec["status"] == "UNVERIFIED" and rec["basis"] == "release"
 
 
 def _serve(settings, repo: Path, monkeypatch, *flags: str) -> tuple[Any, dict[str, Any]]:
@@ -301,6 +491,28 @@ def test_serve_with_no_ui_build_does_not_build_and_health_says_why(settings, rep
     with TestClient(make_app(settings), base_url="http://testserver") as c:
         ui = c.get("/api/health").json()["ui_build"]
     assert ui["status"] == "STALE" and "--no-ui-build" in ui["reason"]
+
+
+def test_serve_builds_a_missing_bundle_and_health_says_rebuilt(settings, repo, monkeypatch):
+    shutil.rmtree(repo / "frontend" / "dist")
+    _install(repo)
+    fake = FakeBuild(repo)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
+    monkeypatch.setattr(freshness, "WHICH", lambda n: f"/fake/bin/{n}")
+    res, started = _serve(settings, repo, monkeypatch)
+    assert res.exit_code == 0, res.output
+    assert started and fake.calls == [NEXT] and "NEW" in str(_index(repo))
+    with TestClient(make_app(settings), base_url="http://testserver") as c:
+        ui = c.get("/api/health").json()["ui_build"]
+    assert ui["status"] == "REBUILT" and ui["previous_status"] == "MISSING"
+
+
+def test_the_repository_ignores_the_temporary_build_directories():
+    """Without this, the Vite build record of a build into dist.next says clean=false (git status sees dist.next)
+    and a leftover dist.prev makes frontend/ dirty, so serve would never rebuild again."""
+    for rel in ("frontend/dist.next/index.html", "frontend/dist.prev/index.html"):
+        proc = subprocess.run(["git", "check-ignore", "-q", rel], cwd=ROOT, check=False)
+        assert proc.returncode == 0, f"{rel} is not ignored by .gitignore"
 
 
 def test_health_without_a_serve_record_says_not_recorded(settings):
@@ -392,25 +604,67 @@ def test_the_backend_deps_fingerprint_follows_requirements_lock(settings, db, re
 HOOK = ROOT / "scripts" / "git-hooks" / "post-merge"
 
 
-def _merge_with_hook(repo: Path, rel: str) -> subprocess.CompletedProcess[str]:
+def _merge_with_hook(repo: Path, rel: str) -> subprocess.CompletedProcess[bytes]:
     shutil.copy2(HOOK, repo / ".git" / "hooks" / "post-merge")
     _git(repo, "checkout", "-q", "-b", "topic")
     _commit(repo, rel, "changed\n")
     _git(repo, "checkout", "-q", "-")
     return subprocess.run(["git", "-C", str(repo), "-c", f"user.name={TEST_GIT_NAME}", "-c",
                            f"user.email={TEST_GIT_EMAIL}", "merge", "-q", "--no-edit", "topic"],
-                          capture_output=True, text=True, check=False)
+                          capture_output=True, check=False)
+
+
+HINT = b"post-merge: frontend/backend changed: restart ./aeos serve (Windows: .\\aeos.ps1 serve)\n"
+
+
+def _hint_problem(out: bytes) -> str | None:
+    """What is wrong with the hook's reminder in *out* (the exact bytes the hook printed), or None."""
+    if b"\x07" in out:
+        return "the Windows hint lost its backslash: sh echo read '\\a' of '.\\aeos.ps1' as a BEL character"
+    if HINT not in out:
+        return f"the reminder is not exactly {HINT!r}"
+    return None
+
+
+def test_the_hint_checker_bites_on_the_bel_and_passes_the_exact_text():
+    """Bite: the round-1 hook printed '.<BEL>eos.ps1' (echo interpreted the backslash). Near miss: the exact text."""
+    bel = HINT.replace(b"\\a", b"\x07")
+    assert _hint_problem(bel) == ("the Windows hint lost its backslash: sh echo read '\\a' of '.\\aeos.ps1' as a BEL "
+                                  "character")
+    assert _hint_problem(b"post-merge: frontend/backend changed: restart ./aeos serve\n").startswith(
+        "the reminder is not exactly")
+    assert _hint_problem(b"noise\n" + HINT) is None
 
 
 def test_the_post_merge_hook_reminds_to_restart_when_backend_changed(repo):
     proc = _merge_with_hook(repo, "backend/app.py")
     assert proc.returncode == 0
-    assert "frontend/backend changed: restart ./aeos serve" in proc.stdout + proc.stderr
+    out = proc.stdout + proc.stderr  # git runs hooks with stdout on stderr
+    assert _hint_problem(out) is None, (_hint_problem(out), out)
+
+
+def test_the_post_merge_hook_prints_with_printf_never_echo():
+    code = [ln.strip() for ln in HOOK.read_text(encoding="utf-8").splitlines() if not ln.lstrip().startswith("#")]
+    assert not [ln for ln in code if ln.startswith("echo") or " echo " in ln], code
+    assert "printf '%s\\n' 'post-merge: frontend/backend changed: restart ./aeos serve (Windows: .\\aeos.ps1 serve)'" \
+        in code
+
+
+def test_the_post_merge_hook_is_linted_by_shellcheck_like_pre_push():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("aeos_script_gates_ui_freshness", ROOT / "scripts" / "gates.py")
+    assert spec is not None and spec.loader is not None
+    gates = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = gates
+    spec.loader.exec_module(gates)
+    assert gates.SHELLCHECK_COMMAND.split()[-2:] == ["scripts/git-hooks/pre-push", "scripts/git-hooks/post-merge"]
+    assert gates.shell_files(ROOT)[-2:] == ["scripts/git-hooks/pre-push", "scripts/git-hooks/post-merge"]
 
 
 def test_the_post_merge_hook_is_silent_for_docs_only(repo):
     proc = _merge_with_hook(repo, "docs/a.md")
-    assert proc.returncode == 0 and "restart" not in proc.stdout + proc.stderr
+    assert proc.returncode == 0 and b"restart" not in proc.stdout + proc.stderr
 
 
 def test_the_post_merge_hook_is_executable_and_never_fails():

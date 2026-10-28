@@ -198,7 +198,7 @@ line of output is always `RUN_TESTS: PASS rc=<n>` or `RUN_TESTS: FAIL rc=<n>`, s
 tail of the log. macOS arm64 is proven; Windows and Intel macOS are NOT-PROVEN. On Windows run the same script
 with Git Bash; from cmd name its bash, `"%ProgramFiles%\Git\bin\bash.exe" scripts/run_tests.sh` (a `bash` found
 first on `PATH` can be the WSL one); it picks `.venv\Scripts\python.exe`. A suite run with `python -m pytest`
-directly writes no full-suite record, so the pre-push hook refuses its push. CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push`.
+directly writes no full-suite record, so the pre-push hook refuses its push. CI lints the shell scripts with `shellcheck scripts/*.sh scripts/git-hooks/pre-push scripts/git-hooks/post-merge`.
 
 After a PASS the runner records the run for the pre-push hook (`scripts/full_suite_record.py`, the one owner of the
 record format) when the run was FULL and the tree CLEAN; otherwise it prints one line
@@ -236,7 +236,8 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
   and uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Static checks.** `static checks [G1] (ubuntu-latest)` runs ruff, mypy for `--platform darwin` and
   `--platform win32`, the secret scan, `shellcheck` over the shell scripts (`scripts/*.sh`,
-  `scripts/git-hooks/pre-push`) and `actionlint` over the workflows once for all host OSes, on pull requests and on
+  `scripts/git-hooks/pre-push`, `scripts/git-hooks/post-merge`) and `actionlint` over the workflows once for all host
+  OSes, on pull requests and on
   `main`. The actionlint release is pinned by version and SHA-256, and a bite control lints a known-bad and a
   near-miss fixture on every run. The three required `backend [G1,G2] (<os>)` aggregators need the job, so a failing
   static check fails them all.

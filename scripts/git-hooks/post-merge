@@ -1,10 +1,12 @@
 #!/bin/sh
 # git post-merge hook (runs after git pull or git merge; not after git pull --rebase): prints a reminder when the
 # merge changed frontend/ or backend/. A running './aeos serve' keeps the code it loaded and the UI bundle it found at
-# start; a restart rebuilds a stale bundle once and loads the new backend. It only prints and never fails.
+# start; a restart rebuilds a stale or missing bundle once and loads the new backend. It only prints, never fails.
 # Install once per clone: git config core.hooksPath scripts/git-hooks
+# printf '%s\n' with a single-quoted text, never echo: sh's echo reads the backslash of '.\aeos.ps1' as an escape
+# ('\a' became a BEL character). CI lints this file with shellcheck (scripts/gates.py SHELLCHECK_COMMAND).
 changed=$(git diff --name-only ORIG_HEAD HEAD -- frontend backend 2>/dev/null) || exit 0
 if [ -n "$changed" ]; then
-  echo "post-merge: frontend/backend changed: restart ./aeos serve (Windows: .\\aeos.ps1 serve)"
+  printf '%s\n' 'post-merge: frontend/backend changed: restart ./aeos serve (Windows: .\aeos.ps1 serve)'
 fi
 exit 0
