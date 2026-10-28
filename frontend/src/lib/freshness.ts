@@ -6,6 +6,8 @@ export interface UiBuild {
   status: string;
   reason?: string | null;
   remedy?: string | null;
+  /** The frontend tree of the bundle ``aeos serve`` judged at start (null when there was none). */
+  bundle_frontend_tree?: string | null;
 }
 
 export interface CodeDrift {
@@ -60,8 +62,12 @@ export function freshnessNotices(health: Health | undefined, bundleTree: string 
       detail: drift.reason ?? undefined,
     });
   }
+  // ui_build was judged once, at server start. It describes this page only when the page is a baked bundle (not the
+  // Vite dev server) and the server still serves the bundle that was judged (a manual rebuild while serving replaces
+  // it, and the STALE / MISSING verdict is then about a bundle nobody is looking at).
   const ui = health.ui_build?.status;
-  if (ui === "STALE" || ui === "MISSING") {
+  const judged = health.ui_build?.bundle_frontend_tree ?? null;
+  if (bundleTree && served === judged && (ui === "STALE" || ui === "MISSING")) {
     const what = ui === "MISSING" ? "tidak punya bundle tampilan" : "menyajikan bundle tampilan usang";
     out.push({
       kind: "ui_build",

@@ -141,14 +141,17 @@ describe("theme toggle", () => {
 describe("freshness banner (R28: the page or the server is out of date)", () => {
   const TREE_A = "a".repeat(40);
   const TREE_B = "b".repeat(40);
-  const health = (o: { served?: string | null; drift?: string; ui?: string } = {}) => ({
-    ui_build: { status: o.ui ?? "FRESH", reason: null },
-    freshness: {
-      served_bundle: { frontend_tree: o.served === undefined ? TREE_A : o.served },
-      code_drift: { status: o.drift ?? "CURRENT", loaded_commit: "0123456789abcdef", head_commit: "fedcba9876543210" },
-      checked_at: new Date().toISOString(),
-    },
-  });
+  const health = (o: { served?: string | null; drift?: string; ui?: string; judged?: string | null } = {}) => {
+    const served = o.served === undefined ? TREE_A : o.served;
+    return {
+      ui_build: { status: o.ui ?? "FRESH", reason: null, bundle_frontend_tree: o.judged === undefined ? served : o.judged },
+      freshness: {
+        served_bundle: { frontend_tree: served },
+        code_drift: { status: o.drift ?? "CURRENT", loaded_commit: "0123456789abcdef", head_commit: "fedcba9876543210" },
+        checked_at: new Date().toISOString(),
+      },
+    };
+  };
 
   async function healthLoaded(calls: { url: string }[]) {
     await waitFor(() => expect(calls.some((c) => c.url === "/api/health")).toBe(true));
@@ -183,10 +186,26 @@ describe("freshness banner (R28: the page or the server is out of date)", () => 
     expect(within(banner).queryByRole("button", { name: "Muat ulang" })).not.toBeInTheDocument();
   });
 
-  it("says when the server serves a STALE bundle", async () => {
+  it("says when the server serves a STALE bundle (the page is the bundle ui_build judged)", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
     api({ health: health({ ui: "STALE" }) });
     renderShell();
     expect(await screen.findByTestId("freshness-banner")).toHaveTextContent("menyajikan bundle tampilan usang (STALE)");
+  });
+
+  it("shows no STALE notice in the Vite dev server (no tree baked in)", async () => {
+    const calls = api({ health: health({ ui: "STALE" }) });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
+  });
+
+  it("shows no STALE notice after a manual rebuild while serving (served tree differs from the judged one)", async () => {
+    vi.stubGlobal("__AEOS_FRONTEND_TREE__", TREE_A);
+    const calls = api({ health: health({ ui: "STALE", served: TREE_A, judged: TREE_B }) });
+    renderShell();
+    await healthLoaded(calls);
+    expect(screen.queryByTestId("freshness-banner")).not.toBeInTheDocument();
   });
 
   it("compares nothing in dev mode (no tree baked in) and with an older server without the block", async () => {

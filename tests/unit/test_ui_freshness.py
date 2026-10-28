@@ -491,6 +491,47 @@ def test_a_leftover_old_bundle_is_restored_even_when_no_rebuild_is_allowed(setti
     assert "restored from frontend/dist.prev" in rec["note"] and "Serving the old bundle" in lines[0]
 
 
+def _undeletable_dist(monkeypatch) -> None:
+    real = freshness._remove_tree
+
+    def remove(path: Path) -> str | None:
+        if path.name == "dist":
+            return "PermissionError: [Errno 13] in use by another process"
+        return real(path)
+
+    monkeypatch.setattr(freshness, "_remove_tree", remove)
+
+
+def test_a_failed_restore_with_dist_still_present_skips_the_rebuild(settings, repo, monkeypatch):
+    """Round-4 bite: dist (no index.html) cannot be deleted, so dist.prev is not put back; a build would run for up to
+    300 s and then fail in the swap with a misleading 'locked' reason. It is not started; the reason is the restore."""
+    _interrupted_swap(repo)
+    (repo / "frontend" / "dist" / "assets").mkdir(parents=True)
+    _install(repo)
+    _undeletable_dist(monkeypatch)
+    fake = FakeBuild(repo)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
+    rec, lines = _ensure(settings, repo)
+    assert fake.calls == [], f"the build ran although the swap could not succeed: {rec}"
+    assert rec["status"] == "MISSING" and rec["remedy"] == "REMEDY", rec
+    assert "not rebuilt: could not restore the old bundle from frontend/dist.prev" in rec["reason"], rec
+    assert "move frontend/dist aside" not in rec["reason"] and "may be locked" not in rec["reason"], rec
+    assert (repo / "frontend" / "dist.prev" / "index.html").is_file(), "the old bundle must stay in dist.prev"
+    assert "No bundle to serve" in lines[-1]
+
+
+def test_a_failed_restore_without_dist_still_rebuilds(settings, repo, monkeypatch):
+    """Near miss: the rename back failed but dist is gone, so nothing blocks the swap: the rebuild runs and succeeds."""
+    _interrupted_swap(repo)
+    _install(repo)
+    monkeypatch.setattr(freshness, "RENAME", FlakyRename(1))
+    fake = FakeBuild(repo)
+    monkeypatch.setattr(freshness, "BUILD_RUNNER", fake)
+    rec, _ = _ensure(settings, repo)
+    assert fake.calls == [NEXT] and rec["status"] == "REBUILT", rec
+    assert "could not restore the old bundle" in rec["note"], rec
+
+
 def test_a_leftover_without_index_html_is_not_restored(settings, repo, monkeypatch):
     """Near miss: a dist.prev without index.html is not a bundle; dist stays MISSING (nothing is invented)."""
     _interrupted_swap(repo)

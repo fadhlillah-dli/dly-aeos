@@ -333,6 +333,13 @@ def ensure_ui_fresh(settings: Settings, repo: Path, *, remedy: str, enabled: boo
         # An interrupted swap left the old bundle in PREV_DIR: put it back before anything else (no npm needed), so a
         # valid bundle is served whether or not a rebuild is allowed; then judge what is on disk now.
         restored, failure = _restore_prev(frontend)
+        if failure is not None and (frontend / "dist").exists():
+            # dist (without index.html) is still there and dist.prev holds the old bundle: a build would only fail
+            # later in the swap (dist cannot be moved onto dist.prev), so it is not started; the restore failure is
+            # the reason.
+            reason = f"{state['reason']}; not rebuilt: {failure}"
+            echo(f"WARNING: Control Center bundle is {status} ({reason}). {_serving(status)}. Remedy: {remedy}")
+            return _ui_record(status, state, reason, remedy=remedy)
         if failure is not None:
             notes.append(failure)
         if restored:

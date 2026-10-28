@@ -250,8 +250,10 @@ HEAD does serve rename `frontend/dist` to `frontend/dist.prev`, `frontend/dist.n
 virus scanner), serve undoes the renames it made, reports the failure and still starts. Both directories are
 gitignored. At the next start a leftover `dist.prev` is put back when `dist` has no `index.html`, before the safety
 checks above (restoring needs no npm), so the old bundle is served even with `--no-ui-build`, an out-of-date
-`node_modules`, a changed `frontend/` or no npm; `ui_build.note` then says it was restored. A leftover `dist.prev` next
-to a complete `dist`, and any `dist.next`, are deleted before the next rebuild.
+`node_modules`, a changed `frontend/` or no npm; `ui_build.note` then says it was restored. When the restore fails
+while `frontend/dist` (without `index.html`) is still there, serve does not start the rebuild (its swap could not move
+`dist` aside) and reports `ui_build` MISSING with the restore failure as the reason; the old bundle stays in `dist.prev`.
+A leftover `dist.prev` next to a complete `dist`, and any `dist.next`, are deleted before the next rebuild.
 
 Whatever failed, serve then judges `frontend/dist` as it is on disk now (after a restore and after the build): a bundle
 is there, it starts with it and reports `ui_build` STALE or UNVERIFIED with the reason; no `index.html`, it reports
@@ -301,9 +303,12 @@ normal query (refetched on window focus after 30 s, no polling) and shows a bann
 |---|---|
 | the tree in the browser's bundle differs from `served_bundle.frontend_tree` | "Tampilan lebih lama dari server: muat ulang halaman" with a "Muat ulang" button |
 | `freshness.code_drift.status` is DRIFT | "Server menjalankan kode lama (<sha>): restart ./aeos serve" |
-| `ui_build.status` is STALE or MISSING | "Server menyajikan bundle tampilan usang (STALE): restart ./aeos serve atau build ulang frontend" (the reason and remedy in the tooltip) |
+| `ui_build.status` is STALE or MISSING, the page is a built bundle and `served_bundle.frontend_tree` equals `ui_build.bundle_frontend_tree` | "Server menyajikan bundle tampilan usang (STALE): restart ./aeos serve atau build ulang frontend" (the reason and remedy in the tooltip) |
 
-In the Vite dev server (no baked tree), or when the served bundle has no build record, nothing is compared. The
+In the Vite dev server (no baked tree), or when the served bundle has no build record, nothing is compared, and the
+`ui_build` notice is not shown either. `ui_build` is judged once when serve starts: after a manual rebuild while the
+server runs, the served tree differs from the tree `ui_build` judged and the STALE or MISSING notice is not shown
+(the reload notice covers a page older than the rebuilt bundle). The
 `post-merge` hook prints its
 reminder with `printf '%s\n'` (sh's `echo` turned the `\a` of `.\aeos.ps1` into a BEL character) and CI lints it with
 `shellcheck` like the `pre-push` hook.

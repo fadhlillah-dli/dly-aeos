@@ -3,12 +3,12 @@ import { bundleFrontendTree, freshnessNotices, type Health } from "./freshness";
 const A = "a".repeat(40);
 const B = "b".repeat(40);
 
-function health(served: string | null, drift = "CURRENT", ui = "FRESH"): Health {
+function health(served: string | null, drift = "CURRENT", ui = "FRESH", judged: string | null = served): Health {
   return {
     status: "ok",
     version: "0.1.0",
     environment: "local",
-    ui_build: { status: ui },
+    ui_build: { status: ui, bundle_frontend_tree: judged },
     freshness: { served_bundle: { frontend_tree: served }, code_drift: { status: drift, loaded_commit: "c".repeat(40) } },
   };
 }
@@ -31,8 +31,25 @@ describe("freshnessNotices", () => {
   });
 
   it("reports ui_build STALE or MISSING, not UNVERIFIED or REBUILT", () => {
-    expect(freshnessNotices(health(A, "CURRENT", "MISSING"), A)[0].text).toContain("tidak punya bundle tampilan (MISSING)");
+    // near miss: baked tree == served tree == the tree ui_build judged, and the verdict was STALE
+    expect(freshnessNotices(health(A, "CURRENT", "STALE"), A).map((n) => n.kind)).toEqual(["ui_build"]);
+    // MISSING at start and still nothing served: judged and served are both null
+    expect(freshnessNotices(health(null, "CURRENT", "MISSING"), A)[0].text).toContain("tidak punya bundle tampilan (MISSING)");
     for (const s of ["UNVERIFIED", "REBUILT", "NOT_RECORDED"]) expect(freshnessNotices(health(A, "CURRENT", s), A)).toEqual([]);
+  });
+
+  it("keeps the ui_build notice out of the Vite dev server (no baked tree)", () => {
+    expect(freshnessNotices(health(A, "CURRENT", "STALE"), null)).toEqual([]);
+    expect(freshnessNotices(health(null, "CURRENT", "MISSING"), null)).toEqual([]);
+  });
+
+  it("drops the ui_build notice once the served bundle is not the one ui_build judged (manual rebuild)", () => {
+    // started STALE on tree B, rebuilt by hand while serving: the server now serves A, the page runs A
+    expect(freshnessNotices(health(A, "CURRENT", "STALE", B), A)).toEqual([]);
+    // started MISSING, built by hand while serving: the server now serves A
+    expect(freshnessNotices(health(A, "CURRENT", "MISSING", null), A)).toEqual([]);
+    // the page is older than the rebuilt bundle: only the reload notice
+    expect(freshnessNotices(health(A, "CURRENT", "STALE", B), B).map((n) => n.kind)).toEqual(["reload"]);
   });
 });
 
