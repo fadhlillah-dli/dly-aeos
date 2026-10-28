@@ -41,7 +41,7 @@ SERVABLE_GO = {"kimi-k3.1-pro", "mimo-v2.6-pro", "minimax-m3.1-flash", "kimi-k3"
 EXPECTED_ROLES = {
     "agentic-coder": {"backend-api-engineer", "frontend-engineer", "db-data-engineer", "integration-engineer",
                       "data-ai-feature-engineer", "platform-devsecops-engineer", "security-engineer"},
-    "coder": {"qa-test-designer"},
+    "coder": {"qa-test-designer", "independent-verifier"},  # ADR-0126 amendment: verification is Coding work
     "designer": {"ux-ui-designer", "diagram-visual-author"},
     "reasoner": {"solution-architect", "engineering-delivery-analyst", "incident-analyst", "sre-operations-assistant"},
     "researcher": {"ux-research-assistant", "product-analyst", "supply-chain-analyst"},
@@ -99,10 +99,10 @@ def test_category_agents_serve_exactly_the_briefed_roles_and_every_role_exists()
         assert set(defs[key]["allowed_scope"]["roles"]) == roles, key
     assert role_agents.catalog_problems() == []
     assert role_agents.resolve("feature-implementer").agent_key == catalog.IMPLEMENTER_AGENT_KEY
-    # 40 seeded roles, 26 executor roles: every executor role but the deterministic verifier has a worker agent
+    # 40 seeded roles, 26 executor roles: every executor role has a worker agent (independent-verifier -> coder)
     assert len(catalog.ALL_ROLES) == 40 and len(catalog.EXECUTOR_ROLE_KEYS) == 26
     unmapped = {r for r in catalog.EXECUTOR_ROLE_KEYS if role_agents.agent_key_for_role(r) is None}
-    assert unmapped == set(role_agents.UNMAPPED_EXECUTOR_ROLES) == {"independent-verifier"}
+    assert unmapped == set(role_agents.UNMAPPED_EXECUTOR_ROLES) == set()
     adr = ADR.read_text(encoding="utf-8")
     assert all(f"`{r}`" in adr for r in unmapped), "every unmapped executor role is listed in ADR-0126 with its reason"
 
@@ -120,6 +120,14 @@ def test_catalog_check_bites_on_a_role_that_does_not_exist_and_on_a_role_served_
     next(a for a in defs if a["agent_key"] == "writer")["allowed_scope"]["roles"].remove("context-curator")
     assert ("executor role 'context-curator' has no worker agent and is not listed in UNMAPPED_EXECUTOR_ROLES"
             in role_agents.catalog_problems(defs))
+    # near miss: a non-worker agent of the same role (the deterministic verifier runner) is not a second worker
+    defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)
+    assert catalog.role_agent_map()["independent-verifier"] == ["independent-verifier", "coder"]
+    assert role_agents.catalog_problems(defs) == []
+    # red: a second worker agent for independent-verifier is a duplicate even beside the non-worker runner
+    next(a for a in defs if a["agent_key"] == "analyst")["allowed_scope"]["roles"].append("independent-verifier")
+    assert "role 'independent-verifier' is served by more than one agent: analyst, coder" in \
+        role_agents.catalog_problems(defs)
     # near miss: moving a role to another agent (still exactly one) is sound
     defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)
     next(a for a in defs if a["agent_key"] == "writer")["allowed_scope"]["roles"].remove("context-curator")
@@ -331,11 +339,29 @@ def test_unmapped_role_is_blocked_with_role_unknown_never_given_to_the_implement
     assert near.state == "READY" and near.assigned_agent_key == "writer"
 
 
-def test_verifier_role_is_refused_as_a_worker_task(db, fakes):
+def test_an_independent_verifier_task_maps_to_the_coder_agent(db, fakes):
+    """ADR-0126 amendment: verification of code and tests is Coding work, so the task runs on ``coder`` (never on
+    the implementer by default, never ROLE_UNKNOWN). A different model family from the implementer's is NOT yet
+    enforced (follow-up)."""
+    assert role_agents.resolve("independent-verifier") == role_agents.RoleAgent("independent-verifier", "coder")
     specs = _ready(db, fakes, [{"task_key": "v", "role_key": "independent-verifier"}])
     te = db.scalar(select(TaskExecution).where(TaskExecution.task_id == specs[0].id))
-    assert te.state == "BLOCKED" and te.reason_code == "ROLE_UNKNOWN"
-    assert "served by agent independent-verifier, which is not an OpenCode worker agent" in te.reason
+    assert te.assigned_agent_key == "coder" and te.reason_code != "ROLE_UNKNOWN"
+    adm = scheduler.admission_check(db, specs[0].id)
+    assert ("AGENT_DISABLED" in [c for c, _ in adm.waits]) and not [b for b in adm.blocks if b[0] == "ROLE_UNKNOWN"]
+    _enable(db, "coder")
+    assert scheduler.admission_check(db, specs[0].id).agent.agent_key == "coder"
+
+
+def test_a_role_served_only_by_a_non_worker_agent_is_refused(monkeypatch):
+    """Red: with the coder mapping removed, independent-verifier falls back to no worker task (ROLE_UNKNOWN naming
+    the deterministic runner), never to the implementer."""
+    defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)
+    next(a for a in defs if a["agent_key"] == "coder")["allowed_scope"]["roles"].remove("independent-verifier")
+    monkeypatch.setattr(catalog, "AGENT_DEFINITIONS", defs)
+    got = role_agents.resolve("independent-verifier")
+    assert got.agent_key is None and got.code == role_agents.ROLE_UNKNOWN
+    assert "served by agent independent-verifier, which is not an OpenCode worker agent" in got.reason
 
 
 def test_repair_stays_on_the_role_agent(db, fakes):
@@ -475,6 +501,49 @@ def test_hard_max_active_is_the_one_source_of_every_concurrency_validator(db):
     assert inspect.signature(cli.concurrency).parameters["max_active"].default.max == HARD_MAX_ACTIVE
     with pytest.raises(ValidationFailed, match=f"between 1 and {HARD_MAX_ACTIVE}"):
         scheduler.set_concurrency(db, max_active=HARD_MAX_ACTIVE + 1, actor="t", actor_user_id="u", rationale="x" * 20)
+
+
+CAP_NAMES = ("HARD_MAX_ACTIVE", "MAX_ROUTE_ACTIVE")
+CAP_HOME = "aeos/core/config.py"
+
+
+def second_cap_copies(sources: dict[str, str]) -> list[str]:
+    """Findings: a concurrency bound stated as a number anywhere but ``HARD_MAX_ACTIVE`` in aeos.core.config (the
+    global worker cap of ADR-0126 and the per-route caps of ADR-0124 share that one upper bound)."""
+    out: list[str] = []
+    for path, source in sorted(sources.items()):
+        for node in ast.walk(ast.parse(source)):
+            targets = node.targets if isinstance(node, ast.Assign) else \
+                [node.target] if isinstance(node, ast.AnnAssign) else []
+            value = getattr(node, "value", None)
+            for tgt in targets:
+                if isinstance(tgt, ast.Name) and tgt.id in CAP_NAMES and isinstance(value, ast.Constant) and not (
+                        path == CAP_HOME and tgt.id == "HARD_MAX_ACTIVE"):
+                    out.append(f"{path}: {tgt.id} = {value.value!r} is a second copy of the concurrency bound; "
+                               "derive it from aeos.core.config.HARD_MAX_ACTIVE")
+    return out
+
+
+def test_the_concurrency_bound_has_one_source():
+    from aeos.core import config as config_mod
+    from aeos.workforce import limits
+
+    pkg = ROOT / "backend"
+    sources = {f.relative_to(pkg).as_posix(): f.read_text(encoding="utf-8") for f in (pkg / "aeos").rglob("*.py")}
+    assert second_cap_copies(sources) == []
+    assert limits.HARD_MAX_ACTIVE is config_mod.HARD_MAX_ACTIVE and config_mod.MAX_ROUTE_ACTIVE <= HARD_MAX_ACTIVE
+
+
+def test_second_cap_copy_check_bites():
+    red = {"aeos/workforce/limits.py": "HARD_MAX_ACTIVE = 2\n", CAP_HOME: "HARD_MAX_ACTIVE = 2\nMAX_ROUTE_ACTIVE = 2\n"}
+    assert second_cap_copies(red) == [
+        f"{CAP_HOME}: MAX_ROUTE_ACTIVE = 2 is a second copy of the concurrency bound; derive it from "
+        "aeos.core.config.HARD_MAX_ACTIVE",
+        "aeos/workforce/limits.py: HARD_MAX_ACTIVE = 2 is a second copy of the concurrency bound; derive it from "
+        "aeos.core.config.HARD_MAX_ACTIVE"]
+    near = {"aeos/workforce/limits.py": "from aeos.core.config import HARD_MAX_ACTIVE\n",
+            CAP_HOME: "HARD_MAX_ACTIVE: int = 2\nMAX_ROUTE_ACTIVE = HARD_MAX_ACTIVE\n"}
+    assert second_cap_copies(near) == []
 
 
 def test_literal_bound_check_bites():

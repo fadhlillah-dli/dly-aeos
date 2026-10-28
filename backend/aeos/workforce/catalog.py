@@ -477,7 +477,9 @@ CATEGORY_AGENTS: dict[str, tuple[str, tuple[str, ...], str]] = {
         "backend-api-engineer", "frontend-engineer", "db-data-engineer", "integration-engineer",
         "data-ai-feature-engineer", "platform-devsecops-engineer", "security-engineer"),
         "pekerjaan rekayasa yang mengubah kode lintas banyak langkah"),
-    "coder": ("Coding", ("qa-test-designer",), "rancangan dan kode uji"),
+    # independent-verifier: verifying code and tests is Coding work (ADR-0126 amendment); that the coder's route is
+    # of another model family than the task implementer's is NOT yet enforced (follow-up).
+    "coder": ("Coding", ("qa-test-designer", "independent-verifier"), "rancangan, kode uji dan verifikasi kode"),
     "designer": ("Design", ("ux-ui-designer", "diagram-visual-author"), "desain UI/UX dan sumber diagram"),
     "reasoner": ("Reasoning", (
         "solution-architect", "engineering-delivery-analyst", "incident-analyst", "sre-operations-assistant"),

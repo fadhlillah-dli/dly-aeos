@@ -32,33 +32,35 @@ def _worker_agent(agent_key: str) -> bool:
 
 
 def resolve(role_key: str | None) -> RoleAgent:
-    """The worker agent for *role_key*, or ROLE_UNKNOWN with the reason (never a silent implementer default)."""
+    """The worker agent for *role_key*, or ROLE_UNKNOWN with the reason (never a silent implementer default).
+
+    Only OpenCode worker agents count: a non-worker agent with the same role (the deterministic verifier runner of
+    ``independent-verifier``, ADR-0060) works in its own trust context and never runs a worker task."""
     agents = catalog.role_agent_map().get(role_key or "", [])
     if not agents:
         return RoleAgent(role_key, None, ROLE_UNKNOWN,
                          f"no agent definition serves role {role_key!r}; a role without its own agent is never given "
                          f"to {catalog.IMPLEMENTER_AGENT_KEY} by default (map it in a reviewed catalog change, ADR-0126)")
-    if len(agents) > 1:
+    workers = [a for a in agents if _worker_agent(a)]
+    if len(workers) > 1:
         return RoleAgent(role_key, None, ROLE_UNKNOWN,
-                         f"role {role_key!r} is served by more than one agent ({', '.join(sorted(agents))}); the "
+                         f"role {role_key!r} is served by more than one agent ({', '.join(sorted(workers))}); the "
                          "catalog must name exactly one (ADR-0126)")
-    agent_key = agents[0]
-    if not _worker_agent(agent_key):
+    if not workers:
         return RoleAgent(role_key, None, ROLE_UNKNOWN,
-                         f"role {role_key!r} is served by agent {agent_key}, which is not an OpenCode worker agent; "
-                         "its tasks are not run by a worker (ADR-0126)")
-    return RoleAgent(role_key, agent_key)
+                         f"role {role_key!r} is served by agent {', '.join(sorted(agents))}, which is not an OpenCode "
+                         "worker agent; its tasks are not run by a worker (ADR-0126)")
+    return RoleAgent(role_key, workers[0])
 
 
 def agent_key_for_role(role_key: str | None) -> str | None:
     return resolve(role_key).agent_key
 
 
-# Executor roles that no OpenCode worker agent serves, with the reason ADR-0126 states for each.
-UNMAPPED_EXECUTOR_ROLES: dict[str, str] = {
-    "independent-verifier": "a deterministic verifier runner (agent independent-verifier, ADR-0060), not an LLM "
-                            "worker; a separate trust context from the implementer (§19)",
-}
+# Executor roles that no OpenCode worker agent serves, with the reason ADR-0126 states for each. Empty: since the
+# ADR-0126 amendment of 2026-10-28 independent-verifier tasks run on the coder agent (verification of code and tests
+# is Coding work); the deterministic verifier runner keeps its own trusted-suite role (ADR-0060).
+UNMAPPED_EXECUTOR_ROLES: dict[str, str] = {}
 # (marker in the lower-cased route key, family) never preferred (ADR-0126): Gemini 4 Argon and the Qwen family (Go
 # serves them on API families the broker does not support; owner answer 2 of 2026-10-28), any Claude-family model
 # (AGENTS.md invariant 6: Claude only through the native claude binary) and meta-routers (they pick the model
@@ -72,9 +74,9 @@ NEVER_PREFERRED: tuple[tuple[str, str], ...] = (
 
 def catalog_problems(definitions: list[dict[str, object]] | None = None,
                      executor_roles: frozenset[str] | None = None) -> list[str]:
-    """Findings of the role -> agent map (empty = sound): a role that does not exist, a role served twice, an
-    executor role left without a worker agent and not listed in UNMAPPED_EXECUTOR_ROLES, or a preferred route of a
-    model family that is never preferred."""
+    """Findings of the role -> agent map (empty = sound): a role that does not exist, a role two worker agents
+    serve, an executor role left without a worker agent and not listed in UNMAPPED_EXECUTOR_ROLES, or a preferred
+    route of a model family that is never preferred."""
     defs = catalog.AGENT_DEFINITIONS if definitions is None else definitions
     executors = catalog.EXECUTOR_ROLE_KEYS if executor_roles is None else executor_roles
     known = {str(r["role_key"]) for r in catalog.ALL_ROLES} | set(executors)
@@ -99,8 +101,9 @@ def catalog_problems(definitions: list[dict[str, object]] | None = None,
             if bad:
                 problems.append(f"agent {key} prefers route {route} ({bad} is never preferred, ADR-0126)")
     for role, agents in sorted(served.items()):
-        if len(agents) > 1:
-            problems.append(f"role {role!r} is served by more than one agent: {', '.join(sorted(agents))}")
+        workers = [a for a in agents if a in worker]  # a non-worker agent of the same role never runs a worker task
+        if len(workers) > 1:
+            problems.append(f"role {role!r} is served by more than one agent: {', '.join(sorted(workers))}")
     for role in sorted(executors):
         if not set(served.get(role, [])) & worker and role not in UNMAPPED_EXECUTOR_ROLES:
             problems.append(f"executor role {role!r} has no worker agent and is not listed in UNMAPPED_EXECUTOR_ROLES")

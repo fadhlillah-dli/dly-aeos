@@ -43,7 +43,7 @@
    | Agent | LiveBench category (release) | Roles |
    |---|---|---|
    | `agentic-coder` | Long Agentic (2.0, 2026-10-25) | backend-api-engineer, frontend-engineer, db-data-engineer, integration-engineer, data-ai-feature-engineer, platform-devsecops-engineer, security-engineer |
-   | `coder` | Coding (2.0, 2026-10-25) | qa-test-designer |
+   | `coder` | Coding (2.0, 2026-10-25) | qa-test-designer, independent-verifier (amendment below) |
    | `designer` | Design (2.0, 2026-10-25) | ux-ui-designer, diagram-visual-author |
    | `reasoner` | Reasoning (2.0, 2026-10-25) | solution-architect, engineering-delivery-analyst, incident-analyst, sre-operations-assistant |
    | `researcher` | Research (2.0, 2026-10-25) | ux-research-assistant, product-analyst, supply-chain-analyst |
@@ -64,15 +64,22 @@
      and restarts the attempt on it. Any other agent is refused with **`AGENT_OUT_OF_SCOPE`** (with `ROLE_UNKNOWN`
      when no worker agent serves the role). It is never accepted and audited, then overridden by the map.
    * `role_agents.catalog_problems` keeps the catalog sound (tested): every served role exists in the 40-role
-     catalog, no role has two agents, and every executor role has a worker agent unless it is listed below.
+     catalog, no role has two worker agents, and every executor role has a worker agent unless it is listed below.
+     Only OpenCode worker agents count: a non-worker agent of the same role (the deterministic verifier runner) works
+     in its own trust context and never runs a worker task, so it is neither the role's worker nor a duplicate.
 
-   **Executor roles left without a worker agent** (`role_agents.UNMAPPED_EXECUTOR_ROLES`):
+   **Executor roles left without a worker agent** (`role_agents.UNMAPPED_EXECUTOR_ROLES`): none since the
+   amendment of 2026-10-28.
 
-   * `independent-verifier`: the deterministic verifier runner (agent `independent-verifier`, harness
-     `verifier-runner`, ADR-0060), not an LLM worker, and a separate trust context from the implementer (§19). A
-     TaskSpec with this role is refused with `ROLE_UNKNOWN` instead of being run by the implementer as before.
-     Mapping it to an LLM worker (the review suggested a route of another model family than the implementer's) is a
-     new question for the owner, not part of this decision.
+   * **Amendment (2026-10-28): `independent-verifier` -> `coder`.** Verification of code and tests is Coding work,
+     so a TaskSpec with role `independent-verifier` runs on the `coder` category agent (it waits with
+     `AGENT_DISABLED` until the owner enables `coder`). The first draft of this ADR left the role unmapped and
+     refused such a task with `ROLE_UNKNOWN`; the deterministic verifier runner (agent `independent-verifier`,
+     harness `verifier-runner`, ADR-0060) is unchanged and still runs the controller's trusted suite in its own
+     trust context (§19). **Not yet enforced (follow-up):** that the `coder` route of a verification task is of a
+     different model family from the route that implemented the task under verification. Until that check
+     exists, a verifier task may run on the same model family as its implementer, so its result is not an
+     independent second opinion in the §19 sense.
 
    The other 15 roles of the catalog are planning, review, human or service roles that never run as worker tasks.
 
@@ -115,9 +122,13 @@
      unscored because LiveBench lists two builds of it (full precision and nvfp4) and the endpoint does not say which
      one it serves.
 
-4. **`HARD_MAX_ACTIVE` is one constant.** It moves to `aeos.workforce.limits` (still 2, answer 4) and is the bound
-   of `scheduler.set_concurrency`, the `aeos work concurrency` argument and the API body `ConcurrencyIn`. A test
-   refuses a literal bound in any of the three. Raising it remains an ADR amendment with the §44 evidence gate.
+4. **`HARD_MAX_ACTIVE` is one constant.** It is defined once in `aeos.core.config` (still 2, answer 4; core cannot
+   import workforce) and re-exported by `aeos.workforce.limits`. It is the bound of `scheduler.set_concurrency`, the
+   `aeos work concurrency` argument and the API body `ConcurrencyIn`, and the per-route caps of ADR-0124
+   (`MAX_ROUTE_ACTIVE`, a separate concept: tasks at once on one route or provider) are derived from it rather than
+   stated as a second number. Tests refuse a literal bound in any of the three validators and any second numeric
+   assignment of `HARD_MAX_ACTIVE` or `MAX_ROUTE_ACTIVE` in `backend/aeos`. Raising it remains an ADR amendment
+   with the §44 evidence gate.
 
 5. **What does not change.** No route, route pool, `CONFIG_FIELDS` value, decision, budget or `paid_fallback`
    changes; no file under `policy/`; the worker prompt, `BASE_ALLOW`, `ALWAYS_DENY`, `RUN_MESSAGE`, the OpenCode
@@ -157,5 +168,7 @@
 * The v1 question count (50 assumed), the snapshots and reasoning effort Go serves (LiveBench runs at high effort;
   the deepseek-v4.1-flash-1017 build in particular), and tool calling on Go routes (models.dev declares it; the probe
   is ADR-0125; hy3 has no declared tool capability).
+* That an `independent-verifier` task runs on another model family than its implementer: not enforced (amendment
+  of decision 2, follow-up).
 * Admission and routing with the category agents on a real host (unit tests on macOS arm64 only, E2); Windows and
   macOS Intel run them only in CI.
