@@ -1167,28 +1167,31 @@ Each item below is recorded either as an ADR, through the builder, or with the c
 
 ### 2.13 Data classification of the DLY AEOS project [per machine]
 
-Decided 2026-10-29: the DLY AEOS project (`dly-aeos`, PERSONAL) becomes PUBLIC, because its repository is public
+Decided 2026-10-28: the DLY AEOS project (`dly-aeos`, PERSONAL) becomes PUBLIC, because its repository is public
 on GitHub. `aeos seed` registers it INTERNAL. Until this is recorded, every task planned for it is at least
 INTERNAL, so the PUBLIC-only routes (DeepSeek on OpenCode Go, the free OpenRouter models) never take its tasks
 (ADR-0133).
 
-Record: you approve in chat and the maintainer runs this as your actor (your rule of 2026-10-29), or you run it
-yourself. It asks for no password; `<admin>` is your SUPER_ADMIN username:
+Record: you approve in chat and the maintainer runs this as your actor (your rule R43 of 2026-10-28), or you run
+it yourself. It asks for no password: that is allowed only because you approve in chat, and the decision and the
+audit record say so and name your approval (`--approval-ref`). `<admin>` is your SUPER_ADMIN username:
 
 ```bash
 ./aeos project reclassify --project dly-aeos --domain PERSONAL \
   --to PUBLIC --actor "<admin>" \
-  --reason "owner decision 2026-10-29: the repository is public"
+  --approval-ref "chat 2026-10-28, owner rule R43" \
+  --reason "owner decision 2026-10-28: the repository is public"
 ```
 
 What it records: a POLICY decision on `project_classification:<project id>` naming the old class INTERNAL, the new
-class PUBLIC, your reason and your username, plus the audit record `portfolio.project.reclassify` and the event
-`portfolio.project.reclassified` with the same facts. What it does not change: TaskSpecs that already exist keep
-their class (INTERNAL). Only plans and task DAGs compiled afterwards use PUBLIC as their floor, and a task is PUBLIC
-only when its plan says so. Check it with `./aeos project list --domain PERSONAL` (the class column) and
+class PUBLIC, your reason, your username and the approval reference, plus the audit record
+`portfolio.project.reclassify` and the event `portfolio.project.reclassified` with the same facts. What it does not
+change: TaskSpecs that already exist keep their class (INTERNAL). Plans and task DAGs compiled afterwards use PUBLIC:
+a task whose plan states no class is PUBLIC, and a task the plan marks higher keeps the higher class. Check it with `./aeos project list --domain PERSONAL` (the class column) and
 `./aeos policy decisions --kind POLICY --target-type project_classification`.
 
-To undo: run the command again with `--to INTERNAL` (a raise needs no decision; it ends the lowering decision), or
+To undo: run the command again with `--to INTERNAL` (a raise needs no decision; it ends the lowering decision, and
+open tasks of the project stop using PUBLIC-only routes at once), or
 revoke the decision with `./aeos policy revoke <decision id> --as "<admin>" --reason "<why>"` (asks for your
 password), which restores INTERNAL. An OFFICE project is never lowered by this command: that is the company's
 authorisation ([4.1](#41-company-authorisation-for-office)). Raising an OFFICE project is allowed.

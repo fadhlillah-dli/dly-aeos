@@ -501,10 +501,32 @@ def _clamp(value: Any, lo: int, hi: int, default: int) -> int:
     return max(lo, min(hi, v))
 
 
-def _max_class(a: str, b: str) -> str:
-    ia = CLASS_ORDER.index(a) if a in CLASS_ORDER else 1
-    ib = CLASS_ORDER.index(b) if b in CLASS_ORDER else 1
-    return CLASS_ORDER[max(ia, ib)]
+STRICTEST_CLASS = CLASS_ORDER[-1]
+
+
+def task_classification(project_class: Any, stated: Any) -> tuple[str, dict[str, Any] | None]:
+    """The data class a compiled task gets (ADR-0133), and a finding when a class was not understood.
+
+    * No stated class: the project's class (a PUBLIC project's task is PUBLIC; never a fixed INTERNAL default).
+    * A stated class can only raise it: the higher of the project class and the stated class.
+    * An unknown or invalid label (the task's, or the project's) becomes the strictest class, RESTRICTED, with a
+      finding the compile output shows: an unreadable label never relaxes anything (fail closed)."""
+    finding: dict[str, Any] | None = None
+    floor = str(project_class or "").strip().upper()
+    if floor not in CLASS_ORDER:
+        finding = {"code": "PROJECT_CLASS_UNKNOWN", "stated": str(project_class)[:64], "applied": STRICTEST_CLASS,
+                   "message": f"project data_classification {str(project_class)[:64]!r} is not one of "
+                              f"{', '.join(CLASS_ORDER)}; tasks compiled as {STRICTEST_CLASS} (the strictest class)"}
+        floor = STRICTEST_CLASS
+    if stated is None or (isinstance(stated, str) and not stated.strip()):
+        return floor, finding
+    label = stated.strip().upper() if isinstance(stated, str) else ""
+    if label not in CLASS_ORDER:
+        return STRICTEST_CLASS, {
+            "code": "TASK_CLASS_UNKNOWN", "stated": str(stated)[:64], "applied": STRICTEST_CLASS,
+            "message": f"task data_classification {str(stated)[:64]!r} is not one of {', '.join(CLASS_ORDER)}; "
+                       f"compiled as {STRICTEST_CLASS} (the strictest class)"}
+    return CLASS_ORDER[max(CLASS_ORDER.index(floor), CLASS_ORDER.index(label))], finding
 
 
 def _str_list(v: Any) -> list[str]:
@@ -636,8 +658,7 @@ def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVer
             "paths": allowed, "notes": str(cap_in.get("notes") or ""),
         },
         "capability_ttl_seconds": _clamp(task.get("capability_ttl_seconds"), 300, 86400, 3600),
-        "data_classification": _max_class(project.data_classification or "INTERNAL",
-                                          str(task.get("data_classification") or "INTERNAL")),
+        "data_classification": task_classification(project.data_classification, task.get("data_classification"))[0],
         "model_route_policy": {
             "pool": route_in.get("pool") if route_in.get("pool") in ("WORKER", "LOCAL") else "WORKER",
             "requires_tools": route_in.get("requires_tools") is not False,
@@ -705,10 +726,14 @@ def compile_version(session: Session, version: PlanVersion, *, actor: str) -> di
                             owner=_owner(f_gov.get(str(f["key"]), {}).get("owner"))))
     by_key: dict[str, TaskSpec] = {}
     artifacts = artifact_index(session, version)
+    class_findings: list[dict[str, Any]] = []
     for t in content.get("tasks") or []:
         rev = role_revision(session, str(t.get("role_key") or DEFAULT_ROLE))
         fields = task_spec_fields(t, project=project, version=version, protected=protected, role_revision_hash=rev,
                                   artifacts=artifacts)
+        finding = task_classification(project.data_classification, t.get("data_classification"))[1]
+        if finding is not None:  # an unreadable class was compiled as the strictest class; say so
+            class_findings.append({**finding, "task_key": fields["task_key"]})
         spec = TaskSpec(**fields, spec_hash=content_hash(fields))
         session.add(spec)
         by_key[spec.task_key] = spec
@@ -721,11 +746,15 @@ def compile_version(session: Session, version: PlanVersion, *, actor: str) -> di
                  action="plan.dag.compile", target_type="plan_version", target_id=version.id,
                  project_id=version.project_id, domain=version.domain,
                  details={"tasks": len(by_key), "manifest_hash": version.manifest_hash,
-                          "protected_paths_default": list(protected), "platform_project": bool(project.is_platform)})
+                          "protected_paths_default": list(protected), "platform_project": bool(project.is_platform),
+                          "classification_findings": class_findings})
     events.emit(session, source="planning", kind="plan.dag.compiled", entity_type="plan_version", entity_id=version.id,
                 entity_version=version.manifest_hash, project_id=version.project_id, domain=version.domain,
                 payload={"plan_id": version.plan_id, "tasks": len(by_key)})
-    return {"created": True, "plan_version_id": version.id, "tasks": len(by_key)}
+    out: dict[str, Any] = {"created": True, "plan_version_id": version.id, "tasks": len(by_key)}
+    if class_findings:
+        out["classification_findings"] = class_findings
+    return out
 
 
 # ---------------------------------------------------------------- projection

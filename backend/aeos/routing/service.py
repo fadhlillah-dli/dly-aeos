@@ -67,6 +67,7 @@ from aeos.routing.facade import (
     TOOL_PROBE_PASS,
     RouteDecision,
 )
+from aeos.routing.task_class import effective_task_class
 
 log = logging.getLogger("aeos.routing")
 
@@ -332,8 +333,9 @@ def free_worker_problem(session: Session, route: ModelRoute, *, run_id: str | No
         task = session.get(TaskSpec, run.task_id) if run is not None and run.task_id else None
         if task is None:
             problems.append("the run's TaskSpec cannot be read, so its data classification is unknown (fail closed)")
-        elif task.data_classification != DataClassification.PUBLIC.value:
-            problems.append(f"the run's task is {task.data_classification}: decision C serves PUBLIC data only")
+        elif (klass := effective_task_class(session, task)) != DataClassification.PUBLIC.value:
+            # ADR-0133: the higher of the task's class and its project's current class (a raise applies at once)
+            problems.append(f"the run's task is {klass}: decision C serves PUBLIC data only")
     return "; ".join(problems) or None
 
 
@@ -1212,7 +1214,7 @@ def _select_eval_route(session: Session, task: TaskSpec, pol: dict[str, Any], bo
         raise Blocked(f"the task is bound to {label}; its route {key or 'UNKNOWN'} cannot serve it: "
                       + "; ".join(bound.get("reasons") or []), code="EVAL_ROUTE_NOT_SERVED", details=bound)
     route = get_route(session, key)
-    decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
+    decision = eligible_routes(session, domain=task.domain, data_classification=effective_task_class(session, task),
                                needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=route.pool,
                                tools=[str(t) for t in task.tools_allowed or []])
     reasons = list(decision.rejected.get(key) or ([] if key in decision.eligible else ["not eligible"]))
@@ -1264,6 +1266,7 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
     from aeos.routing import capacity
 
     pol = _task_policy(task)
+    klass = effective_task_class(session, task)  # ADR-0133: max(task class, current project class)
     try:
         from aeos.broker.facade import SERVED_POOLS as served
     except ImportError:  # pragma: no cover - broker is part of the platform
@@ -1286,7 +1289,7 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
         raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "
                       f"only {', '.join(served)} routes are served", code="POOL_NOT_SERVED",
                       details={"pool": pol["pool"], "served_pools": list(served)})
-    decision, limited = _eligibility(session, domain=task.domain, data_classification=task.data_classification,
+    decision, limited = _eligibility(session, domain=task.domain, data_classification=klass,
                                      needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=pol["pool"],
                                      tools=[str(t) for t in task.tools_allowed or []])
     eligible = list(decision.eligible)
@@ -1325,10 +1328,10 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
             raise _limit_wait(session, [], limited, rejected, would_serve=None)
         raise Blocked("no approved route is eligible for this task", code="NO_ELIGIBLE_ROUTE",
                       details={"rejected": rejected, "domain": task.domain,
-                               "classification": task.data_classification})
+                               "classification": klass})
     preferred = preferred_list(preferred_routes)
     ranked = rank(session, [*eligible, *limited], role, preferred=preferred,
-                  data_classification=task.data_classification)
+                  data_classification=klass)
     held: list[str] = []  # skipped for load (busy, allowance fit, PUBLIC share)
     passed: list[str] = []  # skipped for a limit (free tier, cool-down)
     for item in ranked:
@@ -1346,7 +1349,7 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
             raise _limit_wait(session, held, passed, rejected, would_serve=key)
         serving = [r.route_key for r in ranked if r.route_key not in limited and r.route_key not in held]
         basis = item.basis.lower()
-        tier = ("Go first (decision C')" if item.tier == 0 and task.data_classification == "PUBLIC"
+        tier = ("Go first (decision C')" if item.tier == 0 and klass == "PUBLIC"
                 else "free (decision C)" if free_first(route) else None)
         how = f"{tier}, then by {basis}" if tier else f"by {basis}"
         if item.preferred is not None:
@@ -1391,7 +1394,7 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
                       f"evaluated route {bound.get('route_key')}", code="EVAL_NO_FALLBACK", details=bound)
     failed = get_route(session, failed_route_key)
     pol = _task_policy(task)
-    decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
+    decision = eligible_routes(session, domain=task.domain, data_classification=effective_task_class(session, task),
                                needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=failed.pool,
                                tools=[str(t) for t in task.tools_allowed or []])
     eligible = [k for k in decision.eligible if not pol["routes"] or k in pol["routes"]]

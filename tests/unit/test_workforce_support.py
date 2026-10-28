@@ -221,8 +221,10 @@ class FakeModules:
 
 
 # ----------------------------------------------------------------------------- builders
-def make_project(db: Session, *, domain: str = "PERSONAL", key: str | None = None, platform: bool = False) -> Project:
-    p = Project(project_key=key or f"proj-{new_id()[:8]}", name="Test project", domain=domain, is_platform=platform)
+def make_project(db: Session, *, domain: str = "PERSONAL", key: str | None = None, platform: bool = False,
+                 classification: str = "INTERNAL") -> Project:
+    p = Project(project_key=key or f"proj-{new_id()[:8]}", name="Test project", domain=domain, is_platform=platform,
+                data_classification=classification)
     db.add(p)
     db.flush()
     return p

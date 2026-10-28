@@ -57,6 +57,14 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
     return impl(session, task=task, failed_route_key=failed_route_key)
 
 
+def effective_task_class(session: Session, task: TaskSpec) -> str:
+    """Additive (ADR-0133): the class routing applies to *task*, max(its compiled class, its project's current
+    class). Every reader that checks a route against a task's class uses it, so a project raise applies at once."""
+    from aeos.routing.task_class import effective_task_class as impl
+
+    return impl(session, task)
+
+
 def terms_eligibility(route: ModelRoute, *, data_classification: str) -> list[str]:
     """Terms/data/provider eligibility reasons of *route* for a workload of *data_classification* (empty =
     eligible). The evaluation gate of §40/§43; a subset of the routing hard filter."""

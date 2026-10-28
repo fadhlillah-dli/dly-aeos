@@ -1,6 +1,6 @@
 """`aeos project reclassify`: the owner path that changes a project's data classification (ADR-0133).
 
-Owner decision 2026-10-29: the DLY AEOS platform project (seeded INTERNAL) becomes PUBLIC, so PUBLIC-only routes may
+Owner decision 2026-10-28: the DLY AEOS platform project (seeded INTERNAL) becomes PUBLIC, so PUBLIC-only routes may
 take its tasks. Raising a class is allowed with an audit record; lowering is a SUPER_ADMIN POLICY decision with an
 audit record and an event naming old class, new class, reason and actor; an OFFICE project is never lowered (master
 s23); in-flight work keeps its class; the HTTP PATCH never changes the class. Each refusal asserts its own message,
@@ -26,7 +26,7 @@ from aeos.planning import dag
 from tests.conftest import AuthedClient, create_admin, create_viewer
 from tests.unit.test_planning_support import make_project, sample_content, task
 
-REASON = "owner approved in chat 2026-10-29: the repository is public on GitHub"
+REASON = "owner approved in chat 2026-10-28: the repository is public on GitHub"
 ACTION = "portfolio.project.reclassify"
 EVENT = "portfolio.project.reclassified"
 
@@ -178,6 +178,10 @@ def test_lowering_records_decision_audit_and_event(db, secrets_memory):
     assert db.scalar(select(AuditEvent).where(AuditEvent.action == "decision.record",
                                               AuditEvent.target_id == d.id)) is not None
     assert "Actor owner; reason: " + REASON in r.output
+    # no --approval-ref: recorded as absent and said so, never invented
+    assert "Owner approval: not given (--approval-ref)" in r.output
+    assert d.details["approval_ref"] is None and a.details["approval_ref"] is None
+    assert "owner rule R43" in d.details["actor_check"] and a.details["actor_check"] == d.details["actor_check"]
     assert "In-flight work keeps its class" in r.output
     assert "Only plans and task DAGs compiled after this change use PUBLIC as their floor" in r.output
 
@@ -215,7 +219,13 @@ def test_owner_command_dry_run_on_the_seeded_platform_project(db, secrets_memory
     assert "Project dly-aeos (PERSONAL): INTERNAL -> PUBLIC (lowered)." in r.output
     assert _project(db, pid).data_classification == "PUBLIC"
     [d] = _decisions(db)
-    assert d.rationale == "owner decision 2026-10-29: the repository is public" and d.target_version == "PUBLIC"
+    assert d.rationale == "owner decision 2026-10-28: the repository is public" and d.target_version == "PUBLIC"
+    # how the owner approved is in the decision and the audit record (ADR-0133 decision 8)
+    assert d.details["approval_ref"] == "chat 2026-10-28, owner rule R43"
+    [a] = _audits(db, "SUCCESS")
+    assert a.details["approval_ref"] == "chat 2026-10-28, owner rule R43" and a.details["decision_id"] == d.id
+    assert _events(db)[0].payload["approval_ref"] == "chat 2026-10-28, owner rule R43"
+    assert "Owner approval: chat 2026-10-28, owner rule R43" in r.output
 
 
 def test_reason_is_required_and_lowercase_class_is_accepted(db):

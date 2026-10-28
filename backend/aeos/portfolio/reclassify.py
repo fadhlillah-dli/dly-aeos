@@ -1,8 +1,10 @@
 """Owner-only change of a project's data classification (ADR-0133; master §04, §20, §23, §24).
 
-A project's class is the floor of what is planned for it (``planning.dag`` gives each task the higher of the project
-class and the class its plan states), of its attachments and memory, and the delivery gate G0 refuses a task below
-it. It is chosen at creation; this module is the one audited path that changes it afterwards.
+A project's class is the floor of what is planned for it (``planning.dag.task_classification``: a task with no stated
+class gets the project's class, a stated class can only raise it, an unknown label becomes RESTRICTED), of its
+attachments and memory; routing applies the higher of a task's class and its project's current class
+(``routing.task_class``), and the delivery gate G0 refuses a task below it. It is chosen at creation; this module is
+the one audited path that changes it afterwards.
 
 * **Raising** (more restrictive) needs no decision: an actor who may write (an active SUPER_ADMIN whose scope covers
   the project; VIEWER is read-only, §02) gets one audit record and one event. A raise also ends (INVALIDATED) the
@@ -15,9 +17,9 @@ it. It is chosen at creation; this module is the one audited path that changes i
   the newest one (``aeos policy revoke``) restores the class it lowered from (``on_decision_inactive``).
 * **OFFICE is never lowered here**: which OFFICE data classes may leave the host is the company's authorisation
   (§23, ``approved_data_classes``), not an owner choice. Raising an OFFICE project stays allowed.
-* **In-flight work keeps its class.** TaskSpecs are immutable (DB trigger) and carry the class they were compiled
-  with; routing, review and context packs read the task's class. Only plans and task DAGs compiled after the change
-  take the new floor. After a raise, the delivery gate G0 refuses a task whose class is below the new floor.
+* **In-flight work is never downgraded.** TaskSpecs are immutable (DB trigger) and keep the class they were compiled
+  with, so a lowering applies only to plans and task DAGs compiled afterwards. A raise applies to open work at once:
+  routing uses the higher of the task's class and the project's current class.
 * The HTTP ``PATCH /api/projects/{id}`` never changes the class (``service.update_project`` refuses it); the CLI
   ``aeos project reclassify`` is the owner path (the owner approves, the maintainer runs it as the owner's actor and
   the records name that actor and the reason).
@@ -49,10 +51,16 @@ ACTION = "portfolio.project.reclassify"
 EVENT = "portfolio.project.reclassified"
 TARGET = policy.PROJECT_CLASSIFICATION_TARGET
 MIN_REASON = 10
+MAX_APPROVAL_REF = 300
+# ADR-0133 decision 8: why a lowering may be recorded without a password, stated in the decision itself
+ACTOR_CHECK = ("named active SUPER_ADMIN, no password prompt (CLI): allowed only because the owner approves in chat "
+               "and the maintainer runs it as the owner's actor (owner rule R43); approval_ref names that approval")
 LOWER, RAISE, UNCHANGED = "LOWER", "RAISE", "UNCHANGED"
 CLASSES = tuple(c.value for c in cls.ORDER)
 IN_FLIGHT_RULE = ("existing TaskSpecs keep the class they were compiled with (no silent downgrade of in-flight work); "
-                  "only plans and task DAGs compiled after this change use the new class as their floor")
+                  "routing applies the higher of a task's class and its project's current class, so a raise applies "
+                  "to open tasks at once; plans and task DAGs compiled after this change use the new class as their "
+                  "floor")
 OFFICE_REFUSAL = ("an OFFICE project's data classification is never lowered by this command: which OFFICE data classes "
                   "may leave this host is the company's authorisation (master s23, approved_data_classes), not an "
                   "owner choice; raising it stays allowed")
@@ -136,11 +144,13 @@ def _check_actor(session: Session, *, actor: User | None, actor_user_id: str, pr
 
 
 def reclassify_project(session: Session, *, project: Project, domain: Domain | str, to: Any, reason: Any,
-                       actor_user_id: str) -> dict[str, Any]:
+                       actor_user_id: str, approval_ref: Any = None) -> dict[str, Any]:
     """Change *project*'s data classification to *to* (see the module docstring). Does not commit the change.
 
     Returns the result the CLI prints: from/to/direction, the decision (lowering), the ended decisions (raise), the
-    audit record id, the actor, the reason and the in-flight TaskSpec counts that keep their class."""
+    audit record id, the actor, the reason, the owner's approval reference (*approval_ref*, optional: where and when the
+    owner approved, e.g. "chat 2026-10-28, owner rule R43"; stored in the decision and the audit record) and the
+    in-flight TaskSpec counts that keep their class."""
     chosen = _domain(domain)
     if project.domain != chosen.value:
         raise NotFound(f"project not found in {chosen.value}")  # another domain's project is never revealed
@@ -151,8 +161,9 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
         raise ValidationFailed(f"the reason needs at least {MIN_REASON} characters (name the owner's approval)",
                                code="REASON_TOO_SHORT")
     reason_v = redact_text(text)
+    approval = redact_text(clean_text(approval_ref, field="approval_ref", max_len=MAX_APPROVAL_REF)) or None
     base = {"project_id": project.id, "project_key": project.project_key, "domain": project.domain, "from": old,
-            "to": new, "reason": reason_v, "event": EVENT, "in_flight_rule": IN_FLIGHT_RULE}
+            "to": new, "reason": reason_v, "approval_ref": approval, "event": EVENT, "in_flight_rule": IN_FLIGHT_RULE}
     actor = session.get(User, actor_user_id) if actor_user_id else None
     if new == old:
         if actor is None or not actor.is_active:
@@ -176,9 +187,9 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
             to_class=new, actor_user_id=user.id, reason=reason_v,
             details={"project_key": project.project_key, "is_platform": bool(project.is_platform),
                      "actor_username": user.username,
-                     # stated, never implied: the CLI names the actor and asks no password (owner rule R43,
-                     # as the `aeos plan` commands); the reason names the owner's approval
-                     "actor_check": "named active SUPER_ADMIN (CLI, no password prompt)",
+                     # stated, never implied: the CLI names the actor and asks no password; the owner's approval
+                     # (chat, owner rule R43) is what allows it, and approval_ref says where it was given
+                     "actor_check": ACTOR_CHECK, "approval_ref": approval,
                      "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
         decision_id = decision.id
     project.data_classification = new
@@ -192,13 +203,13 @@ def reclassify_project(session: Session, *, project: Project, domain: Domain | s
         session, actor_type="user", actor_id=user.id, action=ACTION, target_type="project", target_id=project.id,
         project_id=project.id, domain=project.domain, reason=reason_v,
         details={"from": old, "to": new, "direction": direction, "actor_username": user.username,
-                 "decision_id": decision_id, "ended_decisions": ended, "in_flight": flight,
-                 "in_flight_rule": IN_FLIGHT_RULE})
+                 "approval_ref": approval, "actor_check": ACTOR_CHECK, "decision_id": decision_id,
+                 "ended_decisions": ended, "in_flight": flight, "in_flight_rule": IN_FLIGHT_RULE})
     events.emit(session, source="portfolio", kind=EVENT, entity_type="project", entity_id=project.id,
                 project_id=project.id, domain=project.domain,
                 payload={"project_key": project.project_key, "from": old, "to": new, "direction": direction,
-                         "actor": user.username, "reason": reason_v, "decision_id": decision_id,
-                         "ended_decisions": ended})
+                         "actor": user.username, "reason": reason_v, "approval_ref": approval,
+                         "decision_id": decision_id, "ended_decisions": ended})
     return {**base, "direction": direction, "actor": user.username, "decision_id": decision_id,
             "ended_decisions": ended, "audit_id": rec.event_id, "in_flight": flight}
 
@@ -254,18 +265,19 @@ def summary_lines(result: dict[str, Any]) -> list[str]:
         state = "SUPERSEDED" if result["direction"] == LOWER else "INVALIDATED"
         lines.append(f"Earlier lowering decision(s) {', '.join(result['ended_decisions'])}: {state}.")
     lines.append(f"Actor {result['actor']}; reason: {result['reason']}")
+    lines.append(f"Owner approval: {result.get('approval_ref') or 'not given (--approval-ref)'}")
     lines.append(f"In-flight work keeps its class: {flight.get('task_specs', 0)} existing TaskSpec(s) "
                  f"({flight.get('open_task_specs', 0)} open), by class {_counts(flight.get('by_class') or {})}; "
                  "none is changed (no silent downgrade of in-flight work).")
-    lines.append(f"Only plans and task DAGs compiled after this change use {new} as their floor; each task keeps "
-                 f"the class its plan states, never below {new}.")
+    lines.append(f"Only plans and task DAGs compiled after this change use {new} as their floor: a task with no "
+                 f"stated class gets {new}, a stated class can only raise it.")
     if result["direction"] == LOWER:
         lines.append(f"Undo: run this command again with --to {old}, or revoke the decision "
                      f"(aeos policy revoke {result['decision_id']}), which restores {old}.")
     else:
         below = {k: v for k, v in (flight.get("open_by_class") or {}).items() if cls.rank(k) < cls.rank(new)}
         if below:
-            lines.append(f"Open tasks below {new} ({_counts(below)}) keep their class for routing until they end; "
-                         f"the delivery gate G0 refuses them. Cancel and re-plan them if they must not run as "
-                         f"{', '.join(below)}.")
+            lines.append(f"Open tasks below {new} ({_counts(below)}) are routed as {new} from now on (routing "
+                         "applies the higher of a task's class and the project's class); their TaskSpecs are "
+                         "unchanged.")
     return lines

@@ -157,13 +157,18 @@ def reclassify(
     to: str = typer.Option(..., "--to", help="New data classification: PUBLIC, INTERNAL, CONFIDENTIAL or RESTRICTED"),
     reason: str = typer.Option(..., help="Why, at least 10 characters; name the owner's approval (when, where)"),
     actor: str = typer.Option(..., help="Active SUPER_ADMIN username recorded as the actor"),
+    approval_ref: str = typer.Option(None, "--approval-ref",
+                                     help="Where and when the owner approved, e.g. 'chat 2026-10-28, owner rule R43' "
+                                          "(stored in the decision and the audit record)"),
 ) -> None:
     """Change a project's data classification (ADR-0133).
 
     Raising (more restrictive) records an audit record and an event. Lowering records a POLICY decision, an audit
-    record and an event naming old class, new class, reason and actor; it needs an active SUPER_ADMIN and is never
-    allowed for an OFFICE project (company authorisation, master s23). Existing TaskSpecs keep their class; only plans
-    and task DAGs compiled afterwards use the new class."""
+    record and an event naming old class, new class, reason, actor and --approval-ref; it needs an active SUPER_ADMIN
+    and is never allowed for an OFFICE project (company authorisation, master s23). No password is asked: the owner
+    approves in chat and the maintainer runs it as the owner's actor (owner rule R43). Existing TaskSpecs are never
+    rewritten; routing applies the higher of a task's class and the project's class, so a raise reaches open tasks
+    at once, while a lowering applies only to plans and task DAGs compiled afterwards."""
     from aeos.core.errors import AeosError
     from aeos.models.identity import User
     from aeos.models.portfolio import Project
@@ -181,7 +186,8 @@ def reclassify(
             if user is None or not user.is_active:
                 _say(f"--actor {actor} is not an active user; name your SUPER_ADMIN username. Nothing was changed.")
                 raise typer.Exit(2)
-            result = rc.reclassify_project(s, project=p, domain=chosen, to=to, reason=reason, actor_user_id=user.id)
+            result = rc.reclassify_project(s, project=p, domain=chosen, to=to, reason=reason, actor_user_id=user.id,
+                                           approval_ref=approval_ref)
     except AeosError as exc:
         _say(f"{exc.code}: {exc.message}")
         _say("Nothing was changed.")
