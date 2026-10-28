@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import re
 import threading
+from bisect import bisect_left
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import Any
 
 REDACTED = "[REDACTED]"
@@ -178,31 +180,96 @@ def _reads_as_identifier(body: str) -> bool:
     return bool(words) and sum(map(len, words)) >= _IDENTIFIER_MEAN_WORD_LENGTH * len(words)
 
 
-# An escape sequence in front of (or after) a token is a boundary, not part of a word: a JSON string escape (``\n``,
-# ``\t``, ``\"``, ``\u00e9``; a run of backslashes for JSON encoded twice), a terminal colour or cursor code (an ANSI
-# CSI sequence such as ``ESC[31m``: raw, JSON-escaped as ``\u001b[31m``, or written as text in shell source or its log
-# as ``\x1b[31m``, ``\033[31m`` or ``\e[31m``), the string terminator ESC + backslash that ends an OSC-8 terminal
-# hyperlink (raw, JSON-escaped as ``\u001b\\``, or as text ``\e\\``), and any URL-encoded byte (``%3D``, ``%2F``,
-# ``%40``, ``%2B``, ``%5C``; ``%25`` for encoded twice). Without it ``...\nAIza...`` or ``ESC[31mAIza...`` reads as glued
-# to the base64 character ``n`` or ``m``, ``\nsk-...`` fails the look-behind, and after an OSC-8 terminator the
-# backslash and the token's first letter read as the JSON escape ``\b`` or ``\r``, which blanked the ``b`` of a batch
-# token ``b.`` or the ``r`` of a recovery token ``r.`` (differential reviews of ADR-0127, 2026-10-28). The terminator's
-# backslashes are matched in pairs after an encoded ESC (a JSON-encoded backslash is two), and never the letter after
-# them. No token pattern holds ``\``, ``%`` or ``ESC``, so masking them never cuts a token. A backslash run is matched
-# only from its first backslash and possessively, so a long run costs linear time, not quadratic.
-_ANSI_CSI = r"\[[0-?]*[ -/]*[@-~]"
-_ESCAPE_BOUNDARY = re.compile(r"(?<!\\)\\++(?:(?:u001[bB]|x1[bB]|033|e)(?:" + _ANSI_CSI + r"|(?:\\\\)++)"
-                              r"|u001[bB]|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
-                              r"|\x1b(?:" + _ANSI_CSI + r"|\\)?"
-                              r"|%(?:25)*[0-9A-Fa-f]{2}")
+# An escape sequence in front of (or after) a token is a boundary, not part of a word (ADR-0127 decision 7). One
+# general rule, not a list of contexts: every escape introducer and every escape sequence is blanked, in any of the
+# forms text takes on its way into a model request:
+# * raw control bytes: ESC, BEL, NUL and every other C0 or C1 control character (a tab, a newline and a carriage return
+#   are whitespace already);
+# * a backslash escape, the backslash raw or URL-encoded (``%5C``, ``%255C``) and any run of them (JSON encoded once or
+#   several times): JSON (``\n``, ``\t``, ``\r``, ``\"``, ``\\``, ``\/``, ``\b``, ``\f``, ``\u00e9``), C, Python and shell
+#   (``\a``, ``\e``, ``\v``, ``\xNN``, ``\NNN`` octal, ``\0``, ``\U0000001b``, ``\u{7}``);
+# * an ESC in any of these forms (raw, ``\u001b``, ``\x1b``, ``\033``, ``\e``, ``\u{1b}``, caret ``^[``, ``%1B``) with
+#   what follows it: a CSI sequence (``[`` or ``%5B``, parameter bytes, intermediate bytes, a final byte: ``ESC[31m``,
+#   ``ESC[m``), the head of an OSC sequence (``]`` or ``%5D`` with its number and ``;``: ``ESC]8;;``) or another
+#   escape (``ESC(B``, ``ESC7``); the OSC text itself (a hyperlink's URL, a window title) stays visible, since a token
+#   can sit in it, and its terminator (BEL, or ESC + backslash) is an escape of its own;
+# * a URL-encoded byte (``%3D``, ``%2F``, ``%25`` for encoded twice).
+# No token pattern holds a backslash, ``%``, ``^`` or a control character, so blanking those never cuts a token. What can be
+# ambiguous is the variable tail of an escape: a single-letter escape, the digits of an octal escape, the
+# parameter, intermediate and final bytes of a CSI sequence, the number of an OSC sequence or the byte after an ESC.
+# Read greedily, ``\e[`` followed by a token takes the token's first letter as the CSI final byte, ``\0`` followed by a
+# Google refresh token takes its ``1`` as an octal digit, and a backslash pair followed by a batch token ``b.`` reads as
+# the JSON escape ``\b``; read without the tail, ``ESC[31m`` followed by a Google key leaves the ``m`` glued to it. So the
+# guard reads the text twice, and a token found in either reading is found: the greedy view blanks every escape
+# whole; the cut view blanks each escape only up to the first character of its tail that could begin a token
+# (_TOKEN_START), and keeps the rest. Both views have the length of the text, so a span found in either is the same
+# span of the text. Each escape is matched from its first character and every alternative that starts a run of
+# backslashes always succeeds, possessively, so a long run of escapes costs linear time, not quadratic.
+_PERCENT = r"%(?:25)*"  # a percent sign, URL-encoded any number of times
+_HEX = r"[0-9A-Fa-f]"
 
 
-def _boundary_view(text: str) -> str:
-    """*text* with every escape sequence of _ESCAPE_BOUNDARY replaced by as many spaces: the same length, so a span
-    found in the view is the same span of *text*. Linear."""
-    if "\\" not in text and "%" not in text and "\x1b" not in text:
-        return text
-    return _ESCAPE_BOUNDARY.sub(lambda m: " " * (m.end() - m.start()), text)
+def _raw_or_encoded(raw: str, code: str) -> str:
+    """A character, raw or URL-encoded any number of times (*code*: the regex of its two hex digits)."""
+    return r"(?:" + raw + r"|" + _PERCENT + code + r")"
+
+
+_BACKSLASH = _raw_or_encoded(r"\\", "5[cC]")
+_LBRACKET = _raw_or_encoded(r"\[", "5[bB]")
+_RBRACKET = _raw_or_encoded(r"\]", "5[dD]")
+_LBRACE = _raw_or_encoded(r"\{", "7[bB]")
+_RBRACE = _raw_or_encoded(r"\}", "7[dD]")
+_PARAMETER = _raw_or_encoded(r"[0-?]", "3" + _HEX)  # a CSI parameter byte, 0x30-0x3F
+# an intermediate byte, 0x20-0x2F, except ``%`` (0x25): a percent sign starts an encoded byte
+_INTERMEDIATE = _raw_or_encoded(r"[ -$&-/]", "2[0-46-9A-Fa-f]")
+_ESC_FORM = (r"(?:\x1b|" + _PERCENT + r"1[bB]|" + _raw_or_encoded(r"\^", "5[eE]") + _LBRACKET + r"|"
+             + _BACKSLASH + r"++(?:[eE]|x1[bB]|0?33|u001[bB]|U0000001[bB]|u" + _LBRACE + r"0*1[bB]" + _RBRACE + r"))")
+# Final bytes exclude ``\`` (a string terminator's backslash is an escape of its own) and ``^`` (a caret ESC ``^[``).
+_ESCAPE_BOUNDARY = re.compile(
+    _ESC_FORM + r"(?:" + _LBRACKET + r"(?P<csi>" + _PARAMETER + r"*+" + _INTERMEDIATE + r"*+[@-\[\]_-~]?)"
+    r"|" + _RBRACKET + r"(?P<osc>[0-9]*+;*+)"
+    r"|(?P<esc>" + _INTERMEDIATE + r"*+[0-\[\]_-~]?))"
+    r"|" + _BACKSLASH + r"++(?:u" + _HEX + r"{4}|U" + _HEX + r"{8}|u" + _LBRACE + _HEX + r"{1,6}" + _RBRACE
+    + r"|x" + _HEX + r"{2}|(?P<oct>[0-7]{1,3})|(?P<letter>[abefnrtv\"'/?])|)"
+    r"|" + _PERCENT + _HEX + r"{2}"
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_TAIL_GROUPS = ("csi", "osc", "esc", "oct", "letter")
+# Every character a high-confidence pattern's match can begin with (sk-, s., b., r., gh, github_pat_, AKIA, AIza,
+# ya29., 1//, hv, xox, the labels unseal / recovery / initial in any case, the quote of the `operator init` JSON, the
+# dashes of a PEM header). tests/unit/test_redaction_never_weaker.py keeps it complete: every corpus token begins with
+# one of these, and the grammar fuzz finds every corpus token after every escape it generates.
+_TOKEN_START = frozenset('"-1AIRUbghirsuxy')
+_TOKEN_START_RE = re.compile("[" + re.escape("".join(sorted(_TOKEN_START))) + "]")
+_NEEDS_VIEW = re.compile(r"[\\%\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]|\^\[")
+
+
+def _boundary_views(text: str) -> tuple[str, str | None]:
+    """The greedy view of *text* (every escape of _ESCAPE_BOUNDARY replaced by as many spaces) and the cut view (each
+    escape blanked only up to the first character of its tail in _TOKEN_START), or None for the cut view when it would
+    equal the greedy one. Both have the length of *text*. Linear."""
+    if not _NEEDS_VIEW.search(text):
+        return text, None
+    greedy: list[str] = []
+    cut: list[str] = []
+    differ = False
+    pos = 0
+    for m in _ESCAPE_BOUNDARY.finditer(text):
+        start, end = m.span()
+        keep = end
+        for name in _TAIL_GROUPS:
+            tail = m.start(name)
+            if tail != -1:
+                first = _TOKEN_START_RE.search(text, tail, end)
+                keep = first.start() if first else end
+                break
+        between = text[pos:start]
+        greedy += (between, " " * (end - start))
+        cut += (between, " " * (keep - start), text[keep:end])
+        differ = differ or keep != end
+        pos = end
+    greedy.append(text[pos:])
+    cut.append(text[pos:])
+    return "".join(greedy), ("".join(cut) if differ else None)
 
 
 def _glued_to_base64(text: str, start: int, end: int) -> bool:
@@ -237,9 +304,26 @@ def _iter_high_confidence(text: str) -> Iterator[SecretFinding]:
         while i != -1:
             yield SecretFinding(REGISTERED_SECRET, i, i + len(v))
             i = text.find(v, i + len(v))
-    # The token patterns run on the boundary view (same length, same spans): a token after an escaped newline or an
-    # encoded ``=`` is found, and its span still names the token in *text*.
-    text = _boundary_view(text)
+    # The token patterns run on the boundary views (same length, same spans): a token after an escaped newline or an
+    # encoded ``=`` is found, and its span still names the token in *text*. A token the cut view alone finds (its first
+    # letter read as the tail of an escape in the greedy view) is added unless a finding of the greedy view overlaps it.
+    greedy, cut = _boundary_views(text)
+    found: list[SecretFinding] = []
+    for finding in _scan_view(greedy):
+        found.append(finding)
+        yield finding
+    if cut is None:
+        return
+    found.sort(key=lambda f: f.start)
+    starts = [f.start for f in found]
+    reach = list(accumulate((f.end for f in found), max))
+    for finding in _scan_view(cut):
+        i = bisect_left(starts, finding.end)
+        if i == 0 or reach[i - 1] <= finding.start:
+            yield finding
+
+
+def _scan_view(text: str) -> Iterator[SecretFinding]:
     lowered: str | None = None
     for kind, pat in _NAMED_PATTERNS:
         if pat.groups:

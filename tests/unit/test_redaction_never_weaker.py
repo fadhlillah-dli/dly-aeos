@@ -8,8 +8,9 @@ caught it before merge.
 This test is that differential, kept: a corpus of secret shapes, one or more variants for every pattern of
 ``aeos.core.redaction`` as origin/main defined them when the incident was found (each body holds every character its
 pattern's class allows; long bodies too), placed in many contexts (plain, after a letter or digit, after a JSON escape,
-after a URL-encoded byte, after a terminal colour code raw or written as text, after an OSC-8 hyperlink terminator,
-inside a data URI, inside a JSON string, a multi-line PEM block). It asserts that
+after a URL-encoded byte, after a terminal colour code raw or written as text, after a bare textual ESC + ``[``, after
+a textual BEL or NUL, after an OSC-8 hyperlink terminator, inside a data URI, inside a JSON string, a multi-line PEM
+block, the indented `operator init -format=json` output). It asserts that
 
 * ``redact_text`` masks completely (no piece of ``PIECE`` characters of any part of the secret survives: every key of
   an ``operator init`` JSON list, every line of a PEM body) and ``contains_secret``
@@ -22,6 +23,9 @@ inside a data URI, inside a JSON string, a multi-line PEM block). It asserts tha
   a letter or digit reads as base64 data), including after escapes origin/main's redaction misses;
 * near misses (code identifiers, base64 image data, ``sha512-`` lockfile integrity hashes, also JSON-encoded) are not
   flagged by the guard.
+
+tests/unit/test_redaction_escape_fuzz.py places every corpus secret after 5,000 escape prefixes generated from a
+grammar, with the same two assertions: the contexts here are the named regression cases, the fuzz finds the next one.
 
 A pattern change that drops a case is red with a message naming the pattern (detector kind) and the context, never
 the value (LESSONS L26: no report quotes a secret shape, synthetic ones included). A new pattern needs a corpus variant
@@ -142,6 +146,16 @@ def _variants() -> list[tuple[str, str, str, tuple[str, ...]]]:
         for enc in ("b64", "hex"):
             add(f"init_json_{which}_{enc}", "vault_init_json",
                 json.dumps({f"{which}_keys_{enc}": [key, key2, key3]}), (key, key2, key3))
+    # `operator init -format=json` as the binary prints it: indented over several lines (review of 2026-10-28: with
+    # single-line samples only, a pattern whose list separator or head lost its newline whitespace stayed green)
+    hex_keys = [_draw("0123456789abcdef", 64) for _ in range(3)]
+    init = {"unseal_keys_b64": [key, key2, key3], "unseal_keys_hex": hex_keys, "unseal_shares": 3,
+            "unseal_threshold": 2, "recovery_keys_b64": [], "recovery_keys_hex": [], "recovery_keys_shares": 0,
+            "recovery_keys_threshold": 0}
+    for indent in (2, 4):
+        for eol, newline in (("", "\n"), ("_crlf", "\r\n")):
+            add(f"init_json_indent{indent}{eol}", "vault_init_json",
+                json.dumps(init, indent=indent).replace("\n", newline), (key, key2, key3, *hex_keys))
     for c in "baprs":
         token(f"slack_xox{c}", "slack_token", "xo" + "x" + c + "-", "-")
     for label in ("", "RSA ", "EC ", "OPENSSH "):
@@ -185,6 +199,13 @@ CONTEXTS: dict[str, Callable[[str], str]] = {
     "after_textual_hex_colour": lambda t: "echo -e '\\x1b[31m" + t + "\\x1b[0m'",
     "after_textual_octal_colour": lambda t: "printf '\\033[1;32m" + t + "\\033[0m\\n'",
     "after_textual_e_colour": lambda t: "printf '\\e[31m" + t + "\\e[0m'",
+    # an ESC + ``[`` written as text with nothing after it (no parameter, no final byte of its own), textual BEL forms
+    # and a textual NUL: the token's first letter or digit must not be read as part of the escape (review of 2026-10-28)
+    "after_textual_csi_introducer": lambda t: "printf '\\e[" + t + "'",
+    "after_textual_bel": lambda t: "printf 'x\\a" + t + "'",
+    "after_textual_hex_bel": lambda t: "echo -e 'x\\x07" + t + "'",
+    "after_textual_octal_bel": lambda t: "printf 'x\\007" + t + "'",
+    "after_textual_nul": lambda t: "printf 'x\\0" + t + "'",
     # an OSC-8 terminal hyperlink: its terminator is ESC + backslash, raw, JSON-escaped or written as text
     "after_osc8_link": lambda t: "\x1b]8;;https://h.example/x\x1b\\" + t + "\x1b]8;;\x1b\\",
     "after_json_osc8_link": lambda t: json.dumps({"log": "\x1b]8;;https://h.example/x\x1b\\" + t + "\x1b]8;;\x1b\\"}),
@@ -199,12 +220,14 @@ GLUED = frozenset({"after_letter", "after_digit"})
 # owner decision recorded in an ADR.
 # Contexts in which the token directly follows a letter or digit: glued, or after an escape that ends in one
 # (``\n``, ``\t``, ``\u00e9``, ``%3D``, ``%26``, ``%3F``, ``%2F``, ``%40``, ``%2B``, ``%5C``, a colour code ``ESC[31m``, raw or
-# written as text). After an OSC-8 terminator (ESC + backslash) the token follows a backslash: origin/main masks it.
+# written as text, a textual BEL or NUL: ``\a``, ``\x07``, ``\007``, ``\0``). After an OSC-8 terminator (ESC + backslash)
+# the token follows a backslash, and after a bare textual ESC + ``[`` a bracket: origin/main masks both.
 _LETTER_OR_DIGIT_BEFORE = ("after_letter", "after_digit", "after_json_newline", "after_json_tab", "after_json_unicode",
                            "double_json_newline", "after_url_eq", "after_url_amp", "after_url_question",
                            "after_url_slash", "after_url_at", "after_url_plus", "after_url_backslash",
                            "after_ansi_colour", "after_json_ansi_colour", "after_textual_hex_colour",
-                           "after_textual_octal_colour", "after_textual_e_colour")
+                           "after_textual_octal_colour", "after_textual_e_colour", "after_textual_bel",
+                           "after_textual_hex_bel", "after_textual_octal_bel", "after_textual_nul")
 # Contexts in which JSON escaping turned the quotes of a labelled JSON shape into ``\"``.
 _JSON_ENCODED = ("json_string", "after_json_newline", "after_json_tab", "after_json_quote", "after_json_unicode",
                  "double_json_newline", "after_json_ansi_colour", "after_json_osc8_link")
@@ -475,11 +498,35 @@ def test_bite_a_pem_pattern_that_masks_only_the_first_body_line_is_red(monkeypat
     assert all(r.startswith("pattern private_key_pem ") for r in regressions), regressions
 
 
+_CSI = r"\[[0-?]*[ -/]*[@-~]"
 # The escape boundary of 787626a: raw and JSON-escaped colour codes only.
-_ESCAPE_BOUNDARY_BEFORE_TEXTUAL_FORMS = re.compile(
-    r"(?<!\\)\\++(?:u001[bB]" + redaction._ANSI_CSI + r"|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
-    r"|\x1b(?:" + redaction._ANSI_CSI + r")?"
-    r"|%(?:25)*[0-9A-Fa-f]{2}")
+_BOUNDARY_787626A = re.compile(r"(?<!\\)\\++(?:u001[bB]" + _CSI + r"|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
+                               r"|\x1b(?:" + _CSI + r")?"
+                               r"|%(?:25)*[0-9A-Fa-f]{2}")
+# The escape boundary of 528d93f: textual colour codes and the OSC-8 terminator too, one greedy view.
+_BOUNDARY_528D93F = re.compile(r"(?<!\\)\\++(?:(?:u001[bB]|x1[bB]|033|e)(?:" + _CSI + r"|(?:\\\\)++)"
+                               r"|u001[bB]|u[0-9A-Fa-f]{4}|[nrtbf\"'/])"
+                               r"|\x1b(?:" + _CSI + r"|\\)?"
+                               r"|%(?:25)*[0-9A-Fa-f]{2}")
+
+
+def single_view(boundary: re.Pattern[str]) -> Callable[[str], tuple[str, None]]:
+    """A boundary of an earlier build: one view in which every match of *boundary* is blanked."""
+    return lambda text: (boundary.sub(lambda m: " " * (m.end() - m.start()), text), None)
+
+
+_BOUNDARY_VIEWS = redaction._boundary_views
+
+
+def greedy_view_only(text: str) -> tuple[str, None]:
+    """Today's escape grammar, read greedily only (no cut view)."""
+    return _BOUNDARY_VIEWS(text)[0], None
+
+
+def cut_view_only(text: str) -> tuple[str, None]:
+    """Today's escape grammar, read only up to the first tail character that could begin a token (no greedy view)."""
+    greedy, cut = _BOUNDARY_VIEWS(text)
+    return (greedy if cut is None else cut), None
 
 
 def test_bite_textual_escapes_and_the_osc8_terminator_are_boundaries(monkeypatch):
@@ -488,7 +535,7 @@ def test_bite_textual_escapes_and_the_osc8_terminator_are_boundaries(monkeypatch
     terminator (ESC + backslash) the backslash and the first letter of a ``b.`` or ``r.`` token read as the JSON escape
     backslash-b or backslash-r, and that letter is blanked: the guard is red, naming the pattern and the context.
     Today's boundary is the near miss (the guard test above is green, the code near misses stay unflagged)."""
-    monkeypatch.setattr(redaction, "_ESCAPE_BOUNDARY", _ESCAPE_BOUNDARY_BEFORE_TEXTUAL_FORMS)
+    monkeypatch.setattr(redaction, "_boundary_views", single_view(_BOUNDARY_787626A))
     misses = guard_misses()
     for vid, kind in (("vault_short_b", "vault_token_short"), ("openbao_recovery", "openbao_recovery_token")):
         for ctx in ("after_osc8_link", "after_json_osc8_link", "after_textual_osc8_link"):
@@ -497,3 +544,82 @@ def test_bite_textual_escapes_and_the_osc8_terminator_are_boundaries(monkeypatch
     for ctx in ("after_textual_hex_colour", "after_textual_octal_colour", "after_textual_e_colour"):
         assert f"pattern anthropic_key (variant anthropic) in context {ctx}: the outgoing guard does not find it" \
             in misses, ctx
+
+
+def test_bite_the_round_3_boundary_misses_tokens_after_textual_bel_and_a_bare_csi_introducer(monkeypatch):
+    """Review of 2026-10-28 (HEAD 528d93f): its one greedy view blanked a textual ESC + ``[`` together with a CSI final
+    byte, which was the first letter of the token after it, and did not know the textual BEL and NUL forms, so a token
+    after them read as glued to ``a`` or ``7`` or ``0``: red, naming the pattern and the context."""
+    monkeypatch.setattr(redaction, "_boundary_views", single_view(_BOUNDARY_528D93F))
+    misses = guard_misses()
+    for vid, kind in (("anthropic", "anthropic_key"), ("github_ghp", "github_token"), ("aws_key_id_1",
+                                                                                       "aws_access_key_id")):
+        assert f"pattern {kind} (variant {vid}) in context after_textual_csi_introducer: the outgoing guard does " \
+               "not find it" in misses, vid
+    for ctx in ("after_textual_bel", "after_textual_hex_bel", "after_textual_octal_bel", "after_textual_nul"):
+        assert f"pattern anthropic_key (variant anthropic) in context {ctx}: the outgoing guard does not find it" \
+            in misses, ctx
+
+
+def test_bite_without_the_cut_view_a_token_read_as_an_escape_tail_is_missed(monkeypatch):
+    """The greedy reading alone takes a token's first letter or digit as the tail of the escape before it (a CSI final
+    byte after a bare ESC + ``[``, the letter after a backslash pair, an octal digit after ``\\0``): red. The cut view is
+    what finds them (the near miss: today's two views, guard test above green)."""
+    monkeypatch.setattr(redaction, "_boundary_views", greedy_view_only)
+    misses = guard_misses()
+    assert "pattern anthropic_key (variant anthropic) in context after_textual_csi_introducer: the outgoing guard " \
+           "does not find it" in misses
+    assert "pattern vault_token_short (variant vault_short_b) in context after_json_osc8_link: the outgoing guard " \
+           "does not find it" in misses
+    assert "pattern google_refresh_token (variant google_refresh) in context after_textual_nul: the outgoing guard " \
+           "does not find it" in misses
+
+
+def test_bite_without_the_greedy_view_a_token_after_a_colour_code_reads_as_glued(monkeypatch):
+    """The cut reading alone keeps a colour code's parameter and final byte (``1m`` of ``ESC[31m``) when the parameter
+    could begin a token, so a Google key after it reads as glued to base64: red. Both views together find it."""
+    monkeypatch.setattr(redaction, "_boundary_views", cut_view_only)
+    misses = guard_misses()
+    assert "pattern google_api_key (variant google_api_key_1) in context after_ansi_colour: the outgoing guard " \
+           "does not find it" in misses
+
+
+def test_every_corpus_token_begins_with_a_token_start_character():
+    """_TOKEN_START (the characters the cut view keeps) holds the first character of every guard finding of every
+    token-shaped corpus variant: a new pattern whose matches begin with another character is red here."""
+    outside = sorted({f"pattern {kind} (variant {vid})" for vid, kind, item, _ in VARIANTS if kind not in GROUP_KINDS
+                      for f in find_high_confidence_secrets(item) if item[f.start] not in redaction._TOKEN_START})
+    assert not outside, f"a token begins with a character outside _TOKEN_START: {outside}"
+    assert all(any(True for _ in find_high_confidence_secrets(item)) for _, kind, item, _ in VARIANTS
+               if kind not in GROUP_KINDS)
+
+
+_INIT_JSON_WHITESPACE_NARROWED = {
+    # the repeated group's separator, and the whitespace after the list's ``[``, lose the newline
+    "separator_spaces_only": (r'(?:\s*,\s*"', r'(?: *, *"'),
+    "head_spaces_only": (r'\[\s*"', r'\[ *"'),
+}
+_INDENTED = ("init_json_indent2", "init_json_indent4", "init_json_indent2_crlf", "init_json_indent4_crlf")
+
+
+@pytest.mark.parametrize("mutation", sorted(_INIT_JSON_WHITESPACE_NARROWED))
+def test_bite_narrowed_whitespace_in_the_init_json_pattern_is_red(monkeypatch, mutation):
+    """Review of 2026-10-28: with single-line samples only, a pattern whose list separator (or the whitespace after
+    ``[``) matches spaces but no newline stayed green while keys 2..n (or all keys) of the real, indented
+    ``operator init -format=json`` output stayed readable in a log. The single-line variants are still masked whole (the
+    gap); the indented ones are red, naming the pattern, the variant and the context, never the value."""
+    original = dict(redaction._NAMED_PATTERNS)["vault_init_json"]
+    old, new = _INIT_JSON_WHITESPACE_NARROWED[mutation]
+    assert original.pattern.count(old) == 1
+    _replace_pattern(monkeypatch, "vault_init_json", re.compile(original.pattern.replace(old, new)))
+    for vid, _, item, parts in VARIANTS:
+        if vid.startswith("init_json_") and vid not in _INDENTED:
+            assert unmasked_pieces(parts, redact_text(item)) == 0, vid  # the single-line corpus stays green
+    regressions = redaction_regressions()
+    for vid in _INDENTED:
+        for ctx in ("plain", "multiline", "after_space", "after_ansi_colour"):
+            assert any(r.startswith(f"pattern vault_init_json (variant {vid}) in context {ctx}: redact_text leaves ")
+                       for r in regressions), (vid, ctx, regressions)
+    assert all(r.startswith("pattern vault_init_json (variant init_json_indent") for r in regressions), regressions
+    pieces = {p for vid, _, _, parts in VARIANTS if vid in _INDENTED for p in _pieces(parts)}
+    assert not any(piece in r for r in regressions for piece in pieces)  # L26

@@ -32,11 +32,10 @@
    and is never counted as one the provider saw.
 2. **What is scanned.** Every string of the forwarded payload, at any depth, keys and values: the contents of
    system, user, assistant and tool messages (also content parts), tool calls and their `arguments` (decoded as JSON
-   too, so a JSON escape does not hide a token), tool definitions, stop sequences, response schemas. An escape
-   sequence in a string (a JSON escape such as `\n`, `\t`, `\"` or `\u00e9`, also JSON encoded twice, a terminal
-   colour code such as `ESC[31m`, raw, JSON-escaped or written as text (`\x1b[31m`, `\033[31m`, `\e[31m`), the
-   OSC-8 hyperlink terminator ESC + backslash in the same three forms, and any URL-encoded byte such as `%3D`, `%2F`,
-   `%40` or `%5C`) is a boundary before or after a token (amendment, decision B).
+   too, so a JSON escape does not hide a token), tool definitions, stop sequences, response schemas. Every escape
+   introducer and escape sequence in a string is a boundary before or after a token, in any of the forms text takes
+   on its way into a request: raw, JSON-escaped (once or more), written as C, Python or shell text, or URL-encoded
+   (once or more). The rule and its two readings are decision 7; the amendments B and E record how it was reached.
 3. **What is detected.** `aeos.core.redaction.find_high_confidence_secrets`: the token-shaped patterns (OpenRouter,
    Anthropic and OpenAI-style keys, GitHub tokens, AWS access key ids, Google keys and tokens, Vault/OpenBao tokens and
    labelled unseal/root material, Slack tokens, PEM private key blocks) and every secret value AEOS registered at run
@@ -74,14 +73,41 @@
    * a Google API key or refresh token glued to a base64 character before or after it: inside an image data URI or a
      lockfile `sha512-` integrity hash, `AIza` and `1//` occur by chance (a 1 MB image gave several findings).
 
-   "Glued" and "after a letter" are judged on the guard's boundary view (decision B), in which every escape sequence
-   is blanked with as many spaces: a JSON escape, a URL-encoded byte, a terminal colour code (raw, JSON-escaped, or
-   written as text as `\x1b[31m`, `\033[31m` or `\e[31m`) and the OSC-8 terminator ESC + backslash (raw, JSON-escaped
-   or as text). The terminator's backslashes are blanked, never the letter after them, so the `b` of a batch token
-   `b.` or the `r` of a recovery token `r.` right after a hyperlink is no longer read as the JSON escape `\b` or `\r`
-   and blanked (review of 2026-10-28). A token after any of these escapes is therefore neither glued to base64 nor
-   behind a word; the code near misses (Go receivers and member names after a textual colour code or inside an OSC-8
-   link) still read as identifiers and pass.
+   "Glued" and "after a letter" are judged on the guard's boundary views, built by one general rule (amendment E),
+   not a list of contexts:
+   * **What is an escape.** Every escape introducer and escape sequence, in any form: raw control bytes (ESC, BEL,
+     NUL, every other C0 and C1 control character); a backslash escape, the backslash raw or URL-encoded and any run
+     of them (JSON `\n`, `\t`, `\r`, `\"`, `\\`, `\/`, `\b`, `\f`, `\uXXXX`, encoded once or several times; C,
+     Python and shell `\a`, `\e`, `\v`, `\xNN`, `\NNN` octal, `\0`, `\UXXXXXXXX`, `\u{X}`); an ESC in any form (raw,
+     `\u001b`, `\x1b`, `\033`, `\e`, `\u{1b}`, caret `^[`, `%1B`) with the CSI sequence after it (`[` or `%5B`,
+     parameter bytes, intermediate bytes, a final byte; with or without parameters), the head of an OSC sequence (`]`
+     with its number and `;`) or another escape (`ESC(B`, `ESC7`); the OSC terminator (BEL, or ESC + backslash) as an
+     escape of its own; and any URL-encoded byte (`%XX`, `%25XX`). The OSC text (a hyperlink's URL, a window title) stays
+     visible, because a token can sit in it.
+   * **Never a token character.** No token pattern holds a backslash, `%` or a control character, so blanking those
+     never cuts a token. Only the variable tail of an escape can be ambiguous: a single-letter escape, the digits of
+     an octal escape, the parameter, intermediate and final bytes of a CSI sequence, the number of an OSC sequence,
+     the byte after an ESC. Read greedily, `\e[` followed by a token takes the token's first letter as the CSI final
+     byte (the regression of round 3), `\0` followed by a Google refresh token takes its `1` as an octal digit, and a
+     backslash pair followed by a batch token `b.` reads as the JSON escape `\b`; read without the tail, `ESC[31m`
+     followed by a Google key leaves the `m` glued to it. (The simpler rule "blank the final byte only when it is not
+     alphanumeric" fails the second way: a Google key after `ESC[31m` reads as glued to `m`.)
+   * **Two readings, one finding.** The guard scans two views of the text, each the same length as the text, and a
+     token found in either is found: the greedy view blanks every escape whole; the cut view blanks each escape only up
+     to the first character of its tail that can begin a token (`_TOKEN_START`: the first characters of every
+     high-confidence pattern, kept complete by a test over the corpus) and keeps the rest. A finding of the cut view
+     that a greedy finding overlaps is not reported twice. The cut view is built only when it differs.
+   * **Linear.** Each escape is matched from its first character, every alternative that starts at a backslash
+     always succeeds, possessively, so no run of escapes is rescanned; a 2 MB text of escapes whose tails all differ
+     between the views is scanned in well under a second (measured in the test).
+   * **Proof.** `tests/unit/test_redaction_escape_fuzz.py` generates 5,000 escape prefixes from a grammar (the atoms
+     above, raw, JSON-escaped once or twice, textual, URL-encoded once or twice over any of those, chained one to
+     four, with and without parameters) and places every corpus secret after each, before a generated suffix:
+     390,000 cases with a fixed seed, no miss by the guard, and no piece of a secret left by `redact_text` beyond
+     origin/main's own misses (the MAIN_MISSES derivation; checked equal to a run of origin/main's patterns over the
+     same cases). Four further seeds (1,560,000 cases) were dry too (not committed). Over 239 MB of dependency source
+     (22,518 files of the Python and frontend dependencies), the two views report exactly the findings the one greedy
+     view of round 3 reported: no new false positive.
 
    Redaction of logs and errors keeps masking the wider shapes; only the decision to refuse a request is narrowed.
 
@@ -125,8 +151,23 @@ D. **Precedence.** A refused request decides the run's outcome even when a later
    task (BLOCKED, `LEASE_LOST_PROCESS_ALIVE`), the task keeps that state and the run still records the code (the
    first build raised a conflict on every retry and left the run RUNNING with an unknown outcome).
 
+E. **One general escape rule, generated contexts (review of HEAD 528d93f, 2026-10-28).** Three reviews in a row had
+   each found one more escape form that was not a boundary; the third found that round 3's own fix blanked the first
+   letter of a token after a bare textual `\e[` (a regression) and that the textual BEL forms (`\a`, `\x07`, `\007`)
+   and other `\xNN` / `\NNN` bytes were not boundaries. Decided: no more special cases. Decision 7 now states one rule
+   (every escape introducer and sequence, the greedy and the cut reading), and the grammar fuzz is the loop-until-dry
+   tool: any future escape form that is not a boundary shows up there as a named miss (kind, variant, grammar of the
+   prefix; never a value). The bite tests replay the boundaries of 787626a and 528d93f, the greedy view alone and the
+   cut view alone, and each is red on its named contexts. The review also found that no `operator init` sample was
+   multi-line, so a list pattern whose separator (or the whitespace after `[`) lost its newline stayed green while keys
+   2..n of the real indented output leaked from `redact_text`: the corpus now holds that output indented by 2 and 4,
+   with LF and CRLF line ends (both lists, all keys checked), and a bite test narrows each whitespace in memory and is
+   red. `redact_text` and its patterns are unchanged (byte-identical to origin/main but for the same-language rewrite
+   of the unseal-key label's whitespace, decision 6).
+
 Evidence: E2, unit tests on macOS arm64 (the differential corpus, the escape contexts through the broker's
-`sensitive_content_findings`, the investigation and precedence tests with red fixtures on the first build).
+`sensitive_content_findings`, the grammar fuzz, the investigation and precedence tests with red fixtures on the first
+build).
 NOT-PROVEN on Windows and macOS Intel until CI runs.
 
 ## What is not blocked (residual risk, stated)
@@ -137,12 +178,25 @@ NOT-PROVEN on Windows and macOS Intel until CI runs.
   token shapes and registered values block. A low-entropy secret that AEOS never registered passes.
 * **Shapes the owner module does not define yet**: for example an `ASIA` temporary AWS key id or a PEM header without
   its END marker. Adding a shape to `aeos.core.redaction` extends this guard automatically.
-* **Encoded or split secrets** (base64, hex, a key spread over two messages, text inside an image): not decoded.
+* **Encoded or split secrets**: not decoded or joined. A secret split across two messages, two content parts, two
+  strings of a tool call or two requests; a secret broken inside by a line wrap, a zero-width character or an
+  inserted escape; a secret encoded as a whole (base64, hex, gzip, an image of text) or character by character (JSON
+  `\u0073`-style or HTML `&#115;`-style escapes inside the token, or URL-encoded characters inside its body, such as
+  `%2B` in a key that holds `+`). A secret AEOS registered itself is still found when it appears whole.
+* **Escape readings neither view resolves** (decision 7), each written in a way the language itself reads
+  differently: an octal escape of one or two digits that starts with `1` directly before a Google refresh token
+  (`\1` then `1//`: C reads `\11`); a CSI sequence cut off after its parameters, with no final byte of its own,
+  directly before a token (its first letter is read as the final byte, or it stays glued to the last parameter
+  digit); an OSC text (a title, a URL) with no terminator directly glued to a token (it is text, not an escape).
+* **Escape forms outside the grammar**: caret notation other than `^[` (`^G`, `^M`), quoted-printable (`=0A`),
+  HTML entities whose last character is a letter or digit glued to the token (a numeric entity ends with `;`, a
+  boundary already), language-specific escapes such as `%u001b` or `\N{ESCAPE}`. Adding a form means adding it to the
+  grammar and to the fuzz, never a special case.
 * **Token lookalike rules** (decision 7): about 0.5% of random 24-character `s.`/`b.`/`r.` token bodies (0.015% at 40
   characters, none at 100; measured on 200,000, 400,000 and 100,000 random bodies) read as an identifier and pass, and
   a Google key or refresh token written directly against a base64 character (for example inside a URL path after a
-  literal `/`; an encoded `%2F`, a colour code in any of its forms or an OSC-8 terminator before it is a boundary)
-  passes. A token AEOS loaded itself is still
+  literal `/`; an encoded `%2F`, a `\/`, or any escape of decision 7 before it is a boundary) passes, and so does a
+  look-behind shape or a label written directly after a letter or digit that is not part of an escape (a word). A token AEOS loaded itself is still
   caught as a registered value whatever its shape.
 * **Log redaction of glued tokens (unchanged from before this ADR)**: `redact_text` misses a look-behind shape (`sk-`,
   `hv[sbr].`, `r.`, the unseal-key label) written directly after a letter, digit or escape, and masks a glued `hvs.`

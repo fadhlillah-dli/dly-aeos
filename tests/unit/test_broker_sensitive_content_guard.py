@@ -229,10 +229,12 @@ def test_a_2mb_request_is_scanned_well_within_200ms():
 
 @pytest.mark.parametrize("shape", ["unseal_label_then_spaces", "pem_headers_without_end", "token_prefix_runs",
                                    "backslash_run", "colour_codes_without_final_byte", "percent_escape_runs",
-                                   "textual_escape_runs", "string_terminator_runs"])
+                                   "textual_escape_runs", "string_terminator_runs", "cut_view_tails",
+                                   "encoded_escape_runs"])
 def test_adversarial_2mb_inputs_stay_linear(shape):
     """Inputs that made the patterns backtrack quadratically before ADR-0127 (minutes at 2 MB); a run of backslashes
-    made the escape-boundary view quadratic (1.3 s at 20,000, review of 2026-10-28)."""
+    made the escape-boundary view quadratic (1.3 s at 20,000, review of 2026-10-28); the two boundary views (greedy
+    and cut) stay linear when every escape has a tail that could begin a token."""
     text = {"unseal_label_then_spaces": "unseal key" + " " * 2_000_000,
             "pem_headers_without_end": "-----BEGIN " + "PRIVATE KEY-----\n" * 75_000,
             "token_prefix_runs": ("sk-" + "s." + "r." + "hvs.") * 200_000,
@@ -240,7 +242,10 @@ def test_adversarial_2mb_inputs_stay_linear(shape):
             "colour_codes_without_final_byte": ("\x1b[" + "1;" * 50 + "\\u001b[" + "2;" * 50) * 9_000,
             "percent_escape_runs": "%25" * 600_000 + "%" + "%2" * 100_000,
             "textual_escape_runs": ("\\e" + "\\" * 51 + "\\033[" + "1;" * 50 + "\\x1b" + "\\" * 49) * 9_500,
-            "string_terminator_runs": ("\x1b" + "\\" * 999 + "\\u001b" + "\\" * 1_001) * 1_000}[shape]
+            "string_terminator_runs": ("\x1b" + "\\" * 999 + "\\u001b" + "\\" * 1_001) * 1_000,
+            # escapes whose tail could begin a token, so the cut view differs from the greedy one at every escape
+            "cut_view_tails": ("\\e[s" + "\\\\b" + "\\01" + "%1B%5Bu" + "\x1b]1" + "\\x1b[1;2;3A") * 70_000,
+            "encoded_escape_runs": ("%251B%255B" + "%253B" * 20 + "%255C" * 20) * 10_000}[shape]
     took = _best_of(1, lambda: find_high_confidence_secrets(text))
     assert took < 1.0, f"{shape}: {len(text)} chars took {took:.3f}s ({_load()})"
 
