@@ -262,6 +262,23 @@ def find_route_decision(session: Session, *, kind: str, route: ModelRoute) -> De
     return d if _decision_valid(d, kind=kind, config_hash=current) else None
 
 
+def scope_route_keys(auth_scope: object) -> list[str]:
+    """The exact route keys a decision's ``auth_scope.routes`` names - the one reader of that field.
+
+    A list stays a list (its strings, stripped; anything else in it is dropped); a string (``aeos policy decide
+    --scope routes=a,b`` stored one before it stored a list) is split on ',' (stripped, empties dropped); anything
+    else names no route. Callers test membership in the returned list, never in the raw value: ``key in "a,b"`` is a
+    substring test, so a scope naming ``opencode-go/kimi-k3.1-pro`` would also cover ``opencode-go/kimi-k3``."""
+    raw = auth_scope.get("routes") if isinstance(auth_scope, dict) else None
+    if isinstance(raw, str):
+        items: list[object] = list(raw.split(","))
+    elif isinstance(raw, list):
+        items = list(raw)
+    else:
+        return []
+    return [k for k in (x.strip() for x in items if isinstance(x, str)) if k]
+
+
 def budget_decision_valid(session: Session, decision_id: str | None, route: ModelRoute) -> tuple[bool, str]:
     if not decision_id:
         return False, "an explicit BUDGET decision id is required"
@@ -269,7 +286,7 @@ def budget_decision_valid(session: Session, decision_id: str | None, route: Mode
     if not _decision_valid(d, kind="BUDGET", config_hash=None):
         return False, "budget decision is missing, not ACTIVE, not human or expired"
     assert d is not None
-    routes = (d.auth_scope or {}).get("routes") or []
+    routes = scope_route_keys(d.auth_scope)  # exact keys: never a substring of a text scope
     covers = (d.target_type == TARGET_TYPE and d.target_id == route.route_key) or route.route_key in routes
     if not covers:
         return False, "budget decision does not cover this route"
@@ -2010,11 +2027,11 @@ GO_POOL_MOVES = frozenset({("WATCHLIST", "WORKER"), ("WORKER", "WATCHLIST")})
 
 def route_decision_ids(session: Session, route: ModelRoute) -> list[str]:
     """Every decision that names *route*, whatever its kind or status (INVALIDATED and expired ones too): decisions
-    targeting the route key, and BUDGET decisions listing it in ``auth_scope.routes``."""
+    targeting the route key, and BUDGET decisions listing it in ``auth_scope.routes`` (a list or a text scope, exact
+    keys only: ``scope_route_keys``)."""
     ids = list(session.scalars(select(Decision.id).where(Decision.target_id == route.route_key)))
     for d in session.scalars(select(Decision).where(Decision.kind == "BUDGET")):
-        routes = (d.auth_scope or {}).get("routes") if isinstance(d.auth_scope, dict) else None
-        if isinstance(routes, list) and route.route_key in routes and d.id not in ids:
+        if route.route_key in scope_route_keys(d.auth_scope) and d.id not in ids:
             ids.append(d.id)
     return ids
 
