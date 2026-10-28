@@ -16,9 +16,10 @@ from types import ModuleType
 import pytest
 from sqlalchemy import select
 
-from aeos.core.errors import ValidationFailed
+from aeos.core.errors import Blocked, ValidationFailed
 from aeos.core.paths import repo_root
-from aeos.models.workforce import AgentDefinition, TaskExecution
+from aeos.models.audit import AuditEvent
+from aeos.models.workforce import AgentDefinition, Lease, TaskExecution
 from aeos.workforce import catalog, role_agents, scheduler, seed
 from aeos.workforce.limits import HARD_MAX_ACTIVE
 from tests.unit.test_workforce_support import (
@@ -309,6 +310,54 @@ def test_repair_stays_on_the_role_agent(db, fakes):
     scheduler.set_run_status(db, run, "REVIEW", reason="exit 0", actor="t")
     te = scheduler.request_repair(db, tid, findings=["fix"], review_record_id=None, actor="reviewer")
     assert te.state == "READY" and te.assigned_agent_key == "writer"
+
+
+def _reassign_audits(db, task_id: str) -> list[AuditEvent]:
+    return list(db.scalars(select(AuditEvent).where(AuditEvent.action == "workforce.task.reassign",
+                                                    AuditEvent.target_id == task_id)))
+
+
+def test_reassign_to_an_agent_outside_the_role_is_refused_not_silently_ignored(db, fakes):
+    """A reassign the role map would override is refused (AGENT_OUT_OF_SCOPE), never accepted and audited."""
+    specs = _ready(db, fakes, [{"task_key": "doc", "role_key": "technical-writer"}])
+    tid = specs[0].id
+    _enable(db, "agentic-coder")
+    for other in ("agentic-coder", catalog.IMPLEMENTER_AGENT_KEY):
+        with pytest.raises(ValidationFailed) as exc:
+            scheduler.reassign_task(db, tid, agent_key=other, actor="user:o", reason="writer disabled, use coder")
+        assert exc.value.code == "AGENT_OUT_OF_SCOPE"
+        assert f"agent {other} does not serve role 'technical-writer'" in str(exc.value)
+        assert "run only on writer" in str(exc.value)
+    te = db.scalar(select(TaskExecution).where(TaskExecution.task_id == tid))
+    assert te.state == "READY" and te.assigned_agent_key == "writer"
+    assert _reassign_audits(db, tid) == []
+    # a live attempt is not stopped by a refused reassign
+    _enable(db, "writer")
+    run = scheduler.acquire_lease(db, tid, actor="t")
+    with pytest.raises(ValidationFailed):
+        scheduler.reassign_task(db, tid, agent_key="agentic-coder", actor="user:o")
+    assert db.get(Lease, run.lease_id).state == "ACTIVE"
+    # near miss: a reassign to the role's own agent restarts the attempt on it
+    te = scheduler.reassign_task(db, tid, agent_key="writer", actor="user:o", reason="restart")
+    assert te.state == "READY" and te.assigned_agent_key == "writer"
+    assert db.get(Lease, run.lease_id).state == "REVOKED"
+
+
+def test_reassign_of_a_task_whose_role_has_no_agent_is_refused_with_role_unknown(db, fakes, monkeypatch):
+    writer = next(a for a in catalog.AGENT_DEFINITIONS if a["agent_key"] == "writer")
+    monkeypatch.setitem(writer["allowed_scope"], "roles",
+                        [r for r in writer["allowed_scope"]["roles"] if r != "context-curator"])
+    specs = _ready(db, fakes, [{"task_key": "ctx", "role_key": "context-curator"}])
+    with pytest.raises(Blocked) as exc:
+        scheduler.reassign_task(db, specs[0].id, agent_key=catalog.IMPLEMENTER_AGENT_KEY, actor="user:o")
+    assert exc.value.code == "ROLE_UNKNOWN"
+    assert "no agent definition serves role 'context-curator'" in str(exc.value)
+    assert _reassign_audits(db, specs[0].id) == []
+    # near miss: the same reassign of the implementer's own role is accepted and audited
+    near = _ready(db, fakes, [{"task_key": "feat", "role_key": "feature-implementer"}])
+    te = scheduler.reassign_task(db, near[0].id, agent_key=catalog.IMPLEMENTER_AGENT_KEY, actor="user:o", reason="x")
+    assert te.assigned_agent_key == catalog.IMPLEMENTER_AGENT_KEY
+    assert len(_reassign_audits(db, near[0].id)) == 1
 
 
 def test_role_map_is_the_same_for_both_domains(db, fakes):

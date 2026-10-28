@@ -56,6 +56,9 @@
      is never given to `opencode-implementer`.
    * A mapped agent that is disabled or not seeded makes the task wait with **`AGENT_DISABLED`** naming that agent;
      the owner clears it with `aeos work agent-enable` (or `aeos seed`).
+   * A reassign (`POST /api/tasks/{id}/reassign`) accepts only the agent that serves the task's role, which stops
+     and restarts the attempt on it. Any other agent is refused with **`AGENT_OUT_OF_SCOPE`** (with `ROLE_UNKNOWN`
+     when no worker agent serves the role). It is never accepted and audited, then overridden by the map.
    * `role_agents.catalog_problems` keeps the catalog sound (tested): every served role exists in the 40-role
      catalog, no role has two agents, and every executor role has a worker agent unless it is listed below.
 

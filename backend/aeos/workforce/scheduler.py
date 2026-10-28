@@ -2169,12 +2169,29 @@ def retry_task(session: Session, task_id: str, *, actor: str, extra_attempts: in
 
 
 def reassign_task(session: Session, task_id: str, *, agent_key: str, actor: str, reason: str = "") -> TaskExecution:
-    """Stop the old lease and revoke its capability BEFORE a new lease can be taken (§35)."""
+    """Stop the old lease and revoke its capability BEFORE a new lease can be taken (§35).
+
+    The target must be the agent that serves the task's role (ADR-0126): admission and the lease always take the
+    role-mapped agent, so a reassign to any other agent would be accepted and audited without effect. It is
+    refused with AGENT_OUT_OF_SCOPE (ROLE_UNKNOWN when no worker agent serves the role)."""
     agent = session.scalar(select(AgentDefinition).where(AgentDefinition.agent_key == agent_key))
     if agent is None:
         raise NotFound("agent definition not found")
     if agent.harness != "opencode" or agent_key in REVIEWER_AGENT_KEYS:
         raise ValidationFailed("only implementation agents can take a task (reviewers never repair)")
+    task = session.get(TaskSpec, task_id)
+    if task is None:
+        raise NotFound("task spec missing")
+    mapped = role_agents.resolve(task.role_key)
+    if mapped.agent_key is None:
+        raise Blocked(mapped.reason, code=mapped.code or role_agents.ROLE_UNKNOWN,
+                      details={"role_key": task.role_key, "agent_key": agent_key})
+    if mapped.agent_key != agent_key:
+        raise ValidationFailed(
+            f"agent {agent_key} does not serve role {task.role_key!r}; tasks of that role run only on "
+            f"{mapped.agent_key} (ADR-0126: the role map decides the agent, a reassign cannot override it)",
+            code="AGENT_OUT_OF_SCOPE",
+            details={"role_key": task.role_key, "agent_key": agent_key, "role_agent_key": mapped.agent_key})
     if not agent.enabled:
         raise Blocked(f"agent {agent_key} is disabled", code="AGENT_DISABLED", details={"reasons": [agent.enabled_reason]})
     te = get_te(session, task_id)
