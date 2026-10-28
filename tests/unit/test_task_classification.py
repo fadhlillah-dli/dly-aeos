@@ -162,3 +162,65 @@ def test_a_lowered_project_never_relaxes_a_compiled_task(db, free_route):
     with pytest.raises(Blocked) as ei:
         select_route(db, task=spec)
     assert ei.value.details["classification"] == "INTERNAL"
+
+
+def test_a_raise_also_reaches_paid_admission(db, worker_keys, monkeypatch):
+    """ADR-0128 paid routes take INTERNAL tasks only: an INTERNAL task of a project raised to CONFIDENTIAL is refused."""
+    from aeos.portfolio.reclassify import reclassify_project
+    from aeos.routing import facade as routing
+    from tests.unit.test_routing_best_first import PAID, _paid
+    from tests.unit.test_routing_fakes import install_fakes
+    from tests.unit.test_routing_service import task as routing_task
+
+    seed.run(db)
+    db.commit()
+    install_fakes(monkeypatch)
+    _paid(db)
+    admin = create_admin(db)
+    project = make_project(db, key="paid-raised", classification="INTERNAL")
+    spec = routing_task(classification="INTERNAL")
+    spec.id, spec.project_id = "task-paid-raised", project.id
+    route = service.get_route(db, PAID)
+    before = routing.paid_admission(db, task=spec, route=route)
+    # near miss: an INTERNAL task of an INTERNAL project is a paid candidate (judged on escalation/overflow)
+    assert before is not None and before["data_classification"] == "INTERNAL" and "never runs" not in before["why"]
+    reclassify_project(db, project=project, domain="PERSONAL", to="CONFIDENTIAL", reason=REASON,
+                       actor_user_id=admin.id)
+    db.flush()
+    after = routing.paid_admission(db, task=spec, route=route)
+    assert after is not None and after["admitted"] is False and after["data_classification"] == "CONFIDENTIAL"
+    assert "a CONFIDENTIAL task never runs on a per-token paid route" in after["why"]
+
+
+# ---------------------------------------------------------------- one helper for every routing reader (ratchet)
+
+
+def _direct_readers(files: list[Any]) -> list[str]:
+    import re
+
+    pattern = re.compile(r"\btask\.data_classification\b")
+    return [f"{p}:{i}" for p in files if p.name != "task_class.py"
+            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1) if pattern.search(line)]
+
+
+def test_every_routing_reader_of_a_task_class_goes_through_the_one_helper():
+    """A new routing reader of ``task.data_classification`` would ignore a project raise (ADR-0133 decision 6)."""
+    from aeos.core.paths import repo_root
+
+    root = repo_root() / "backend" / "aeos"
+    files = [*sorted((root / "routing").glob("*.py")), root / "evaluation" / "executor.py"]
+    assert len(files) > 5
+    offenders = _direct_readers(files)
+    assert offenders == [], ("read a task's class through routing.task_class.effective_task_class (ADR-0133): "
+                             f"{offenders}")
+
+
+def test_bite_the_ratchet_sees_a_direct_reader_and_spares_the_helper(tmp_path):
+    bad = tmp_path / "bad.py"
+    bad.write_text("klass = task.data_classification\n", encoding="utf-8")
+    ok = tmp_path / "ok.py"  # near miss: accounting by the compiled class (SQL) and the helper itself
+    ok.write_text("q = TaskSpec.data_classification == 'PUBLIC'\nk = effective_task_class(session, task)\n",
+                  encoding="utf-8")
+    helper = tmp_path / "task_class.py"
+    helper.write_text("own = task.data_classification\n", encoding="utf-8")
+    assert _direct_readers([bad, ok, helper]) == [f"{bad}:1"]

@@ -67,7 +67,8 @@
    the `plan.dag.compile` audit record.
 6. **The class routing applies** (`routing.task_class.effective_task_class`, the one helper every routing reader
    uses: selection, fallback, an evaluation-bound selection, the capacity/PUBLIC-share check, the per-request check of
-   a decision C route in the broker and the evaluation executor's route check) is the higher of the task's compiled
+   a decision C route in the broker, the paid escalation and admission of ADR-0128 and the evaluation executor's route
+   check; a test fails on any other routing reader of `task.data_classification`) is the higher of the task's compiled
    class and its project's current class. So a raise stops a less restrictive route from taking the project's open
    tasks at once, also at the next model call of a running decision C run. A lowering never relaxes a compiled task.
 7. **In-flight work is never downgraded.** TaskSpecs are immutable (DB trigger) and are never rewritten; after a

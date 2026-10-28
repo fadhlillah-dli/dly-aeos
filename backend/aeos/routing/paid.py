@@ -125,7 +125,9 @@ def quota_stop_route(session: Session, task: TaskSpec) -> str | None:
 
 def escalation_active(session: Session, task: TaskSpec) -> bool:
     """INTERNAL, the owner setting on, and at least ``ESCALATION_AFTER`` quality failures on $0-marginal routes."""
-    if task.data_classification != DataClassification.INTERNAL.value or not _settings().paid_escalation:
+    from aeos.routing.task_class import effective_task_class
+
+    if effective_task_class(session, task) != DataClassification.INTERNAL.value or not _settings().paid_escalation:
         return False
     return len(quality_failures(session, task)) >= ESCALATION_AFTER
 
@@ -135,9 +137,11 @@ def zero_marginal_state(session: Session, task: TaskSpec) -> tuple[list[str], li
     limit keeps out now, and those that could take it now."""
     from aeos.routing import capacity, free_tier
     from aeos.routing import service as svc
+    from aeos.routing.task_class import effective_task_class
 
     pol = svc._task_policy(task)
-    decision, limited = svc._eligibility(session, domain=task.domain, data_classification=task.data_classification,
+    decision, limited = svc._eligibility(session, domain=task.domain,
+                                         data_classification=effective_task_class(session, task),
                                          needs_tools=pol["needs_tools"], min_context=pol["min_context"],
                                          pool=pol["pool"], tools=[str(t) for t in task.tools_allowed or []])
     allowed = pol["routes"]
@@ -173,15 +177,18 @@ def paid_admission(session: Session, task: TaskSpec, route: ModelRoute, *,
     after it tried every one of them (``select_route``); without it the state is read here (admission re-check)."""
     if not per_token_paid(route) or _eval_bound(session, task):
         return None
+    from aeos.routing.task_class import effective_task_class
+
     settings = _settings()
     key = route.route_key
-    base: dict[str, Any] = {"route_key": key, "data_classification": task.data_classification,
+    klass = effective_task_class(session, task)  # ADR-0133: max(task class, current project class)
+    base: dict[str, Any] = {"route_key": key, "data_classification": klass,
                             "escalation_enabled": bool(settings.paid_escalation),
                             "overflow_enabled": bool(settings.paid_overflow), "quality_failures": [],
                             "blocked_zero_marginal": [], "open_zero_marginal": []}
-    if task.data_classification != DataClassification.INTERNAL.value:
+    if klass != DataClassification.INTERNAL.value:
         return {**base, "admitted": False, "reason": None, "code": CODE_NOT_ADMITTED,
-                "why": f"paid route {key}: a {task.data_classification} task never runs on a per-token paid route "
+                "why": f"paid route {key}: a {klass} task never runs on a per-token paid route "
                        "(ADR-0128: paid routes take INTERNAL tasks only; PUBLIC work has the free fallback)"}
     failures = quality_failures(session, task)
     base["quality_failures"] = failures
