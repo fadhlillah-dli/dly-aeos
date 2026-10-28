@@ -36,10 +36,13 @@ def eligible_routes(
                 min_context=min_context, pool=pool)
 
 
-def select_route(session: Session, *, task: TaskSpec) -> RouteDecision:
-    """Raise ``Blocked`` when no approved route is eligible for the task."""
+def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str] | None = None) -> RouteDecision:
+    """Raise ``Blocked`` when no approved route is eligible for the task. ``preferred_routes`` (additive, ADR-0124
+    contract (a)): the implementing agent's ``route_policy.preferred_routes``; it only re-orders eligible routes."""
     from aeos.routing.service import select_route as impl
 
+    if preferred_routes:
+        return impl(session, task=task, preferred_routes=list(preferred_routes))
     return impl(session, task=task)
 
 
@@ -171,3 +174,51 @@ def withhold_private_refs(session: Session, payload: Any, *, domain: str) -> Any
 
     routes = session.scalars(select(ModelRoute)).all()
     return withhold_refs(payload, withheld_refs(routes, domain=domain, project_visible=None))
+
+
+# --- load-aware best-first selection (additive, ADR-0124, owner decision 2026-10-28) ----------------------------------
+
+
+def zero_marginal(route: ModelRoute) -> bool:
+    """The route costs no money at the margin: effectively free, a loopback LOCAL route, or a SUBSCRIPTION route with
+    trusted plan terms (usage within the plan is allowance). A re-selection between attempts may only land on one."""
+    from aeos.routing.capacity import zero_marginal as impl
+
+    return impl(route)
+
+
+def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> dict[str, Any]:
+    """§19 admission answer for the selected route: its concurrency cap, the active tasks on it and - for a
+    SUBSCRIPTION route - the 5h-window allowance fit with the estimate the run holds (``hold``). Route-level figures:
+    they span domains."""
+    from aeos.routing.capacity import route_capacity as impl
+
+    return impl(session, task=task, route=route)
+
+
+def reselect_allowed(session: Session, route_key: str) -> bool:
+    """Between attempts: a task stopped at a quota on *route_key* may move to another ACTIVE $0-marginal route of the
+    same data class only when the expected wait for its route is known and longer than the owner setting
+    ``route_reselect_after_minutes``. A running attempt is never moved."""
+    from aeos.routing.capacity import reselect_allowed as impl
+
+    return impl(session, route_key)
+
+
+def route_cooldown(session: Session, *, provider: str, route_key: str,
+                   reported_seconds: int | None = None) -> dict[str, Any]:
+    """The cool-down a new 429/5xx on *route_key* starts (read only): ``streak``, ``seconds``, ``basis`` (DOUBLING or
+    PROVIDER_RESET) and ``resets_at``. The broker writes it with its quota-state record of the 429."""
+    from aeos.routing.capacity import cooldown_for as impl
+
+    return impl(session, provider=provider, route_key=route_key, reported_seconds=reported_seconds)
+
+
+def note_route_cooldown(session: Session, *, provider: str, route_key: str, status: int,
+                        reported_seconds: int | None = None, run_id: str | None = None) -> dict[str, Any]:
+    """Record a cool-down after a provider 5xx on *route_key* (new tasks skip the route until it ends; a running attempt
+    stays on it)."""
+    from aeos.routing.capacity import note_route_cooldown as impl
+
+    return impl(session, provider=provider, route_key=route_key, status=status, reported_seconds=reported_seconds,
+                run_id=run_id)

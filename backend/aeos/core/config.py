@@ -19,6 +19,9 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 from aeos.core.paths import DataLayout, default_config_dir, default_data_dir
 
 LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+# Upper bound of every route concurrency setting: the scheduler's HARD_MAX_ACTIVE in this phase (owner decision
+# 2026-10-28, ADR-0124). core cannot import workforce; tests/unit/test_routing_best_first.py keeps the two equal.
+MAX_ROUTE_ACTIVE = 2
 
 
 def _config_file_path() -> Path:
@@ -83,6 +86,23 @@ class Settings(BaseSettings):
     openrouter_free_rpm_limit: int = 20
     openrouter_free_daily_limit: int = 50
 
+    # ADR-0124 (owner decision 2026-10-28): load-aware best-first route selection. Owner settings, never a route's
+    # configuration identity (routing CONFIG_FIELDS) nor policy/: changing one never voids an ACTIVE TRIAL.
+    # * go_public_share: the share of each SUBSCRIPTION route's (OpenCode Go) trailing 5h allowance window that PUBLIC
+    #   tasks may use, so PUBLIC work (Go first, decision C') never starves INTERNAL tasks; INTERNAL is not limited.
+    # * route_max_active: per-route concurrency cap, {route_key: 1..2}; unset = 1 for a SUBSCRIPTION route with a
+    #   monthly allowance of at most 30 USD, else 2.
+    # * go_max_active_total: active tasks across every SUBSCRIPTION route of one provider (the OpenCode Go key).
+    # * openrouter_free_max_active: active tasks across every OpenRouter :free route (one account-wide rate limit).
+    # * route_reselect_after_minutes: between attempts, a task stopped on a rate-limited route moves to another
+    #   ACTIVE $0-marginal route only when the expected wait for its route is longer than this.
+    # Every cap stays within the scheduler's HARD_MAX_ACTIVE (2 in this phase).
+    go_public_share: float = 0.5
+    route_max_active: dict[str, int] = Field(default_factory=dict)
+    go_max_active_total: int = 2
+    openrouter_free_max_active: int = 1
+    route_reselect_after_minutes: int = 30
+
     # §02/§08 canonical MCI_V2 source: owner-supplied and never committed (the platform repository is public). By
     # default it is read from <data dir>/policy/canonical/<file> (policy/mci-reference.yaml ``location:
     # local:<file>``); this absolute path (aeos.yaml ``mci_source_path`` / AEOS_MCI_SOURCE_PATH) overrides it. A
@@ -123,6 +143,38 @@ class Settings(BaseSettings):
         if not 1 <= v <= 1000:
             raise ValueError("openrouter_free_daily_limit must be 1..1000 (OpenRouter documents 50/day, or 1000/day "
                              "after at least 10 credits purchased)")
+        return v
+
+    @field_validator("go_public_share")
+    @classmethod
+    def _go_public_share_range(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("go_public_share must be 0..1 (the share of a Go route's 5h window PUBLIC tasks may use)")
+        return v
+
+    @field_validator("go_max_active_total", "openrouter_free_max_active")
+    @classmethod
+    def _shared_cap_range(cls, v: int) -> int:
+        if not 1 <= v <= MAX_ROUTE_ACTIVE:
+            raise ValueError(f"route concurrency caps must be 1..{MAX_ROUTE_ACTIVE} (the scheduler's HARD_MAX_ACTIVE "
+                             "in this phase)")
+        return v
+
+    @field_validator("route_max_active")
+    @classmethod
+    def _route_caps_range(cls, v: dict[str, int]) -> dict[str, int]:
+        bad = sorted(k for k, n in v.items() if isinstance(n, bool) or not isinstance(n, int)
+                     or not 1 <= n <= MAX_ROUTE_ACTIVE)
+        if bad:
+            raise ValueError(f"route_max_active values must be integers 1..{MAX_ROUTE_ACTIVE} (the scheduler's "
+                             f"HARD_MAX_ACTIVE in this phase): {bad}")
+        return v
+
+    @field_validator("route_reselect_after_minutes")
+    @classmethod
+    def _reselect_range(cls, v: int) -> int:
+        if not 1 <= v <= 1440:
+            raise ValueError("route_reselect_after_minutes must be 1..1440")
         return v
 
     @field_validator("data_dir")

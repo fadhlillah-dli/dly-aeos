@@ -102,7 +102,7 @@ class FakeModules:
 
         routing = types.ModuleType("aeos.routing.service")
 
-        def select_route(session: Session, *, task):
+        def select_route(session: Session, *, task, preferred_routes=None):
             from aeos.core.errors import Blocked
             from aeos.routing.facade import RouteDecision
 
