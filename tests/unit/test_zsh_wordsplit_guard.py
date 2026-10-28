@@ -56,6 +56,10 @@ DENIED = [
      "pytest runs the WHOLE suite"),
     ("run-tests-backtick", "scripts/run_tests.sh -- `ls tests/unit/test_?.py`", "pytest runs the WHOLE suite"),
     ("pytest-bracket-glob", "cd x && pytest $(echo tests/unit/test_[ab].py)", "pytest runs the WHOLE suite"),
+    ("pytest-double-quoted-subst", 'pytest -q "$(ls tests/unit/test_wt*.py)"', "pytest runs the WHOLE suite"),
+    ("run-tests-double-quoted-backtick", 'scripts/run_tests.sh -- "`ls tests/unit/test_?.py`"',
+     "pytest runs the WHOLE suite"),
+    ("pytest-double-quoted-nested-quotes", 'pytest "$(ls "tests/unit"/test_wt*.py)"', "pytest runs the WHOLE suite"),
 ]
 
 
@@ -115,6 +119,10 @@ ALLOWED = [
     ("pytest-explicit", "PYTHONPATH=backend .venv/bin/python -m pytest -q tests/unit/test_a.py tests/unit/test_b.py"),
     ("run-tests-explicit", "scripts/run_tests.sh -- tests/unit/test_zsh_wordsplit_guard.py"),
     ("pytest-quoted-find", "pytest $(find tests -name 'test_x*.py')"),
+    ("pytest-double-quoted-find", "pytest \"$(find tests -name 'test_x*.py')\""),
+    ("pytest-double-quoted-k", 'pytest -q -k "a*b or $(echo c)" tests/unit/test_a.py'),
+    ("double-quoted-glob-subst-not-a-test-runner", 'echo "$(ls docs/*.md)"'),
+    ("double-quoted-arithmetic", 'echo "$((2*3))" && pytest -q tests/unit/test_a.py'),
     ("glob-subst-not-a-test-runner", "wc -l $(ls docs/*.md)"),
     ("arithmetic", "echo $((2*3)) && pytest -q tests/unit/test_a.py"),
 ]

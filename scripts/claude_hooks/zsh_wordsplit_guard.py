@@ -16,7 +16,8 @@ High precision over recall; everything else passes. Not denied: quoted expansion
 split form ``${=NAME}``, subscripted or flagged expansions, a NAME assigned as an array in the same command (zsh
 expands an unquoted array to its elements), a command that turns on ``SH_WORD_SPLIT`` or ``emulate sh/ksh/bash``,
 and text that zsh does not run itself: single- or double-quoted strings (so ``bash -c '...'``), heredoc bodies and
-comments. The traps are zsh traps, so the hook only denies when the session shell is zsh: the basename of
+comments. A ``$(...)`` or backtick substitution inside double quotes is still checked: zsh runs it. The traps are
+zsh traps, so the hook only denies when the session shell is zsh: the basename of
 ``CLAUDE_CODE_SHELL``, else ``SHELL``, else (neither set) the platform default (zsh on macOS).
 
 Protocol (Claude Code hooks reference, https://code.claude.com/docs/en/hooks, section "PreToolUse"):
@@ -116,12 +117,76 @@ def _read_heredoc_word(text: str, i: int) -> tuple[str, bool, int] | None:
     return (word, strip_tabs, i + m.end()) if word else None
 
 
+def _substitution_end(text: str, i: int) -> tuple[int, bool]:
+    """At ``text[i:]`` just after ``$(``: (index after the matching ``)``, True), or (``len(text)``, False) when it
+    is not closed. Quoted strings inside are skipped."""
+    depth, j, n = 1, i, len(text)
+    while j < n:
+        c = text[j]
+        if c == "\\":
+            j += 2
+        elif c == "'":
+            k = text.find("'", j + 1)
+            j = n if k < 0 else k + 1
+        elif c == '"':
+            j = _double_quote_end(text, j + 1) + 1
+        elif c == "`":
+            k = text.find("`", j + 1)
+            j = n if k < 0 else k + 1
+        else:
+            depth += {"(": 1, ")": -1}.get(c, 0)
+            j += 1
+            if depth == 0:
+                return j, True
+    return n, False
+
+
+def _double_quote_end(text: str, i: int) -> int:
+    """At ``text[i:]`` just after an opening ``"``: the index of the closing ``"`` (or ``len(text)``)."""
+    j, n = i, len(text)
+    while j < n and text[j] != '"':
+        if text[j] == "\\":
+            j += 2
+        elif text.startswith("$(", j) and not text.startswith("$((", j):
+            j = _substitution_end(text, j + 2)[0]
+        elif text[j] == "`":
+            k = text.find("`", j + 1)
+            j = n if k < 0 else k + 1
+        else:
+            j += 1
+    return min(j, n)
+
+
+def _mask_double_quoted(body: str) -> str:
+    """The body of a double-quoted string: plain text becomes ``_``; a ``$(...)`` or backtick substitution stays,
+    masked itself, because zsh runs it (so ``"$(ls <glob>)"`` is still seen)."""
+    out: list[str] = []
+    j, n = 0, len(body)
+    while j < n:
+        if body[j] == "\\":
+            out.append("__"[: n - j])
+            j += 2
+        elif body.startswith("$(", j) and not body.startswith("$((", j):
+            end, closed = _substitution_end(body, j + 2)
+            out.append("$(" + mask(body[j + 2:end - 1 if closed else end]) + (")" if closed else ""))
+            j = end
+        elif body[j] == "`":
+            k = body.find("`", j + 1)
+            end = n if k < 0 else k
+            out.append("`" + mask(body[j + 1:end]) + ("`" if k >= 0 else ""))
+            j = end + 1
+        else:
+            out.append("_")
+            j += 1
+    return "".join(out)
+
+
 def mask(text: str) -> str:
     """The command with the text zsh does not run itself blanked out.
 
     Quoted string contents become ``_`` (the quote characters stay), heredoc bodies and comments are dropped, an
-    escaped character becomes ``_``. What remains is what zsh parses as words and operators. Approximate on purpose:
-    a double-quoted string ends at the next unescaped double quote, nested ``"$(...)"`` quoting included."""
+    escaped character becomes ``_``. A ``$(...)`` or backtick substitution inside double quotes is kept (masked
+    itself), because zsh runs it. What remains is what zsh parses as words and operators. Approximate on purpose."""
     out: list[str] = []
     heredocs: list[tuple[str, bool]] = []
     i, n = 0, len(text)
@@ -140,10 +205,8 @@ def mask(text: str) -> str:
             i = j + 1
             continue
         if c == '"':
-            j = i + 1
-            while j < n and text[j] != '"':
-                j += 2 if text[j] == "\\" else 1
-            out.append('"' + "_" * (min(j, n) - i - 1) + '"')
+            j = _double_quote_end(text, i + 1)
+            out.append('"' + _mask_double_quoted(text[i + 1:j]) + '"')
             i = j + 1
             continue
         if c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()"):
