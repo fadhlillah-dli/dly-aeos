@@ -42,17 +42,67 @@
     "categories_2026_06_25.json": "dad300ad18655b69db720e1b88fc5a5eac06c5b2f0e52c2bf50f10ff057674f3"
    },
    "categories": {
+    "Agentic Coding": [
+     "javascript",
+     "typescript",
+     "python"
+    ],
+    "Coding": [
+     "code_generation",
+     "code_completion"
+    ],
+    "Data Analysis": [
+     "consecutive_events",
+     "tablejoin",
+     "tablereformat"
+    ],
     "IF": [
      "paraphrase",
      "simplify",
      "story_generation",
      "summarize"
+    ],
+    "Language": [
+     "connections",
+     "plot_unscrambling",
+     "typos"
+    ],
+    "Mathematics": [
+     "AMPS_Hard",
+     "integrals_with_game",
+     "math_comp",
+     "olympiad"
+    ],
+    "Reasoning": [
+     "theory_of_mind",
+     "zebra_puzzle",
+     "spatial",
+     "logic_with_navigation"
     ]
    }
   }
  },
  "rows": {
   "2.0": [
+   {
+    "model": "deepseek-v4.1-flash-1017",
+    "scores": {
+     "Long Agentic": 40.9,
+     "Data Analysis": 79.5,
+     "Coding": 96.0,
+     "Design": 83.4,
+     "Reasoning": 89.1,
+     "Research": 79.5
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
    {
     "model": "gemma-4-31b",
     "scores": {
@@ -210,55 +260,169 @@
    {
     "model": "glm-5.2",
     "tasks": {
+     "AMPS_Hard": 98.0,
+     "code_completion": 80.435,
+     "code_generation": 78.873,
+     "connections": 94.0,
+     "consecutive_events": 79.276,
+     "integrals_with_game": 76.0,
+     "javascript": 63.636,
+     "logic_with_navigation": 80.0,
+     "math_comp": 96.078,
+     "olympiad": 89.047,
      "paraphrase": 62.25,
+     "plot_unscrambling": 60.725,
+     "python": 55.0,
      "simplify": 55.667,
+     "spatial": 94.0,
      "story_generation": 62.883,
-     "summarize": 68.367
+     "summarize": 68.367,
+     "tablejoin": 45.865,
+     "tablereformat": 96.078,
+     "theory_of_mind": 75.0,
+     "typescript": 36.667,
+     "typos": 74.0,
+     "zebra_puzzle": 65.5
     }
    },
    {
     "model": "glm-5.3",
     "tasks": {
+     "AMPS_Hard": 99.0,
+     "code_completion": 80.435,
+     "code_generation": 77.465,
+     "connections": 95.333,
+     "consecutive_events": 72.309,
+     "integrals_with_game": 69.0,
+     "javascript": 72.727,
+     "logic_with_navigation": 70.0,
+     "math_comp": 96.078,
+     "olympiad": 87.514,
      "paraphrase": 64.683,
+     "plot_unscrambling": 60.236,
+     "python": 60.0,
      "simplify": 65.85,
+     "spatial": 96.0,
      "story_generation": 72.133,
-     "summarize": 74.55
+     "summarize": 74.55,
+     "tablejoin": 42.346,
+     "tablereformat": 96.078,
+     "theory_of_mind": 88.462,
+     "typescript": 50.0,
+     "typos": 84.0,
+     "zebra_puzzle": 88.75
     }
    },
    {
     "model": "glm-5.3-flash",
     "tasks": {
+     "AMPS_Hard": 97.0,
+     "code_completion": 80.435,
+     "code_generation": 77.465,
+     "connections": 93.667,
+     "consecutive_events": 84.298,
+     "integrals_with_game": 45.0,
+     "javascript": 63.636,
+     "logic_with_navigation": 62.0,
+     "math_comp": 93.137,
+     "olympiad": 89.841,
      "paraphrase": 47.983,
+     "plot_unscrambling": 60.255,
+     "python": 60.0,
      "simplify": 46.95,
+     "spatial": 96.0,
      "story_generation": 59.883,
-     "summarize": 56.467
+     "summarize": 56.467,
+     "tablejoin": 48.827,
+     "tablereformat": 96.078,
+     "theory_of_mind": 73.077,
+     "typescript": 46.667,
+     "typos": 78.0,
+     "zebra_puzzle": 79.5
     }
    },
    {
     "model": "kimi-k2.7-code",
     "tasks": {
+     "AMPS_Hard": 97.0,
+     "code_completion": 76.087,
+     "code_generation": 71.831,
+     "connections": 98.0,
+     "consecutive_events": 48.277,
+     "integrals_with_game": 37.0,
+     "javascript": 63.636,
+     "logic_with_navigation": 74.0,
+     "math_comp": 94.118,
+     "olympiad": 90.299,
      "paraphrase": 48.533,
+     "plot_unscrambling": 55.717,
+     "python": 50.0,
      "simplify": 49.75,
+     "spatial": 92.0,
      "story_generation": 68.567,
-     "summarize": 58.317
+     "summarize": 58.317,
+     "tablejoin": 47.538,
+     "tablereformat": 92.157,
+     "theory_of_mind": 69.231,
+     "typescript": 23.333,
+     "typos": 80.0,
+     "zebra_puzzle": 96.0
     }
    },
    {
     "model": "kimi-k3",
     "tasks": {
+     "AMPS_Hard": 97.0,
+     "code_completion": 82.609,
+     "code_generation": 80.282,
+     "connections": 100.0,
+     "consecutive_events": 89.758,
+     "integrals_with_game": 54.0,
+     "javascript": 68.182,
+     "logic_with_navigation": 80.0,
+     "math_comp": 95.098,
+     "olympiad": 91.649,
      "paraphrase": 74.367,
+     "plot_unscrambling": 72.584,
+     "python": 65.0,
      "simplify": 66.367,
+     "spatial": 100.0,
      "story_generation": 75.367,
-     "summarize": 69.35
+     "summarize": 69.35,
+     "tablejoin": 48.404,
+     "tablereformat": 98.039,
+     "theory_of_mind": 82.692,
+     "typescript": 53.333,
+     "typos": 84.0,
+     "zebra_puzzle": 100.0
     }
    },
    {
     "model": "nemotron-3-ultra-550b-a55b",
     "tasks": {
+     "AMPS_Hard": 96.0,
+     "code_completion": 69.565,
+     "code_generation": 71.831,
+     "connections": 86.667,
+     "consecutive_events": 18.773,
+     "integrals_with_game": 80.0,
+     "javascript": 54.545,
+     "logic_with_navigation": 68.0,
+     "math_comp": 96.078,
+     "olympiad": 82.575,
      "paraphrase": 77.383,
+     "plot_unscrambling": 47.767,
+     "python": 45.0,
      "simplify": 72.283,
+     "spatial": 98.0,
      "story_generation": 69.233,
-     "summarize": 74.883
+     "summarize": 74.883,
+     "tablejoin": 46.558,
+     "tablereformat": 98.039,
+     "theory_of_mind": 61.538,
+     "typescript": 16.667,
+     "typos": 78.0,
+     "zebra_puzzle": 71.25
     }
    }
   ]

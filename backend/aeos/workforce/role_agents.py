@@ -59,7 +59,15 @@ UNMAPPED_EXECUTOR_ROLES: dict[str, str] = {
     "independent-verifier": "a deterministic verifier runner (agent independent-verifier, ADR-0060), not an LLM "
                             "worker; a separate trust context from the implementer (§19)",
 }
-NEVER_PREFERRED = ("argon", "qwen", "deepseek")  # owner answer 2 of 2026-10-28; DeepSeek is PUBLIC-only data terms
+# (marker in the lower-cased route key, family) never preferred (ADR-0126): Gemini 4 Argon and the Qwen family (Go
+# serves them on API families the broker does not support; owner answer 2 of 2026-10-28), any Claude-family model
+# (AGENTS.md invariant 6: Claude only through the native claude binary) and meta-routers (they pick the model
+# themselves, so the ranking would not name what runs). DeepSeek is allowed (owner 2026-10-28, R32: "saya juga ingin
+# menggunakan DeepSeek"): its PUBLIC-only data class and the Go region decide through eligibility and probes.
+NEVER_PREFERRED: tuple[tuple[str, str], ...] = (
+    ("argon", "argon"), ("qwen", "qwen"), ("claude", "claude"), ("anthropic/", "claude"),
+    ("openrouter/openrouter/", "meta-router"),
+)
 
 
 def catalog_problems(definitions: list[dict[str, object]] | None = None,
@@ -87,7 +95,7 @@ def catalog_problems(definitions: list[dict[str, object]] | None = None,
             served.setdefault(role, []).append(key)
         policy = spec.get("route_policy")
         for route in (policy.get("preferred_routes") or []) if isinstance(policy, dict) else []:
-            bad = next((m for m in NEVER_PREFERRED if m in str(route).lower()), None)
+            bad = next((fam for marker, fam in NEVER_PREFERRED if marker in str(route).lower()), None)
             if bad:
                 problems.append(f"agent {key} prefers route {route} ({bad} is never preferred, ADR-0126)")
     for role, agents in sorted(served.items()):

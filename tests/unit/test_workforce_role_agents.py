@@ -33,8 +33,10 @@ from tests.unit.test_workforce_support import (
 
 ROOT = repo_root()
 ADR = ROOT / "docs" / "decisions" / "ADR-0126-per-role-category-agents.md"
+# every servable Go WORKER-capable route of the registry (owner 2026-10-28: use every servable model of the plan)
 SERVABLE_GO = {"kimi-k3.1-pro", "mimo-v2.6-pro", "minimax-m3.1-flash", "kimi-k3", "glm-5.3-flash", "glm-5.3",
-               "glm-5.2", "step-5-preview", "kimi-k2.7-code"}
+               "glm-5.2", "step-5-preview", "kimi-k2.7-code", "mimo-v2.6-flash", "longcat-2.0", "hy3",
+               "deepseek-v4.1-flash"}
 # the owner's brief (2026-10-28): category agent -> the roles it serves
 EXPECTED_ROLES = {
     "agentic-coder": {"backend-api-engineer", "frontend-engineer", "db-data-engineer", "integration-engineer",
@@ -154,41 +156,48 @@ def test_implementer_definition_is_unchanged_so_its_doctor_fingerprint_stays():
 
 
 # ----------------------------------------------------------------------------- preferred routes (contract a)
-def test_preferred_routes_are_servable_go_then_free_openrouter_and_never_argon_qwen_or_deepseek():
+def test_preferred_routes_are_every_servable_go_route_then_free_openrouter_and_never_argon_qwen_or_claude():
     for key in catalog.CATEGORY_AGENTS:
         prefs = _defs()[key]["route_policy"]["preferred_routes"]
         assert prefs, key
         go = [p for p in prefs if p.startswith("opencode-go/")]
         free = [p for p in prefs if p.startswith("openrouter/")]
         assert prefs == go + free, "Go routes first, then the free OpenRouter fallback"
+        missing = SERVABLE_GO - {p.removeprefix("opencode-go/") for p in go}
+        assert not missing, f"agent {key} omits servable Go routes {sorted(missing)} (never omitted, ADR-0126)"
         assert {p.removeprefix("opencode-go/") for p in go} == SERVABLE_GO
+        assert "opencode-go/mimo-v2.6-flash" in prefs and "opencode-go/deepseek-v4.1-flash" in prefs, key
         assert all(p.endswith(":free") for p in free)
-        assert not [p for p in prefs if any(m in p for m in ("argon", "qwen", "deepseek"))]
+        assert not [p for p in prefs if any(m in p for m in ("argon", "qwen", "claude", "anthropic/"))]
     assert role_agents.catalog_problems() == []
 
 
-def test_preferred_route_check_bites_on_argon_qwen_and_deepseek():
+def test_preferred_route_check_bites_on_argon_qwen_claude_and_meta_routers_and_allows_deepseek():
     for bad, family in (("opencode-go/gemini-4-argon", "argon"), ("opencode-go/qwen3.8-max", "qwen"),
-                        ("opencode-go/deepseek-v4.1-flash", "deepseek")):
+                        ("openrouter/qwen/qwen3-coder:free", "qwen"), ("openrouter/anthropic/claude-x", "claude"),
+                        ("opencode-go/claude-y", "claude"), ("openrouter/openrouter/auto", "meta-router")):
         defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)
         next(a for a in defs if a["agent_key"] == "reasoner")["route_policy"]["preferred_routes"].insert(0, bad)
         assert f"agent reasoner prefers route {bad} ({family} is never preferred, ADR-0126)" in \
             role_agents.catalog_problems(defs)
-    defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)  # near miss: a servable Go route moved to the front
-    prefs = next(a for a in defs if a["agent_key"] == "reasoner")["route_policy"]["preferred_routes"]
-    prefs.insert(0, prefs.pop(prefs.index("opencode-go/glm-5.2")))
-    assert role_agents.catalog_problems(defs) == []
+    for near in ("opencode-go/glm-5.2", "opencode-go/deepseek-v4.1-flash"):
+        # near miss: a servable Go route moved to the front; DeepSeek is allowed (owner R32, 2026-10-28)
+        defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)
+        prefs = next(a for a in defs if a["agent_key"] == "reasoner")["route_policy"]["preferred_routes"]
+        prefs.insert(0, prefs.pop(prefs.index(near)))
+        assert role_agents.catalog_problems(defs) == []
 
 
 def test_ranking_data_file_is_the_generator_output_for_the_committed_inputs(tmp_path):
     mod = _ranking_script()
     assert mod.check() == []
+    assert mod.main(["--check"]) == 0  # the --check flag itself (tests/unit/test_ci_contract.py TEST_CALLERS)
     data = json.loads(mod.DATA.read_text(encoding="utf-8"))
     for key, agent in data["agents"].items():
         assert _defs()[key]["route_policy"]["preferred_routes"] == agent["preferred_routes"]
         for e in agent["entries"]:
             for ref in e["source_refs"]:
-                assert set(ref) == {"url", "release", "category", "score", "nq", "date"}
+                assert set(ref) == {"url", "release", "category", "score", "nq", "band", "date"}
                 assert ref["release"] == agent["release"]  # one release per category (critic H7)
     # red: a hand edit of one score
     edited = tmp_path / "role_route_preferences.json"
@@ -216,7 +225,7 @@ def test_snapshot_keeps_only_mapped_rows_and_go_allowances_match_the_route_seed(
             assert seeded[model] == allowance, model
 
 
-def test_ranking_buckets_by_noise_band_and_breaks_ties_by_allowance():
+def test_ranking_orders_best_score_first_and_keeps_the_band_as_metadata_only():
     mod = _ranking_script()
     band = mod.noise_band(202)  # Reasoning: about 6.9 points
     order = mod._rank(["opencode-go/glm-5.3-flash", "opencode-go/kimi-k3", "opencode-go/kimi-k3.1-pro",
@@ -225,10 +234,40 @@ def test_ranking_buckets_by_noise_band_and_breaks_ties_by_allowance():
                        "opencode-go/glm-5.3-flash": 77.6}, band)
     assert order == [("opencode-go/kimi-k3.1-pro", 1), ("opencode-go/kimi-k3", 1), ("opencode-go/glm-5.3-flash", 2),
                      ("opencode-go/glm-5.2", None)]
-    # within one band the larger allowance goes first, unscored routes always last
-    assert mod._rank(["opencode-go/kimi-k3.1-pro", "opencode-go/glm-5.3-flash"],
-                     {"opencode-go/kimi-k3.1-pro": 39.1, "opencode-go/glm-5.3-flash": 19.0}, mod.noise_band(18))[0] == \
-        ("opencode-go/glm-5.3-flash", 1)
+    # one Long Agentic band (18 questions, about 23 points): the better score still goes first, not the allowance
+    assert mod._rank(["opencode-go/glm-5.3-flash", "opencode-go/kimi-k3.1-pro"],
+                     {"opencode-go/kimi-k3.1-pro": 39.1, "opencode-go/glm-5.3-flash": 19.0}, mod.noise_band(18)) == \
+        [("opencode-go/kimi-k3.1-pro", 1), ("opencode-go/glm-5.3-flash", 1)]
+    # an equal score: the larger monthly allowance first (glm-5.3-flash $60 before kimi-k3 $15)
+    assert [k for k, _ in mod._rank(["opencode-go/kimi-k3", "opencode-go/glm-5.3-flash"],
+                                    {"opencode-go/kimi-k3": 77.2, "opencode-go/glm-5.3-flash": 77.2}, band)] == \
+        ["opencode-go/glm-5.3-flash", "opencode-go/kimi-k3"]
+
+
+def test_agentic_coder_lists_the_best_long_agentic_route_before_a_bigger_allowance():
+    mod = _ranking_script()
+    raw = mod.INPUTS.read_bytes()
+    prefs = mod.build_data(json.loads(raw), "sha")["agents"]["agentic-coder"]["preferred_routes"]
+    best, big = "opencode-go/kimi-k3.1-pro", "opencode-go/glm-5.3-flash"
+    assert best in prefs and big in prefs
+    assert prefs.index(best) < prefs.index(big), \
+        f"best first: {best} (Long Agentic 39.1) is listed after {big} (19.0, larger allowance): {prefs[:8]}"
+
+
+def test_unscored_routes_are_never_omitted_and_follow_their_v1_overall_then_allowance():
+    mod = _ranking_script()
+    keys = ["opencode-go/hy3", "opencode-go/glm-5.2", "opencode-go/mimo-v2.6-flash", "opencode-go/glm-5.3",
+            "opencode-go/kimi-k3.1-pro", "opencode-go/minimax-m3.1-flash"]
+    order = mod._rank(keys, {"opencode-go/kimi-k3.1-pro": 39.1}, mod.noise_band(18),
+                      {"opencode-go/glm-5.2": 73.16, "opencode-go/glm-5.3": 76.14})
+    assert [k for k, _ in order] == ["opencode-go/kimi-k3.1-pro", "opencode-go/glm-5.3", "opencode-go/glm-5.2",
+                                     "opencode-go/hy3", "opencode-go/mimo-v2.6-flash",
+                                     "opencode-go/minimax-m3.1-flash"]
+    data = json.loads(mod.DATA.read_text(encoding="utf-8"))
+    for agent in data["agents"].values():
+        for e in agent["entries"]:
+            assert e["source_refs"] or e["order_evidence"]["basis"] in ("LiveBench v1 overall",
+                                                                         "monthly allowance USD"), e["route_key"]
 
 
 # ----------------------------------------------------------------------------- scheduler (item 3)

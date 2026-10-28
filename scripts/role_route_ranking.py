@@ -13,22 +13,31 @@ This script derives that order from LiveBench, one release per category, and wri
 ``DIR/v1.csv`` plus ``DIR/v1cat.json``, the 2026-06-25 v1 table and its categories) and keeps only the rows of the
 models mapped below, so the repository holds the evidence the ranking uses and not the whole download.
 
-Method (critic H7 of the 2026-10-28 review, binding):
+Method (critic H7 of the 2026-10-28 review and the owner's words of 2026-10-28, binding): "model-model terbaik
+saat ini yang berjalan, selanjutnya model lainnya" (the best models first, the others after) and "jangan sampai
+model terbaik yang bisa kita gunakan malah tidak kita gunakan" (the best usable model must never go unused).
 
 * One release per category: LiveBench 2.0 release 2026-10-25 for Long Agentic, Coding, Design, Reasoning, Research
   and Data Analysis; the frozen v1 release 2026-06-25 for Instruction Following. Scores of other releases are never
   mixed in (a model without a score in that release is unscored there).
-* CI-aware buckets: the noise band of a category is the half-width of a 95% interval of a mean score in [0, 100]
-  over ``nq`` questions in the worst case (p = 0.5): ``1.96 * 50 / sqrt(nq)``. Scores are sorted high to low; a
-  bucket starts at the best score not yet placed and takes every model whose score is within the band of that
-  first score. v1 publishes no question count in the table: ``V1_ASSUMED_NQ`` is used and stated (NOT-PROVEN).
-* Inside a bucket: larger monthly allowance first (a bigger allowance carries more work before its window stops),
-  then the higher score, then the route key. Unscored routes follow the scored ones: larger allowance, then key.
-* OpenCode Go routes come first (only the servable chat-completions ones named in ``GO_ALLOWANCE``), then the free
-  OpenRouter routes with tools as the PUBLIC fallback, ranked the same way. Eligibility still filters every entry
-  by data class: a ``:free`` route is never eligible for INTERNAL work, whatever its position here.
-* Never listed: Gemini 4 Argon and Qwen 3.8 Max (Go serves them on the google / anthropic API families, which the
-  broker does not support; owner answer 2 of 2026-10-28) and DeepSeek (PUBLIC-only data terms).
+* Best first: the scored routes of a tier are ordered by the category score, highest first; an equal score goes to
+  the larger monthly allowance, then the route key.
+* The noise band is metadata only (``source_refs[].band``, for later load spreading among near-equal routes): the
+  band of a category is the half-width of a 95% interval of a mean score in [0, 100] over ``nq`` questions in the
+  worst case (p = 0.5), ``1.96 * 50 / sqrt(nq)``; a band starts at the best score not yet placed and takes every
+  model within that half-width of it. It never re-orders against the score. v1 publishes no question count in the
+  table: ``V1_ASSUMED_NQ`` is used and stated (NOT-PROVEN).
+* Never omitted: every servable Go route is in every list. Routes without a score in the category's release follow
+  the scored ones of their tier, ordered by their best other evidence: the LiveBench v1 overall (the mean of the v1
+  category means, release 2026-06-25) where the model has one, highest first, then the larger monthly allowance,
+  then the route key. The v1 overall only orders unscored routes; it is never a category score.
+* OpenCode Go routes come first (every servable chat-completions route of the registry, ``GO_ALLOWANCE``), then the
+  free OpenRouter routes with tools as the PUBLIC fallback, ranked the same way. Eligibility still decides whether a
+  listed route serves: a ``:free`` route is never eligible for INTERNAL work, and DeepSeek (PUBLIC-only data class,
+  needs the Global region of the Go workspace) serves only when its own eligibility and probes say so.
+* Never listed (``aeos.workforce.role_agents.NEVER_PREFERRED`` refuses them in the catalog): Gemini 4 Argon and the
+  Qwen family (Go serves them on the google / anthropic API families, which the broker does not support; owner
+  answer 2 of 2026-10-28), any Claude-family model (AGENTS.md invariant 6) and meta-routers.
 
 Exit codes: 0 ok, 1 the data file differs (--check), 2 usage or input error.
 """
@@ -68,12 +77,13 @@ AGENT_CATEGORIES: dict[str, tuple[str, str]] = {
 }
 V1_CATEGORY_LABEL = {"IF": "Instruction Following"}
 
-# Servable OpenCode Go routes (chat-completions family, tool_call true per models.dev read 2026-10-28) -> monthly
-# allowance USD. Source: the opencode.ai/go page bundle read 2026-10-28; the seeded ones equal
-# aeos.routing.seed GO_WORKERS / GO_WATCH (tests/unit/test_workforce_role_agents.py keeps them equal).
+# Servable OpenCode Go routes (the chat-completions WORKER-capable routes of the registry, aeos.routing.seed after
+# ADR-0125) -> monthly allowance USD. Source: the opencode.ai/go page bundle read 2026-10-28; the seeded ones equal
+# aeos.routing.seed (tests/unit/test_workforce_role_agents.py keeps them equal).
 GO_ALLOWANCE: dict[str, float] = {
-    "glm-5.2": 60, "glm-5.3": 15, "glm-5.3-flash": 60, "kimi-k2.7-code": 60, "kimi-k3": 15, "kimi-k3.1-pro": 15,
-    "mimo-v2.6-pro": 15, "minimax-m3.1-flash": 20, "step-5-preview": 15,
+    "deepseek-v4.1-flash": 80, "glm-5.2": 60, "glm-5.3": 15, "glm-5.3-flash": 60, "hy3": 60, "kimi-k2.7-code": 60,
+    "kimi-k3": 15, "kimi-k3.1-pro": 15, "longcat-2.0": 60, "mimo-v2.6-flash": 60, "mimo-v2.6-pro": 15,
+    "minimax-m3.1-flash": 20, "step-5-preview": 15,
 }
 # Free OpenRouter models whose catalog entry lists tool support (OpenRouter catalog read 2026-10-28, E1 declared).
 OPENROUTER_FREE_TOOLS: tuple[str, ...] = (
@@ -83,10 +93,14 @@ OPENROUTER_FREE_TOOLS: tuple[str, ...] = (
     "recursive/flint-v1.0", "thinkingmachines/inkling", "thinkingmachines/inkling-small",
     "xingchen-agi/xing4.0-29b-a4b",
 )
-NEVER_LISTED = ("argon", "qwen3.8-max", "qwen", "deepseek")
-
 # (release, LiveBench model id) -> route key. Exact ids only, plus the aliases stated with their reason.
 ALIASES: dict[tuple[str, str], tuple[str, str]] = {
+    ("2.0", "deepseek-v4.1-flash-1017"): ("opencode-go/deepseek-v4.1-flash",
+                                          "LiveBench 2.0 release 2026-10-25 lists exactly one build of the model, "
+                                          "the 1017 update (research refs S41, S61: the official update of "
+                                          "deepseek-v4.1-flash); Go serves deepseek-v4.1-flash without a date, so "
+                                          "that it serves this build is NOT-PROVEN. The v1 build "
+                                          "deepseek-v4.1-flash-max is an effort variant and is not mapped"),
     ("2.0", "gemma-4-31b"): ("openrouter/google/gemma-4-31b-it:free",
                              "LiveBench lists the instruction-tuned release without the -it suffix"),
 }
@@ -150,7 +164,7 @@ def build_snapshot(livebench_dir: Path) -> dict[str, Any]:
                 out["nq"][cat] = int(cost_row[f"nq_{column}"])
         r2_rows.append(out)
     v1_rows: list[dict[str, Any]] = []
-    tasks = sorted({t for rel, cat in AGENT_CATEGORIES.values() if rel == "v1" for t in v1_categories[cat]})
+    tasks = sorted({t for cat_tasks in v1_categories.values() for t in cat_tasks})  # all: the v1 overall needs them
     for row in csv.DictReader(v1.open(encoding="utf-8")):
         if route_for("v1", row["model"]) is None:
             continue
@@ -167,8 +181,7 @@ def build_snapshot(livebench_dir: Path) -> dict[str, Any]:
                                    if rel == "2.0"}},
             "v1": {"release": V1_RELEASE, "url": V1_URL, "nq": None,
                    "sha256": {"table_2026_06_25.csv": _sha256(v1), "categories_2026_06_25.json": _sha256(v1cats)},
-                   "categories": {cat: v1_categories[cat] for rel, cat in sorted(set(AGENT_CATEGORIES.values()))
-                                  if rel == "v1"}},
+                   "categories": {cat: v1_categories[cat] for cat in sorted(v1_categories)}},
         },
         "rows": {"2.0": sorted(r2_rows, key=lambda r: r["model"]), "v1": sorted(v1_rows, key=lambda r: r["model"])},
     }
@@ -196,28 +209,46 @@ def _scores(inputs: dict[str, Any], release: str, category: str) -> tuple[dict[s
     return out, nq
 
 
+def v1_overall(inputs: dict[str, Any]) -> dict[str, float]:
+    """{route_key: LiveBench v1 overall}: the mean of the v1 category means (only models with every v1 task)."""
+    cats: dict[str, list[str]] = inputs["sources"]["v1"]["categories"]
+    out: dict[str, float] = {}
+    for row in inputs["rows"]["v1"]:
+        key = route_for("v1", row["model"])
+        if not key or not all(t in row["tasks"] for tasks in cats.values() for t in tasks):
+            continue
+        means = [sum(row["tasks"][t] for t in tasks) / len(tasks) for tasks in cats.values()]
+        out[key] = round(sum(means) / len(means), 2)
+    return out
+
+
 def _allowance(key: str) -> float:
     return float(GO_ALLOWANCE.get(key.removeprefix("opencode-go/"), 0)) if key.startswith("opencode-go/") else 0.0
 
 
-def _rank(keys: list[str], scores: dict[str, float], band: float) -> list[tuple[str, int | None]]:
-    scored = sorted((k for k in keys if k in scores), key=lambda k: (-scores[k], k))
+def _rank(keys: list[str], scores: dict[str, float], band: float,
+          overall: dict[str, float] | None = None) -> list[tuple[str, int | None]]:
+    """[(route_key, band number or None)]: scored routes by score, best first (an equal score: larger allowance,
+    then key), each tagged with its noise band; then the unscored routes by v1 overall where present, best first,
+    then larger allowance, then key. The band never re-orders against the score."""
+    overall = overall or {}
+    scored = sorted((k for k in keys if k in scores), key=lambda k: (-scores[k], -_allowance(k), k))
     out: list[tuple[str, int | None]] = []
-    bucket = 0
-    while scored:
-        bucket += 1
-        top = scores[scored[0]]
-        members = [k for k in scored if top - scores[k] <= band + 1e-9]
-        scored = [k for k in scored if k not in members]
-        members.sort(key=lambda k: (-_allowance(k), -scores[k], k))
-        out += [(k, bucket) for k in members]
-    unscored = sorted((k for k in keys if k not in scores), key=lambda k: (-_allowance(k), k))
+    band_no, top = 0, None
+    for k in scored:
+        if top is None or top - scores[k] > band + 1e-9:
+            band_no, top = band_no + 1, scores[k]
+        out.append((k, band_no))
+    unscored = sorted((k for k in keys if k not in scores),
+                      key=lambda k: (k not in overall, -overall.get(k, 0.0), -_allowance(k), k))
     return out + [(k, None) for k in unscored]
 
 
 def build_data(inputs: dict[str, Any], inputs_sha256: str) -> dict[str, Any]:
     go_keys = sorted(go_key(m) for m in GO_ALLOWANCE)
     free_keys = sorted(free_key(m) for m in OPENROUTER_FREE_TOOLS)
+    overall = v1_overall(inputs)
+    v1_src = inputs["sources"]["v1"]
     agents: dict[str, Any] = {}
     for agent, (release, category) in sorted(AGENT_CATEGORIES.items()):
         scores, nq = _scores(inputs, release, category)
@@ -227,15 +258,20 @@ def build_data(inputs: dict[str, Any], inputs_sha256: str) -> dict[str, Any]:
         label = V1_CATEGORY_LABEL.get(category, category)
         entries: list[dict[str, Any]] = []
         for tier, keys in (("OPENCODE_GO", go_keys), ("OPENROUTER_FREE", free_keys)):
-            for key, bucket in _rank(keys, scores, band):
-                entry: dict[str, Any] = {"route_key": key, "tier": tier, "bucket": bucket,
-                                         "score": scores.get(key), "allowance_usd_month": _allowance(key) or None}
+            for key, band_no in _rank(keys, scores, band, overall):
+                entry: dict[str, Any] = {"route_key": key, "tier": tier, "score": scores.get(key),
+                                         "allowance_usd_month": _allowance(key) or None}
                 if key in scores:
                     entry["source_refs"] = [{"url": src["url"], "release": src["release"], "category": label,
-                                             "score": scores[key], "nq": nq, "date": inputs["fetched"]}]
+                                             "score": scores[key], "nq": nq, "band": band_no,
+                                             "date": inputs["fetched"]}]
                 else:
                     entry["source_refs"] = []
                     entry["note"] = NOT_MAPPED.get(key, f"no score in LiveBench {release} release {src['release']}")
+                    entry["order_evidence"] = (
+                        {"basis": "LiveBench v1 overall", "url": v1_src["url"], "release": v1_src["release"],
+                         "value": overall[key]} if key in overall else
+                        {"basis": "monthly allowance USD", "value": _allowance(key) or None})
                 entries.append(entry)
         agents[agent] = {
             "category": label, "release": src["release"], "livebench_version": release,
@@ -252,11 +288,16 @@ def build_data(inputs: dict[str, Any], inputs_sha256: str) -> dict[str, Any]:
             "release_per_category": {"2.0": R2_RELEASE, "v1": V1_RELEASE},
             "noise_band": "1.96 * 50 / sqrt(nq) points (95% half-width, worst case p=0.5)",
             "v1_nq": f"not published in the v1 table; {V1_ASSUMED_NQ} assumed (NOT-PROVEN)",
-            "bucket": "a bucket takes every model within the noise band of its best remaining score",
-            "inside_bucket": "larger monthly allowance first, then higher score, then route key",
-            "unscored": "after the scored routes of the tier: larger allowance first, then route key",
+            "order": "best first: category score, highest first; an equal score: larger monthly allowance, then "
+                     "route key (owner 2026-10-28: 'model-model terbaik saat ini yang berjalan, selanjutnya model "
+                     "lainnya')",
+            "band": "metadata only (source_refs[].band, for later load spreading): a band takes every model within "
+                    "the noise band of its best remaining score; it never re-orders against the score",
+            "unscored": "never omitted; after the scored routes of the tier: LiveBench v1 overall where present "
+                        "(highest first), then larger monthly allowance, then route key (order_evidence)",
             "tiers": "OPENCODE_GO first, then OPENROUTER_FREE (PUBLIC only: eligibility filters it for INTERNAL)",
-            "never_listed": "Gemini 4 Argon, Qwen 3.8 Max (API family the broker does not support), DeepSeek",
+            "never_listed": "Gemini 4 Argon and the Qwen family (API family the broker does not support), any "
+                            "Claude-family model, meta-routers (aeos.workforce.role_agents.NEVER_PREFERRED)",
             "effect": "re-orders routes that are already eligible; never makes a route eligible",
         },
         "aliases": {f"{rel}:{lb}": {"route_key": key, "reason": why} for (rel, lb), (key, why) in sorted(ALIASES.items())},

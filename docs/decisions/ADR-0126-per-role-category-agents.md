@@ -18,6 +18,10 @@
   OpenRouter routes as the fallback (ADR-0124); (2) no broker support for Gemini 4 Argon or Qwen 3.8 Max (Go serves
   them on the google and anthropic API families) now; (3) no paid OpenRouter routes; (4) parallel workers are
   phased: `HARD_MAX_ACTIVE` stays 2 in this phase.
+* **Owner's words of the same day (R31, R32, R34), verbatim:** "model-model terbaik saat ini yang berjalan,
+  selanjutnya model lainnya" (the best models run first, the others after); "saya juga ingin menggunakan DeepSeek"
+  (I also want to use DeepSeek); "jangan sampai model terbaik yang bisa kita gunakan malah tidak kita gunakan" (the
+  best model we can use must never go unused); and every servable model of the $10 OpenCode Go plan is used.
 * **Before this ADR every task ran on `opencode-implementer`, whatever its role** (the scheduler assigned that key at
   enqueue and fell back to it at admission and repair). A role's needs never reached route selection, and a role
   without an agent was silently run by the implementer.
@@ -77,22 +81,39 @@
    route without BUDGET, or a `:free` route for INTERNAL work eligible (ADR-0124 ranks tier -> eval -> preferred
    position -> priority -> key). The list is generated, never hand-edited:
    * Data file: `backend/aeos/workforce/role_route_preferences.json` (not under `policy/`, so `policy_version` is
-     unchanged). Every scored entry carries `source_refs` `{url, release, category, score, nq, date}`.
+     unchanged). Every scored entry carries `source_refs` `{url, release, category, score, nq, band, date}`; every
+     unscored entry carries `order_evidence` (the LiveBench v1 overall or the monthly allowance that placed it).
    * Generator: `scripts/role_route_ranking.py`, from the committed snapshot
      `docs/evidence/livebench-2026-10-28/role-ranking-inputs.json` (only the LiveBench rows of the mapped models,
      with the SHA-256 of each downloaded file). `tests/unit/test_workforce_role_agents.py` fails when the data file
-     is not exactly the generator output for the committed inputs.
-   * Method: one LiveBench release per category; CI-aware buckets with the noise band `1.96 * 50 / sqrt(nq)` points
-     (Long Agentic 23.1, Research 20.9, Design 19.6, Coding 18.2, Data Analysis 8.0, Reasoning 6.9); inside a bucket
-     the larger monthly allowance first, then the higher score, then the key; unscored routes after the scored ones.
-     v1 publishes no question count, so 50 is assumed for Instruction Following (band 13.9, NOT-PROVEN).
-   * Content: the nine servable OpenCode Go chat-completions routes (kimi-k3.1-pro, mimo-v2.6-pro,
-     minimax-m3.1-flash, kimi-k3, glm-5.3-flash, glm-5.3, glm-5.2, step-5-preview, kimi-k2.7-code) first, then the
-     free OpenRouter routes whose catalog entry lists tools (PUBLIC only by data class). Gemini 4 Argon, Qwen 3.8 Max
-     and DeepSeek are never listed (answer 2; DeepSeek is PUBLIC-only), and a test refuses them.
-   * Model identity: LiveBench ids map to routes by exact id; one alias is stated in the data file
-     (`gemma-4-31b` is the `-it` release). The free `nemotron-3.5-super-vl` route is left unscored because LiveBench
-     lists two builds of it (full precision and nvfp4) and the endpoint does not say which one it serves.
+     is not exactly the generator output for the committed inputs, and the same test runs
+     `scripts/role_route_ranking.py --check` (registered in `tests/unit/test_ci_contract.py` `TEST_CALLERS`).
+   * Method, best first ("model-model terbaik saat ini yang berjalan, selanjutnya model lainnya"): one LiveBench
+     release per category; the scored routes of a tier are ordered by the category score, highest first; an equal
+     score goes to the larger monthly allowance, then the key. The noise band `1.96 * 50 / sqrt(nq)` points (Long
+     Agentic 23.1, Research 20.9, Design 19.6, Coding 18.2, Data Analysis 8.0, Reasoning 6.9) is kept only as
+     metadata (`source_refs[].band`, for later load spreading among near-equal routes); it never re-orders against
+     the score. v1 publishes no question count, so 50 is assumed for Instruction Following (band 13.9, NOT-PROVEN).
+   * Never omitted ("jangan sampai model terbaik yang bisa kita gunakan malah tidak kita gunakan"): a route without
+     a score in the category's release follows the scored routes of its tier, ordered by its best other evidence:
+     the LiveBench v1 overall (mean of the v1 category means, release 2026-06-25) where the model has one, highest
+     first, then the larger monthly allowance, then the key. The v1 overall only orders unscored routes; it is
+     never a category score, so one release per category still holds for scores.
+   * Content: every servable OpenCode Go chat-completions WORKER-capable route of the registry (kimi-k3.1-pro,
+     mimo-v2.6-pro, minimax-m3.1-flash, kimi-k3, glm-5.3-flash, glm-5.3, glm-5.2, step-5-preview, kimi-k2.7-code,
+     mimo-v2.6-flash, longcat-2.0, hy3, deepseek-v4.1-flash) is in every list, first, then the free OpenRouter
+     routes whose catalog entry lists tools (PUBLIC only by data class). DeepSeek is listed ("saya juga ingin
+     menggunakan DeepSeek"): it is PUBLIC-only by its data class and needs the Global region of the Go workspace,
+     so its eligibility and probes decide whether it serves; the preference never excludes it. Never listed, and
+     refused by `role_agents.NEVER_PREFERRED` in the catalog check (tested): Gemini 4 Argon and the Qwen family
+     (answer 2; not servable by the broker until a separate Go-translation probe proves otherwise), any
+     Claude-family model id (AGENTS.md invariant 6) and meta-routers (`openrouter/openrouter/...`).
+   * Model identity: LiveBench ids map to routes by exact id; two aliases are stated in the data file
+     (`gemma-4-31b` is the `-it` release; `deepseek-v4.1-flash-1017` is the only build of the model in the 2.0
+     release, the official 1017 update per research refs S41/S61; that Go serves that build is NOT-PROVEN). The v1
+     `deepseek-v4.1-flash-max` is an effort variant and is not mapped. The free `nemotron-3.5-super-vl` route is left
+     unscored because LiveBench lists two builds of it (full precision and nvfp4) and the endpoint does not say which
+     one it serves.
 
 4. **`HARD_MAX_ACTIVE` is one constant.** It moves to `aeos.workforce.limits` (still 2, answer 4) and is the bound
    of `scheduler.set_concurrency`, the `aeos work concurrency` argument and the API body `ConcurrencyIn`. A test
@@ -109,9 +130,14 @@
 * A task whose role has a category agent waits with `AGENT_DISABLED` until the owner enables that agent; until then
   only `feature-implementer` tasks run. This is deliberate: the owner chooses when each category starts.
   `CAN_RUN_WORKER` still requires `opencode-implementer` to be enabled.
-* With 18 Long Agentic questions, all six scored Go models fall into one bucket, so the allowance decides the order
-  (glm-5.3-flash, then minimax-m3.1-flash, then the $15 models by score). This is the honest reading of the
-  evidence, not a claim that the smaller model is better.
+* With 18 Long Agentic questions, all scored Go models fall into one noise band. The order is still the score
+  (deepseek-v4.1-flash 40.9, kimi-k3.1-pro 39.1, mimo-v2.6-pro 35.2, ... glm-5.3-flash 19.0): the owner asked for the
+  best first, and the band only records that the differences inside it are within the noise. An earlier draft of
+  this ADR ordered inside a band by the larger allowance, which put glm-5.3-flash (19.0) before kimi-k3.1-pro (39.1);
+  that was "biggest allowance first", against the owner's words, and was replaced before merge.
+* A route the best-first order puts first may not be eligible (a WATCHLIST route, DeepSeek outside the Global
+  region, a `:free` route for INTERNAL work): ADR-0124 then takes the next eligible entry. The list never makes a
+  route eligible and never moves a route out of its pool.
 * A regenerated ranking changes the category agents' `route_policy`, so `aeos seed` gives them a new revision; their
   enabled state is kept. Enabling never happens by seeding.
 
@@ -128,7 +154,8 @@
 
 * Whether a category's LiveBench score predicts this platform's task outcome: no AEOS evaluation per role exists;
   adopted `eval_results` still rank before the preference (ADR-0124).
-* The v1 question count (50 assumed), the snapshots and reasoning effort Go serves (LiveBench runs at high effort),
-  and tool calling on Go routes (models.dev declares it; the probe is ADR-0125).
+* The v1 question count (50 assumed), the snapshots and reasoning effort Go serves (LiveBench runs at high effort;
+  the deepseek-v4.1-flash-1017 build in particular), and tool calling on Go routes (models.dev declares it; the probe
+  is ADR-0125; hy3 has no declared tool capability).
 * Admission and routing with the category agents on a real host (unit tests on macOS arm64 only, E2); Windows and
   macOS Intel run them only in CI.
