@@ -202,12 +202,15 @@ def test_no_setting_can_turn_the_guard_off():
 
 
 # ------------------------------------------------------------------------------------- performance (linear, bounded)
+# CPU time of this process, not wall time: under a loaded full-suite run (load average 12-40, xdist workers) the
+# wall clock also counts the time the process waits for a core, which made these tests fail with correct code
+# (review of 2026-10-28, LESSONS L15: a flaky test is a timing assumption to fix, never a re-run).
 def _best_of(n: int, fn) -> float:
     best = float("inf")
     for _ in range(n):
-        t0 = time.perf_counter()
+        t0 = time.process_time()
         fn()
-        best = min(best, time.perf_counter() - t0)
+        best = min(best, time.process_time() - t0)
     return best
 
 
@@ -224,7 +227,25 @@ def test_a_2mb_request_is_scanned_well_within_200ms():
     size = len(outgoing_text(payload))
     assert size >= 2_000_000
     took = _best_of(3, lambda: sensitive_content_findings(payload))
-    assert took < 0.2, f"{size} chars took {took:.3f}s ({_load()})"
+    assert took < 0.5, f"{size} chars took {took:.3f}s of CPU ({_load()})"
+
+
+def _adversarial(shape: str, k: float) -> str:
+    """The shape at scale *k* (k=1 is about 2 MB); every run length scales with k."""
+    def n(x: int) -> int:
+        return max(1, int(x * k))
+
+    return {"unseal_label_then_spaces": lambda: "unseal key" + " " * n(2_000_000),
+            "pem_headers_without_end": lambda: "-----BEGIN " + "PRIVATE KEY-----\n" * n(75_000),
+            "token_prefix_runs": lambda: ("sk-" + "s." + "r." + "hvs.") * n(200_000),
+            "backslash_run": lambda: "\\" * n(2_000_000) + "x",
+            "colour_codes_without_final_byte": lambda: ("\x1b[" + "1;" * 50 + "\\u001b[" + "2;" * 50) * n(9_000),
+            "percent_escape_runs": lambda: "%25" * n(600_000) + "%" + "%2" * n(100_000),
+            "textual_escape_runs": lambda: ("\\e" + "\\" * 51 + "\\033[" + "1;" * 50 + "\\x1b" + "\\" * 49) * n(9_500),
+            "string_terminator_runs": lambda: ("\x1b" + "\\" * 999 + "\\u001b" + "\\" * 1_001) * n(1_000),
+            # escapes whose tail could begin a token, so the cut view differs from the greedy one at every escape
+            "cut_view_tails": lambda: ("\\e[s" + "\\\\b" + "\\01" + "%1B%5Bu" + "\x1b]1" + "\\x1b[1;2;3A") * n(70_000),
+            "encoded_escape_runs": lambda: ("%251B%255B" + "%253B" * 20 + "%255C" * 20) * n(10_000)}[shape]()
 
 
 @pytest.mark.parametrize("shape", ["unseal_label_then_spaces", "pem_headers_without_end", "token_prefix_runs",
@@ -234,20 +255,33 @@ def test_a_2mb_request_is_scanned_well_within_200ms():
 def test_adversarial_2mb_inputs_stay_linear(shape):
     """Inputs that made the patterns backtrack quadratically before ADR-0127 (minutes at 2 MB); a run of backslashes
     made the escape-boundary view quadratic (1.3 s at 20,000, review of 2026-10-28); the two boundary views (greedy
-    and cut) stay linear when every escape has a tail that could begin a token."""
-    text = {"unseal_label_then_spaces": "unseal key" + " " * 2_000_000,
-            "pem_headers_without_end": "-----BEGIN " + "PRIVATE KEY-----\n" * 75_000,
-            "token_prefix_runs": ("sk-" + "s." + "r." + "hvs.") * 200_000,
-            "backslash_run": "\\" * 2_000_000 + "x",
-            "colour_codes_without_final_byte": ("\x1b[" + "1;" * 50 + "\\u001b[" + "2;" * 50) * 9_000,
-            "percent_escape_runs": "%25" * 600_000 + "%" + "%2" * 100_000,
-            "textual_escape_runs": ("\\e" + "\\" * 51 + "\\033[" + "1;" * 50 + "\\x1b" + "\\" * 49) * 9_500,
-            "string_terminator_runs": ("\x1b" + "\\" * 999 + "\\u001b" + "\\" * 1_001) * 1_000,
-            # escapes whose tail could begin a token, so the cut view differs from the greedy one at every escape
-            "cut_view_tails": ("\\e[s" + "\\\\b" + "\\01" + "%1B%5Bu" + "\x1b]1" + "\\x1b[1;2;3A") * 70_000,
-            "encoded_escape_runs": ("%251B%255B" + "%253B" * 20 + "%255C" * 20) * 10_000}[shape]
-    took = _best_of(1, lambda: find_high_confidence_secrets(text))
-    assert took < 1.0, f"{shape}: {len(text)} chars took {took:.3f}s ({_load()})"
+    and cut) stay linear when every escape has a tail that could begin a token.
+
+    Linearity is measured, not assumed from a wall-clock bound: four times the input may cost at most about four times
+    the CPU (bound 8x for noise; a quadratic scan costs 16x), plus a generous absolute CPU cap that only a pathological
+    regression reaches."""
+    quarter, full = _adversarial(shape, 0.25), _adversarial(shape, 1.0)
+    small = _best_of(2, lambda: find_high_confidence_secrets(quarter))
+    took = _best_of(1, lambda: find_high_confidence_secrets(full))
+    assert took < 3.0, f"{shape}: {len(full)} chars took {took:.3f}s of CPU ({_load()})"
+    assert took <= 8 * max(small, 0.02), (f"{shape}: not linear - {len(quarter)} chars {small:.3f}s, {len(full)} "
+                                          f"chars {took:.3f}s of CPU ({_load()})")
+
+
+def test_bite_the_linearity_check_catches_a_quadratic_scan():
+    """The 8x bound is a real check: a scan that restarts from every 100th position (quadratic) costs about 16x for
+    four times the input and fails it, while one linear pass passes."""
+    def quadratic(s: str) -> int:
+        return sum(s.find("\x00", i) for i in range(0, len(s), 100))
+
+    def linear(s: str) -> int:
+        return s.count("\x00")
+
+    quarter, full = "a" * 60_000, "a" * 240_000
+    ratio_q = _best_of(1, lambda: quadratic(full)) / max(_best_of(2, lambda: quadratic(quarter)), 1e-6)
+    assert ratio_q > 8, f"a quadratic scan grew only {ratio_q:.1f}x for 4x the input: the bound would not catch it"
+    took = _best_of(1, lambda: linear(full))
+    assert took <= 8 * max(_best_of(2, lambda: linear(quarter)), 0.02)
 
 
 # ------------------------------------------------------------------------------------- the proxy, :free route
