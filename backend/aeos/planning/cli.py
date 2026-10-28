@@ -16,7 +16,7 @@ from aeos.core.db import session_scope
 from aeos.core.enums import Domain, Role
 from aeos.core.errors import AeosError
 
-app = typer.Typer(help="Planning: create plans, run the 4-stage Opus/Fable pipeline, import manual results.",
+app = typer.Typer(help="Planning: create plans, run the 4-stage Opus pipeline, import manual results.",
                   no_args_is_help=True)
 console = Console(highlight=False, markup=False)  # plan titles/errors are DATA, never markup
 
@@ -94,7 +94,7 @@ def run(plan_id: str = typer.Argument(...), actor: str = typer.Option(..., help=
     try:
         plan = service.run_pipeline(session, plan_id, actor=actor_id)
         console.print(_ascii(f"Plan {plan.id}: {plan.state} - {plan.state_reason}"))
-        manual = service.manual_instructions(plan)
+        manual = service.manual_instructions(plan, session)
         if manual:
             for step in manual["steps"]:
                 console.print(_ascii(f"  * {step}"))

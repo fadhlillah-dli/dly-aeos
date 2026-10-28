@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -30,8 +31,16 @@ from jsonschema.exceptions import SchemaError
 
 from aeos.core.redaction import redact_text
 
+# Families the parser RECOGNISES in a resolved model (so an answer from any of them is identified and judged),
+# not the families AEOS may request: a Fable answer is named as fable and then fails the opus stage policy.
 FAMILIES = ("opus", "fable", "sonnet", "haiku")
-ALLOWED_REQUEST_FAMILIES = ("opus", "fable", "sonnet")
+# Families a request may name. ADR-0131 (owner decision 2026-10-28): the Claude Fable family is never requested;
+# the bridge refuses it with its own error (MODEL_FAMILY_REFUSED), before any process starts, and an answer
+# produced by it is never accepted, whatever was requested (refused_family below).
+ALLOWED_REQUEST_FAMILIES = ("opus", "sonnet")
+REFUSED_REQUEST_FAMILIES = ("fable",)
+REFUSAL_BASIS = "owner decision 2026-10-28, ADR-0131"
+_INVISIBLE_CATEGORIES = frozenset({"Cf", "Cc", "Cs", "Co", "Cn"})  # zero-width, BOM, controls, surrogates, unassigned
 AUXILIARY_FAMILIES = ("haiku",)  # small helper calls the client may make; never the answer model
 _FAMILY_RE = re.compile(r"claude-(opus|fable|sonnet|haiku)\b")
 _FULL_ID_RE = re.compile(r"^claude-(opus|fable|sonnet|haiku)-[0-9][0-9a-z\-]*$")
@@ -74,6 +83,37 @@ def _normalise_id(model: str) -> str:
     return model.strip().lower().split("[", 1)[0]
 
 
+def family_tokens(model: str | None) -> list[str]:
+    """Lower-case alphanumeric tokens of a model name after NFKC (full-width letters become ASCII) with invisible
+    characters removed (zero-width space and joiner, BOM, soft hyphen, controls)."""
+    text = unicodedata.normalize("NFKC", str(model or ""))
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in _INVISIBLE_CATEGORIES)
+    return [t for t in re.split(r"[^a-z0-9]+", text.casefold()) if t]
+
+
+def refused_family(model: str | None) -> str | None:
+    """ADR-0131: the refused family (``fable``) a requested or resolved model name belongs to, else None.
+
+    Token based, so every spelling is caught - the alias, a pinned id, a ``[1m]`` suffix, ``Fable 5.1``, mixed case,
+    full-width letters, invisible characters inside the name - while a word that only contains it (``fableish``,
+    ``notfable``) is not. A name the tokens cannot identify (letters from another script) is not a family AEOS knows,
+    so a request naming it is refused as REQUEST_INVALID and an answer from it fails the family check anyway."""
+    tokens = family_tokens(model)
+    return next((fam for fam in REFUSED_REQUEST_FAMILIES if fam in tokens), None)
+
+
+def refused_family_message(model: str | None, *, answered: bool) -> str | None:
+    """The refusal text for a model of a refused family (None when *model* is not refused)."""
+    fam = refused_family(model)
+    if fam is None:
+        return None
+    if answered:
+        return (f"answer produced by {model} (family {fam}): the Claude {fam} family is never accepted, whatever "
+                f"was requested ({REFUSAL_BASIS})")
+    return (f"model {model!r} is refused: DLY AEOS never requests the Claude {fam} family ({REFUSAL_BASIS}); "
+            "planning and review stages use opus")
+
+
 def is_pinned_id(model: str) -> bool:
     return bool(_FULL_ID_RE.match(_normalise_id(model)))
 
@@ -91,7 +131,7 @@ class ModelResolution:
 def resolve_model(requested: str, model_usage: Any) -> ModelResolution:
     """Determine which model produced the answer and whether it satisfies the request policy.
 
-    * alias request (``opus``/``fable``/``sonnet``): the answer model must be in that family;
+    * alias request (``opus``/``sonnet``): the answer model must be in that family;
     * pinned request (``claude-opus-5-5``): the answer model must be exactly that id;
     * any other model that produced output must be in-family too, except auxiliary ``haiku``
       helpers producing fewer tokens than the answer model;
@@ -121,6 +161,10 @@ def resolve_model(requested: str, model_usage: Any) -> ModelResolution:
     want_family = family_of(requested)
     pinned = is_pinned_id(requested)
     reasons: list[str] = []
+    # ADR-0131: a model of a refused family never counts, whatever the request named (an old package or record that
+    # requested fable included); checked on every model that produced output, the answer model first
+    refused = [msg for name, _ in producing if (msg := refused_family_message(name, answered=True))]
+    requested_refused = refused_family_message(requested, answered=False)
     if pinned:
         if _normalise_id(primary) != _normalise_id(requested):
             reasons.append(f"answer produced by {primary}, pinned request was {requested}")
@@ -135,6 +179,7 @@ def resolve_model(requested: str, model_usage: Any) -> ModelResolution:
             auxiliary.append(name)
             continue
         reasons.append(f"{name} also produced output ({out} tokens) outside the requested policy")
+    reasons = [*refused, *([requested_refused] if requested_refused else []), *reasons]
     return ModelResolution(primary, [p[0] for p in producing], auxiliary, all_models, not reasons, "; ".join(reasons))
 
 

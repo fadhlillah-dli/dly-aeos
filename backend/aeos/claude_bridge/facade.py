@@ -23,7 +23,7 @@ class ClaudeRequest:
 
     purpose: str  # planning.primary|planning.challenge|planning.synthesis|planning.final|review.checkpoint|...
     role: str
-    model: str  # alias or pinned id from policy (e.g. "opus", "fable")
+    model: str  # alias or pinned id from policy (e.g. "opus", "claude-opus-5-5"); "fable" is refused (ADR-0131)
     prompt: str
     json_schema: dict[str, Any]
     project_id: str | None = None
@@ -63,6 +63,14 @@ def capability_test() -> dict[str, Any]:
     from aeos.claude_bridge.bridge import capability_test as impl
 
     return impl()
+
+
+def refused_family(model: str | None) -> str | None:
+    """ADR-0131: the Claude family DLY AEOS never requests nor accepts (``fable``) that *model* belongs to, in any
+    spelling (alias, pinned id, ``[1m]`` suffix, case, invisible characters), else None."""
+    from aeos.claude_bridge.parsing import refused_family as impl
+
+    return impl(model)
 
 
 def write_manual_package(request: ClaudeRequest, *, package_id: str) -> Path:
