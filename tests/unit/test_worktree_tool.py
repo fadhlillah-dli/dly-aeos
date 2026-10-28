@@ -3,6 +3,9 @@
 Incident class: a link (``.venv`` junction) inside a worktree made ``git worktree remove`` delete what the link
 pointed at. Every bite test builds a throw-away repository in tmp_path (hermetic git environment, local origin),
 a violating fixture that must be refused and a near-miss legitimate fixture that must be accepted.
+
+Layout (owner request 2026-10-28): every worktree lives in ONE folder next to the main checkout,
+``<main>-worktrees/<name>``; worktrees made earlier as siblings ``<main>-wt-<name>`` are still found by remove.
 """
 
 from __future__ import annotations
@@ -90,8 +93,32 @@ def run(repo, capsys, *args):
     return code, out
 
 
-def sibling(repo, name):
+def wt_folder(repo):
+    """The one folder that holds every worktree: <main>-worktrees next to the main checkout."""
+    return repo.parent / f"{repo.name}-worktrees"
+
+
+def wt_dir(repo, name):
+    return wt_folder(repo) / name
+
+
+def legacy_dir(repo, name):
+    """Where worktrees made before 2026-10-28 live: the sibling <main>-wt-<name>."""
     return repo.parent / f"{repo.name}-wt-{name}"
+
+
+def add_legacy(repo, name, branch, *, marker=True):
+    """A worktree as the previous version of the tool made it: sibling directory, marker in its git dir."""
+    dest = legacy_dir(repo, name)
+    g(repo, "worktree", "add", "--no-track", "-b", branch, str(dest), "origin/main")
+    if marker:
+        (Path(g(dest, "rev-parse", "--absolute-git-dir")) / wt_tool.MARKER).write_text("old\n", encoding="utf-8")
+    return dest
+
+
+def branch_exists(repo, branch):
+    return subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+                          capture_output=True, text=True, check=False).returncode == 0
 
 
 def make_symlink(target, link):
@@ -116,10 +143,16 @@ def sentinel_intact(d):
 
 
 # ------------------------------------------------------------------------------------------------ add
-def test_add_creates_sibling_worktree_with_marker_and_no_links(repo, capsys):
+def test_add_creates_the_worktree_in_the_one_worktrees_folder_with_marker_and_no_links(repo, capsys):
+    assert not os.path.lexists(wt_folder(repo))
     code, out = run(repo, capsys, "add", "alpha", "feat/alpha")
-    dest = sibling(repo, "alpha")
+    dest = wt_dir(repo, "alpha")
     assert code == 0, out
+    assert dest == repo.parent / "main-worktrees" / "alpha"
+    assert wt_folder(repo).is_dir() and not os.path.islink(wt_folder(repo))
+    assert f"created folder: {wt_folder(repo)}" in out
+    assert not legacy_dir(repo, "alpha").exists()  # no sibling directory any more
+    assert sorted(p.name for p in repo.parent.iterdir()) == ["main", "main-worktrees"]
     assert dest.is_dir() and (dest / "README.md").is_file()
     assert g(dest, "branch", "--show-current") == "feat/alpha"
     marker = Path(g(dest, "rev-parse", "--absolute-git-dir")) / wt_tool.MARKER
@@ -131,6 +164,51 @@ def test_add_creates_sibling_worktree_with_marker_and_no_links(repo, capsys):
     # --no-track: the new branch has no upstream
     assert subprocess.run(["git", "-C", str(dest), "config", "--get", "branch.feat/alpha.merge"],
                           capture_output=True, text=True, check=False).stdout.strip() == ""
+    # near miss: a second worktree goes into the existing real folder, next to the first
+    code, out = run(repo, capsys, "add", "beta", "feat/beta")
+    assert code == 0, out
+    assert "created folder" not in out
+    assert sorted(p.name for p in wt_folder(repo).iterdir()) == ["alpha", "beta"]
+
+
+def test_add_refuses_a_worktrees_folder_that_is_a_symlink_and_creates_nothing(repo, capsys, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    make_symlink(elsewhere, wt_folder(repo))
+    code, out = run(repo, capsys, "add", "alpha", "feat/alpha")
+    assert code == 1, out
+    assert (f"refused: {wt_folder(repo)} is a symlink, junction or reparse point; the worktrees folder must be "
+            "a real directory") in out
+    assert out.splitlines()[-1] == "WORKTREE ADD: REFUSED alpha"
+    assert os.path.islink(wt_folder(repo)) and list(elsewhere.iterdir()) == []
+    assert not branch_exists(repo, "feat/alpha")
+    assert len(g(repo, "worktree", "list", "--porcelain").split("\n\n")) == 1
+
+
+def test_add_refuses_a_worktrees_folder_that_is_a_file_and_creates_nothing(repo, capsys):
+    wt_folder(repo).write_text("not a folder\n", encoding="utf-8")
+    code, out = run(repo, capsys, "add", "alpha", "feat/alpha")
+    assert code == 1, out
+    assert f"refused: {wt_folder(repo)} exists and is not a directory" in out
+    assert wt_folder(repo).read_text(encoding="utf-8") == "not a folder\n"
+    assert not branch_exists(repo, "feat/alpha")
+
+
+def test_add_refuses_a_name_that_a_legacy_worktree_already_uses(repo, capsys):
+    add_legacy(repo, "old", "feat/old")
+    code, out = run(repo, capsys, "add", "old", "feat/new-old")
+    assert code == 1, out
+    assert f"a worktree named old already exists in the legacy location {legacy_dir(repo, 'old')}" in out
+    assert not wt_dir(repo, "old").exists() and not os.path.lexists(wt_folder(repo))
+    assert not branch_exists(repo, "feat/new-old")
+    # near miss: another name is free
+    assert run(repo, capsys, "add", "new", "feat/new")[0] == 0
+
+
+def test_add_removes_the_folder_it_created_when_git_refuses(repo, capsys):
+    code, out = run(repo, capsys, "add", "alpha", "feat/alpha", "no-such-start-point")
+    assert code == 2 and out.splitlines()[-1] == "WORKTREE ADD: ERROR"
+    assert not os.path.lexists(wt_folder(repo))
 
 
 def test_add_refuses_existing_destination_or_branch_and_bad_names(repo, capsys):
@@ -138,7 +216,11 @@ def test_add_refuses_existing_destination_or_branch_and_bad_names(repo, capsys):
     code, out = run(repo, capsys, "add", "alpha", "feat/other")
     assert code == 1 and "already exists" in out
     code, out = run(repo, capsys, "add", "beta", "feat/alpha")
-    assert code == 1 and "branch feat/alpha already exists" in out and not sibling(repo, "beta").exists()
+    assert code == 1 and "branch feat/alpha already exists" in out and not wt_dir(repo, "beta").exists()
+    (wt_dir(repo, "stray")).write_text("a file where the worktree would go\n", encoding="utf-8")
+    code, out = run(repo, capsys, "add", "stray", "feat/stray")
+    assert code == 1 and f"refused: {wt_dir(repo, 'stray')} already exists" in out
+    assert not branch_exists(repo, "feat/stray")
     for bad in ("../x", "a/b", "", ".hidden", "x y"):
         code, out = run(repo, capsys, "add", bad, "feat/zzz")
         assert code == 2 and "ERROR" in out.splitlines()[-1]
@@ -176,7 +258,7 @@ def test_scan_near_miss_plain_tree_has_no_links(tmp_path):
 # ------------------------------------------------------------------------------------------------ remove: links
 def test_remove_refuses_a_worktree_holding_a_symlink_and_leaves_everything_intact(repo, capsys, sentinel):
     assert run(repo, capsys, "add", "lnk", "feat/lnk")[0] == 0
-    dest = sibling(repo, "lnk")
+    dest = wt_dir(repo, "lnk")
     make_symlink(sentinel, dest / ".venv")
     code, out = run(repo, capsys, "remove", "lnk")
     assert code == 1, out
@@ -187,7 +269,7 @@ def test_remove_refuses_a_worktree_holding_a_symlink_and_leaves_everything_intac
 
 def test_remove_unlink_links_removes_only_the_link_then_the_worktree(repo, capsys, sentinel):
     assert run(repo, capsys, "add", "lnk", "feat/lnk")[0] == 0
-    dest = sibling(repo, "lnk")
+    dest = wt_dir(repo, "lnk")
     make_symlink(sentinel, dest / ".venv")
     code, out = run(repo, capsys, "remove", "lnk", "--unlink-links")
     assert code == 0, out
@@ -203,7 +285,7 @@ def test_remove_near_miss_real_node_modules_and_ignored_files_are_not_links(repo
     g(repo, "commit", "-q", "-m", "ignore")
     g(repo, "push", "-q", "origin", "main")
     assert run(repo, capsys, "add", "clean", "feat/clean")[0] == 0
-    dest = sibling(repo, "clean")
+    dest = wt_dir(repo, "clean")
     (dest / "node_modules" / "dep").mkdir(parents=True)
     (dest / "node_modules" / "dep" / "index.js").write_text("x", encoding="utf-8")
     (dest / "mod.pyc").write_bytes(b"\0")
@@ -214,7 +296,7 @@ def test_remove_near_miss_real_node_modules_and_ignored_files_are_not_links(repo
 
 def test_remove_refuses_a_tracked_link_even_with_unlink_links(repo, capsys, sentinel):
     assert run(repo, capsys, "add", "trk", "feat/trk")[0] == 0
-    dest = sibling(repo, "trk")
+    dest = wt_dir(repo, "trk")
     make_symlink(sentinel, dest / "tracked-link")
     g(dest, "add", "tracked-link")
     g(dest, "commit", "-q", "-m", "tracked link")
@@ -229,7 +311,7 @@ def test_remove_junction_is_refused_then_removed_with_rmdir_and_target_survives(
     import _winapi  # type: ignore[import-not-found,unused-ignore]  # exists on Windows only
 
     assert run(repo, capsys, "add", "jn", "feat/jn")[0] == 0
-    dest = sibling(repo, "jn")
+    dest = wt_dir(repo, "jn")
     _winapi.CreateJunction(str(sentinel), str(dest / ".venv"))  # type: ignore[attr-defined,unused-ignore]
     assert wt_tool.scan_links(dest)[0] == [".venv"]
     code, out = run(repo, capsys, "remove", "jn")
@@ -282,7 +364,7 @@ def test_dirty_paths_ignores_the_files_git_lists_below_a_link_it_sees_as_a_direc
 # ------------------------------------------------------------------------------------------------ remove: branch safety
 def test_remove_refuses_unmerged_unpushed_branch_then_force_accepts(repo, capsys):
     assert run(repo, capsys, "add", "wip", "feat/wip")[0] == 0
-    dest = sibling(repo, "wip")
+    dest = wt_dir(repo, "wip")
     commit_file(dest, "new.txt", "work\n", "wip")
     code, out = run(repo, capsys, "remove", "wip")
     assert code == 1 and "neither merged into origin/main nor pushed" in out
@@ -294,7 +376,7 @@ def test_remove_refuses_unmerged_unpushed_branch_then_force_accepts(repo, capsys
 
 def test_remove_accepts_pushed_but_unmerged_and_merged_but_unpushed(repo, capsys):
     assert run(repo, capsys, "add", "pushed", "feat/pushed")[0] == 0
-    dest = sibling(repo, "pushed")
+    dest = wt_dir(repo, "pushed")
     commit_file(dest, "p.txt", "p\n", "p")
     g(dest, "push", "-q", "origin", "feat/pushed")
     code, out = run(repo, capsys, "remove", "pushed")
@@ -307,7 +389,7 @@ def test_remove_accepts_pushed_but_unmerged_and_merged_but_unpushed(repo, capsys
 
 def test_remove_refuses_when_pushed_sha_differs_from_head(repo, capsys):
     assert run(repo, capsys, "add", "ahead", "feat/ahead")[0] == 0
-    dest = sibling(repo, "ahead")
+    dest = wt_dir(repo, "ahead")
     commit_file(dest, "a.txt", "a\n", "a")
     g(dest, "push", "-q", "origin", "feat/ahead")
     commit_file(dest, "b.txt", "b\n", "b")  # one local commit after the push
@@ -317,7 +399,7 @@ def test_remove_refuses_when_pushed_sha_differs_from_head(repo, capsys):
 
 def test_remove_refuses_uncommitted_changes_but_not_ignored_files(repo, capsys):
     assert run(repo, capsys, "add", "dirty", "feat/dirty")[0] == 0
-    dest = sibling(repo, "dirty")
+    dest = wt_dir(repo, "dirty")
     (dest / "scratch.txt").write_text("untracked\n", encoding="utf-8")
     code, out = run(repo, capsys, "remove", "dirty")
     assert code == 1 and "uncommitted change" in out and "scratch.txt" in out
@@ -331,7 +413,7 @@ def test_remove_refuses_uncommitted_changes_but_not_ignored_files(repo, capsys):
 
 # ------------------------------------------------------------------------------------------------ remove: marker
 def test_remove_refuses_foreign_worktree_unless_foreign(repo, capsys):
-    plain = sibling(repo, "plain")
+    plain = wt_dir(repo, "plain")
     g(repo, "worktree", "add", "--no-track", "-b", "feat/plain", str(plain), "origin/main")
     code, out = run(repo, capsys, "remove", "plain")
     assert code == 1 and "marker" in out and plain.is_dir()
@@ -349,20 +431,101 @@ def test_remove_prunes_a_worktree_whose_directory_is_gone(repo, capsys):
     import shutil
 
     assert run(repo, capsys, "add", "gone", "feat/gone")[0] == 0
-    shutil.rmtree(sibling(repo, "gone"))
+    shutil.rmtree(wt_dir(repo, "gone"))
     code, out = run(repo, capsys, "remove", "gone")
     assert code == 0 and "already missing" in out
-    assert "-wt-gone" not in g(repo, "worktree", "list", "--porcelain")
+    assert "main-worktrees/gone" not in g(repo, "worktree", "list", "--porcelain")
+    assert f"removed empty folder: {wt_folder(repo)}" in out and not os.path.lexists(wt_folder(repo))
+
+
+# ------------------------------------------------------------------------------------------------ remove: one folder
+def test_remove_deletes_the_worktrees_folder_only_once_it_is_empty(repo, capsys):
+    assert run(repo, capsys, "add", "one", "feat/one")[0] == 0
+    assert run(repo, capsys, "add", "two", "feat/two")[0] == 0
+    code, out = run(repo, capsys, "remove", "one")
+    assert code == 0, out
+    assert not wt_dir(repo, "one").exists() and wt_dir(repo, "two").is_dir()
+    assert f"kept folder: {wt_folder(repo)} (1 entry left)" in out  # near miss: not empty, kept
+    code, out = run(repo, capsys, "remove", "two")
+    assert code == 0, out
+    assert f"removed empty folder: {wt_folder(repo)}" in out
+    assert not os.path.lexists(wt_folder(repo))
+    assert repo.is_dir() and (repo / "README.md").is_file()  # the main checkout next to it is untouched
+
+
+def test_remove_keeps_a_worktrees_folder_that_holds_a_stray_file(repo, capsys):
+    assert run(repo, capsys, "add", "one", "feat/one")[0] == 0
+    (wt_folder(repo) / "notes.txt").write_text("keep me\n", encoding="utf-8")
+    code, out = run(repo, capsys, "remove", "one")
+    assert code == 0, out
+    assert f"kept folder: {wt_folder(repo)} (1 entry left)" in out
+    assert (wt_folder(repo) / "notes.txt").read_text(encoding="utf-8") == "keep me\n"
+
+
+def test_remove_folder_if_empty_never_removes_a_link_or_its_target(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    folder = tmp_path / "main-worktrees"
+    make_symlink(target, folder)
+    msg = wt_tool.remove_folder_if_empty(folder)
+    assert msg.startswith(f"kept folder: {folder} is a symlink, junction or reparse point")
+    assert os.path.islink(folder) and target.is_dir()
+    # near miss: a real empty directory is removed with rmdir
+    real = tmp_path / "real-worktrees"
+    real.mkdir()
+    assert wt_tool.remove_folder_if_empty(real) == f"removed empty folder: {real}"
+    assert not real.exists()
+
+
+def test_remove_finds_a_worktree_in_the_legacy_sibling_location(repo, capsys):
+    old = add_legacy(repo, "old", "feat/old")
+    code, out = run(repo, capsys, "remove", "old")
+    assert code == 0, out
+    assert f"removed: {old} (legacy location)" in out and out.splitlines()[-1] == "WORKTREE REMOVE: OK old"
+    assert not old.exists() and repo.is_dir()
+    assert "main-wt-old" not in g(repo, "worktree", "list", "--porcelain")
+    # the legacy parent is the directory of the main checkout: never a candidate for the folder clean-up
+    assert "removed empty folder" not in out and "kept folder" not in out
+
+
+def test_remove_legacy_keeps_the_marker_check(repo, capsys):
+    old = add_legacy(repo, "old", "feat/old", marker=False)
+    code, out = run(repo, capsys, "remove", "old")
+    assert code == 1 and "no 'aeos-worktree-created' marker" in out and old.is_dir()
+
+
+def test_remove_a_plain_sibling_directory_that_is_not_a_worktree_is_not_found(repo, capsys):
+    stray = legacy_dir(repo, "stray")
+    stray.mkdir()
+    (stray / "f.txt").write_text("x\n", encoding="utf-8")
+    code, out = run(repo, capsys, "remove", "stray")
+    assert code == 1 and f"refused: no worktree {wt_dir(repo, 'stray')}" in out
+    assert (stray / "f.txt").is_file()
+
+
+def test_remove_refuses_a_name_that_exists_in_the_folder_and_the_legacy_location(repo, capsys):
+    assert run(repo, capsys, "add", "dup", "feat/dup")[0] == 0
+    old = add_legacy(repo, "dup", "feat/dup-old")
+    code, out = run(repo, capsys, "remove", "dup")
+    assert code == 1, out
+    assert (f"refused: ambiguous name dup: both {wt_dir(repo, 'dup')} and the legacy {old} are worktrees") in out
+    assert out.splitlines()[-1] == "WORKTREE REMOVE: REFUSED dup"
+    assert wt_dir(repo, "dup").is_dir() and old.is_dir()
+    # near miss: once the legacy one is moved under another name, both names resolve
+    g(repo, "worktree", "move", str(old), str(wt_dir(repo, "dup-old")))
+    assert run(repo, capsys, "remove", "dup")[0] == 0
+    assert run(repo, capsys, "remove", "dup-old")[0] == 0
+    assert not os.path.lexists(wt_folder(repo))
 
 
 # ------------------------------------------------------------------------------------------------ list
 def test_list_reports_merged_pushed_marker_and_link_counts(repo, capsys, sentinel):
     assert run(repo, capsys, "add", "one", "feat/one")[0] == 0
     assert run(repo, capsys, "add", "two", "feat/two")[0] == 0
-    two = sibling(repo, "two")
+    two = wt_dir(repo, "two")
     commit_file(two, "t.txt", "t\n", "t")
     make_symlink(sentinel, two / ".venv")
-    g(repo, "worktree", "add", "--no-track", "-b", "feat/plain", str(sibling(repo, "plain")), "origin/main")
+    g(repo, "worktree", "add", "--no-track", "-b", "feat/plain", str(wt_dir(repo, "plain")), "origin/main")
     code, out = run(repo, capsys, "list")
     assert code == 0, out
     lines = out.splitlines()
@@ -377,7 +540,25 @@ def test_list_reports_merged_pushed_marker_and_link_counts(repo, capsys, sentine
     assert "merged=no" in row("feat/two") and "LINKS=1" in row("feat/two")
     assert "created-by-tool=no" in row("feat/plain")
     assert "link: .venv" in out
+    assert f"worktrees folder: {wt_folder(repo)}" in out
+    assert "legacy-location" not in out
     assert lines[-1] == "WORKTREE LIST: OK 4 worktrees, 1 with links"
+
+
+def test_list_flags_worktrees_in_the_legacy_location(repo, capsys):
+    assert run(repo, capsys, "add", "new", "feat/new")[0] == 0
+    add_legacy(repo, "old", "feat/old")
+    code, out = run(repo, capsys, "list")
+    assert code == 0, out
+    lines = out.splitlines()
+
+    def row(branch):
+        return next(line for line in lines if f"branch={branch} " in line)
+
+    assert row("feat/old").endswith("[legacy-location]") and "created-by-tool=yes" in row("feat/old")
+    assert "legacy-location" not in row("feat/new") and "legacy-location" not in row("main")
+    assert "1 worktree(s) in the legacy location <main>-wt-<name>: move each with 'git worktree move" in out
+    assert lines[-1] == "WORKTREE LIST: OK 3 worktrees, 0 with links"
 
 
 def test_list_without_origin_main_reports_not_merged_not_pushed(tmp_path, capsys):
