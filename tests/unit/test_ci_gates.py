@@ -462,7 +462,7 @@ SHARD_PYTEST = ('python -m pytest -q -m "not integration and not network" -n log
                 '--shard ${{ matrix.shard }}/${{ matrix.shards }} --junitxml=junit-backend.xml')
 # Shards per host OS (ADR-0115 amendment "rebalanced shards"): Windows jobs do not use the 5 macOS slots of GitHub
 # Free, so Windows gets 3; the macOS hosts stay at 2 each (7 macOS jobs already compete for those slots).
-SHARDS_PER_OS = {"windows-latest": 3, "macos-latest": 2, "macos-26-intel": 2}
+SHARDS_PER_OS = {"windows-latest": 3, "macos-latest": 2, "macos-26-intel": 3}
 
 
 def _shard_jobs(jobs: dict | None = None) -> dict[str, dict]:
