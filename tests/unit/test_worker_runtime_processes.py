@@ -180,3 +180,29 @@ def test_spawn_rejects_shell_strings(tmp_path):
 
     with pytest.raises(ValueError):
         processes.spawn("x", "echo hi", cwd=tmp_path, env=dict(os.environ))  # type: ignore[arg-type]
+
+
+class _SweepProcess:
+    """A stand-in for ``psutil.Process`` in the marker sweep: its environment, or the error reading it raises."""
+
+    def __init__(self, pid: int, environ: dict[str, str] | None = None, error: BaseException | None = None):
+        self.pid, self._environ, self._error = pid, environ or {}, error
+
+    def environ(self) -> dict[str, str]:
+        if self._error is not None:
+            raise self._error
+        return self._environ
+
+
+def test_the_marker_sweep_survives_a_process_the_kernel_is_tearing_down(monkeypatch):
+    """LESSONS L15: on macOS psutil raises SystemError reading the environment of a process that is exiting
+    (sysctl(KERN_PROCARGS2) fails with errno 0). One such unrelated process must not abort the kill sweep - the run's
+    own marked process is still found - and an unreadable process is never taken for the run's."""
+    run_id = "run-sweep-0001"
+    dying = _SweepProcess(101, error=SystemError("<built-in function proc_environ> returned a result with an "
+                                                 "exception set"))
+    hidden = _SweepProcess(102, error=psutil.AccessDenied(102))
+    marked = _SweepProcess(103, {processes.RUN_MARKER: run_id})
+    other = _SweepProcess(104, {processes.RUN_MARKER: "run-other"})
+    monkeypatch.setattr(processes.psutil, "process_iter", lambda attrs=None: iter([dying, hidden, marked, other]))
+    assert processes._marker_sweep(run_id) == [marked]

@@ -26,6 +26,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from aeos.broker import facade as broker_contract
 from aeos.core.config import Settings
 from aeos.core.db import session_factory
 from aeos.core.enums import Domain, ExecutionState
@@ -57,7 +58,9 @@ QUOTA_STOP_AFTER = 3  # consecutive rate-limit refusals of this run (since its l
 MAX_ATTACHMENT_CHARS = 20_000
 MAX_PROMPT_ATTACH_TOTAL = 100_000
 MAX_PROMPT_CONTEXT_TOTAL = 200_000
-FAILED_STOPS = ("TIMEOUT", "SCOPE_VIOLATION", "RESOURCE_LIMIT")
+# ADR-0127: a model request of the run carried a credential and the broker did not send it - the run is stopped
+SENSITIVE_STOP = broker_contract.SENSITIVE_CONTENT_BLOCKED
+FAILED_STOPS = ("TIMEOUT", "SCOPE_VIOLATION", "RESOURCE_LIMIT", SENSITIVE_STOP)
 
 # ----------------------------------------------------------------------------- prompt template (§23 revision)
 PROMPT_TEMPLATE_VERSION = 2
@@ -222,27 +225,77 @@ def _close_db_window(prep: Prepared) -> dict[str, Any]:
 def resolve_artifacts(session: Any, task: TaskSpec) -> list[Any]:
     """§21 input artifacts bound by hash: an ``attachment:<id>`` reference is loaded from the planning context
     (scanned, redacted text) only when the attachment hash still matches the TaskSpec; otherwise the worker is told
-    it was not delivered. Plan sections carry their content in the immutable TaskSpec."""
+    it was not delivered. Plan sections and documentation checkpoints carry their content in the immutable TaskSpec.
+
+    ADR-0133: every artifact except a plain label carries its own class (``classification``): an attachment's label
+    (else the planning context's), a compiled artifact's class recorded at compile time; when none is known, the
+    highest class the project ever had. One above the task's effective class is never delivered - its content is
+    withheld and the artifact says why - whether it travels in the context pack or in the prompt. A label (an
+    unresolved name, or a legacy string artifact) is the TaskSpec's own text and is never withheld."""
     from aeos.models.planning import Plan, PlanningContext, PlanVersion
+    from aeos.models.portfolio import Attachment, Project
+    from aeos.portfolio import facade as portfolio
+    from aeos.routing import facade as routing
 
     arts = list(task.input_artifacts or [])
-    if not any(isinstance(a, dict) and a.get("kind") == "attachment" for a in arts):
+    if not any(isinstance(a, dict) and a.get("kind") != "label" for a in arts):
         return arts
+    ceiling = routing.effective_task_class(session, task)
+    project = session.get(Project, task.project_id)
+    unknown_origin = portfolio.classification_at(session, project)(None) if project is not None else _CLASS_ORDER[-1]
     version = session.get(PlanVersion, task.plan_version_id)
     plan = session.get(Plan, version.plan_id) if version is not None else None
     ctx = session.get(PlanningContext, plan.context_id) if plan is not None and plan.context_id else None
     inputs = {str(i.get("id")): i for i in ((ctx.inputs if ctx is not None else []) or [])}
     out: list[Any] = []
     for a in arts:
-        if isinstance(a, dict) and a.get("kind") == "attachment":
-            src = inputs.get(str(a.get("ref") or "").split(":", 1)[-1])
-            if src is not None and src.get("sha256") == a.get("sha256") and src.get("status") == "READ":
-                out.append({**a, "content": src.get("text") or ""})
-            else:
-                out.append({**a, "content": "<<artifact not delivered: missing or hash mismatch>>"})
-        else:
+        if not isinstance(a, dict) or a.get("kind") == "label":
             out.append(a)
+            continue
+        delivered: dict[str, Any] = {}
+        if a.get("kind") == "attachment":
+            att_id = str(a.get("ref") or "").split(":", 1)[-1]
+            src = inputs.get(att_id)
+            row = session.get(Attachment, att_id) if att_id else None
+            klass = _known_class((row.classification if row is not None else None)
+                                 or (src.get("classification") if src is not None else None) or unknown_origin)
+            ok = src is not None and src.get("sha256") == a.get("sha256") and src.get("status") == "READ"
+            delivered["content"] = (((src or {}).get("text") or "") if ok
+                                    else "<<artifact not delivered: missing or hash mismatch>>")
+        else:
+            # a compiled artifact (PRD section, documentation checkpoint): the class recorded when it was compiled
+            klass = _known_class(a.get("classification") or unknown_origin)
+        if _class_rank(klass) > _class_rank(ceiling):
+            out.append({**a, "classification": klass, "withheld": "classification",
+                        "content": f"<<artifact withheld: classification {klass} above this task's class {ceiling}>>"})
+        else:
+            out.append({**a, "classification": klass, **delivered})
     return out
+
+
+_CLASS_ORDER = ("PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED")
+
+
+def _known_class(label: Any) -> str:
+    """A class label as routing reads it: unknown or missing -> RESTRICTED (fail closed)."""
+    text = str(label or "").strip().upper()
+    return text if text in _CLASS_ORDER else _CLASS_ORDER[-1]
+
+
+def _class_rank(label: Any) -> int:
+    return _CLASS_ORDER.index(_known_class(label))
+
+
+def context_class_problem(pack: dict[str, Any] | None, route: Any) -> str | None:
+    """Why the run must not start with this context pack on *route* (ADR-0133), or None: the pack's class (the highest
+    class of what it carries) must be data the route may carry - its allowed classes and its data terms."""
+    if pack is None or route is None:
+        return None
+    klass = _known_class(pack.get("classification"))
+    from aeos.routing import facade as routing
+
+    problem = routing.route_class_problem(route, klass)
+    return f"context pack {pack.get('id')} is {klass}: {problem}" if problem else None
 
 
 def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, ...], branch: str,
@@ -330,6 +383,9 @@ def build_prompt(task: TaskSpec, *, findings: list[Any], protected: tuple[str, .
             parts += [f"<<<BEGIN CONTEXT {label}>>>", redact_text(text), "<<<END CONTEXT>>>"]
         for ref in context_pack.get("omitted_artifacts") or []:
             parts.append(f"<<<CONTEXT omitted by the pack token budget: {redact_text(str(ref))[:120]}>>>")
+        for ref in context_pack.get("withheld_artifacts") or []:
+            parts.append(f"<<<CONTEXT withheld (data classification above this task's class): "
+                         f"{redact_text(str(ref))[:120]}>>>")
     return "\n".join(parts) + "\n"
 
 
@@ -391,6 +447,7 @@ def bind_prompt_revision(route: Any) -> bool:
 
 
 TASK_ARTIFACT_REF = "task-artifact:"
+CONTEXT_CLASS_NOT_ALLOWED = "CONTEXT_CLASS_NOT_ALLOWED"
 
 
 def _newest_task_pack(s: Any, task: TaskSpec) -> Any:
@@ -401,9 +458,10 @@ def _newest_task_pack(s: Any, task: TaskSpec) -> Any:
                     .order_by(ContextPack.created_at.desc()).limit(1))
 
 
-def _pack_reusable(s: Any, pack: Any, base_commit: str) -> bool:
+def _pack_reusable(s: Any, pack: Any, base_commit: str, task: TaskSpec | None = None) -> bool:
     """Read-only pre-check: a not-stale, unexpired task pack for exactly this base (or without a base) is kept, so
-    an owner-curated pack is never superseded by the runtime; the full freshness check happens at use."""
+    an owner-curated pack is never superseded by the runtime; the full freshness check happens at use. A pack whose
+    class is above the task's effective class (built before a lowering) is rebuilt (ADR-0133)."""
     from aeos.core.timeutil import ensure_aware
     from aeos.models.knowledge_ext import ContextPackMeta
 
@@ -413,6 +471,11 @@ def _pack_reusable(s: Any, pack: Any, base_commit: str) -> bool:
     expires = ensure_aware(meta.expires_at) if meta is not None and meta.expires_at is not None else None
     if expires is not None and expires <= utcnow():  # type: ignore[operator]
         return False
+    if task is not None:
+        from aeos.routing import facade as routing
+
+        if _class_rank(pack.classification) > _class_rank(routing.effective_task_class(s, task)):
+            return False
     return not pack.base_commit or pack.base_commit == base_commit
 
 
@@ -420,9 +483,9 @@ def _ensure_task_pack(s: Any, task: TaskSpec, base_commit: str, artifacts: list[
     """§24 "context yang benar-benar diterima model adalah ContextPack minimum ber-budget" (W6-071): with no CURRENT
     task-scoped pack for this base commit, build one through the knowledge facade - in its own committed
     transaction (a denial there audits and rolls back only that unit of work, never this run's preparation)."""
-    if _pack_reusable(s, _newest_task_pack(s, task), base_commit):
+    if _pack_reusable(s, _newest_task_pack(s, task), base_commit, task):
         return {"built": False, "reason": "a CURRENT task-scoped context pack for this base commit exists (kept)"}
-    delivered = [a for a in artifacts if isinstance(a, dict)] + [{"name": f"artifact-{i}", "content": a}
+    delivered = [a for a in artifacts if isinstance(a, dict)] + [{"name": f"artifact-{i}", "content": a, "kind": "label"}
                                                                   for i, a in enumerate(artifacts) if not isinstance(a, dict)]
     try:
         from aeos.knowledge import facade as knowledge
@@ -454,6 +517,15 @@ def _context_pack(s: Any, task: TaskSpec, base_commit: str, *,
     pack = _newest_task_pack(s, task)
     if pack is None:
         return None, {"used": False, "reason": "no task-scoped context pack (TaskSpec context only)", "build": build}
+    from aeos.routing import facade as routing
+
+    ceiling = routing.effective_task_class(s, task)
+    if _class_rank(pack.classification) > _class_rank(ceiling):
+        # ADR-0133 (review F3): the same check as _pack_reusable, also when the rebuild failed - a pack above the
+        # task's class is never given to the worker
+        return None, {"pack_id": pack.id, "pack_hash": pack.pack_hash, "used": False, "build": build,
+                      "reason": f"context pack {pack.id} is {_known_class(pack.classification)}, above this task's "
+                                f"class {ceiling}: never given to the worker (TaskSpec context only)"}
     info: dict[str, Any] = {"pack_id": pack.id, "pack_hash": pack.pack_hash, "base_commit": pack.base_commit,
                             "build": build}
     try:
@@ -469,11 +541,14 @@ def _context_pack(s: Any, task: TaskSpec, base_commit: str, *,
         return None, {**info, "used": False, "reason": "context pack was built for another base commit"}
     items = list(used.get("items") or [])
     meta = s.get(ContextPackMeta, pack.id)
-    omitted = [o for o in (meta.omitted if meta is not None else []) or []
-               if str(o.get("ref") or "").startswith(TASK_ARTIFACT_REF)]
-    in_pack = bool(omitted) or any(str(i.get("ref") or "").startswith(TASK_ARTIFACT_REF) for i in items)
+    left_out = [o for o in (meta.omitted if meta is not None else []) or []
+                if str(o.get("ref") or "").startswith(TASK_ARTIFACT_REF)]
+    withheld = [o for o in left_out if str(o.get("reason") or "").startswith("classification")]
+    omitted = [o for o in left_out if o not in withheld]
+    in_pack = bool(left_out) or any(str(i.get("ref") or "").startswith(TASK_ARTIFACT_REF) for i in items)
     return ({"id": pack.id, "hash": pack.pack_hash, "items": items, "artifacts_in_pack": in_pack,
-             "omitted_artifacts": [str(o.get("ref")) for o in omitted]},
+             "classification": pack.classification, "omitted_artifacts": [str(o.get("ref")) for o in omitted],
+             "withheld_artifacts": [str(o.get("ref")) for o in withheld]},
             {**info, "used": True, "items": len(items), "token_budget": used.get("token_budget"),
              "artifacts_in_pack": in_pack, "artifacts_omitted": len(omitted)})
 
@@ -551,6 +626,10 @@ def _prepare(s: Any, settings: Settings, run: WorkerRun, te: TaskExecution, task
         te.base_commit = ws.base_commit
     sandbox = processes.SandboxDirs.create(ws.root / "sandbox")
     pack, pack_info = _context_pack(s, task, ws.base_commit, build=pack_build)
+    class_problem = context_class_problem(pack, route)
+    if class_problem:  # ADR-0133: never start a run whose context the route may not carry (nothing was sent)
+        workspace.cleanup_workspace(ws, keep_sandbox=False)
+        raise StartError(CONTEXT_CLASS_NOT_ALLOWED, class_problem)
     caps = dict(run.caps or {})
     per_req = int((task.limits or {}).get("max_output_tokens", 8192))
     try:
@@ -715,6 +794,12 @@ def _rate_limited_count(s: Any, run_id: str) -> int:
     if last_ok is not None:
         q = q.where(BrokerRequest.created_at > last_ok)
     return int(s.scalar(q) or 0)
+
+
+def _sensitive_blocked_count(s: Any, run_id: str) -> int:
+    """Model requests of this run the broker refused to send because they carried a credential (ADR-0127)."""
+    return int(s.scalar(select(func.count()).select_from(BrokerRequest).where(
+        BrokerRequest.run_id == run_id, BrokerRequest.outcome == broker_contract.SENSITIVE_BLOCKED_OUTCOME)) or 0)
 
 
 def _collect_evidence(s: Any, run: WorkerRun, *, kind: str, origin: str, claim: str, content: Any,
@@ -916,10 +1001,13 @@ def _monitor_and_finalize(settings: Settings, run_id: str, prep: Prepared, mp: p
             with sf() as s:
                 ok = scheduler.heartbeat(s, run_id, lease_id=prep.lease_id)
                 rl = _rate_limited_count(s, run_id)
+                sensitive = _sensitive_blocked_count(s, run_id)
                 s.commit()
             last_hb = now
             if not ok:
                 stop_reason = "LEASE_INVALID"
+            elif sensitive:
+                stop_reason = SENSITIVE_STOP
             elif rl >= quota_stop_after:
                 stop_reason = "QUOTA_EXHAUSTED"
         if stop_reason is None and now - started > prep.timeout:
@@ -956,6 +1044,11 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
         return run.execution_status  # someone else (cancel/reassign/reconcile) already decided
     scheduler.stop_run_resources(s, run, reason="run finished", lease_state="RELEASED")
     max_att = scheduler.max_attempts(task, te)
+    if stop_reason != SENSITIVE_STOP and _sensitive_blocked_count(s, run.id):
+        # ADR-0127: a refused model request decides the outcome whatever stopped the run afterwards (a quota stop, a
+        # controller shutdown, a lost lease, a time limit, refused after the last heartbeat): it fails closed and its
+        # attempt is never refunded as a quota stop would be
+        stop_reason = SENSITIVE_STOP
     if stop_reason in ("QUOTA_EXHAUSTED", "CONTROLLER_SHUTDOWN", "LEASE_INVALID", "STALE_ATTEMPT"):
         code = {"LEASE_INVALID": "LEASE_LOST", "STALE_ATTEMPT": "LEASE_LOST"}.get(stop_reason, stop_reason)
         scheduler.set_run_status(s, run, S.FAILED.value, reason=f"stopped: {stop_reason}", actor=ACTOR,
@@ -974,14 +1067,20 @@ def _decide(s: Any, run: WorkerRun, task: TaskSpec, te: TaskExecution | None, *,
         return workforce.investigation_after_run(s, run, te, task, exit_code=exit_code, stop_reason=stop_reason,
                                                  violations=[*violations, *protected_hits], actor=ACTOR)
     if stop_reason in FAILED_STOPS or violations or (exit_code != 0 and not blocker):
-        if stop_reason in ("TIMEOUT", "RESOURCE_LIMIT"):
+        if stop_reason in ("TIMEOUT", "RESOURCE_LIMIT", SENSITIVE_STOP):
             code = stop_reason
         else:
             code = "SCOPE_VIOLATION" if (violations or stop_reason == "SCOPE_VIOLATION") else "EXIT_NONZERO"
         why = {"TIMEOUT": "time limit reached", "RESOURCE_LIMIT": "memory/process cap exceeded (worker stopped)",
+               SENSITIVE_STOP: "a model request carried a credential and was not sent (see the run's "
+                               "broker.model_proxy.sensitive_blocked audit record; worker stopped)",
                "SCOPE_VIOLATION": "changes outside the TaskSpec scope (patch quarantined)",
                "EXIT_NONZERO": f"worker exited {exit_code}"}[code]
         scheduler.set_run_status(s, run, S.FAILED.value, reason=why, actor=ACTOR, outcome_code=code)
+        if code == SENSITIVE_STOP and te.state != S.RUNNING.value:
+            # the lease was lost and the reconciler already moved the task (BLOCKED, LEASE_LOST_PROCESS_ALIVE): its state
+            # is kept, as for LEASE_INVALID above, and the run still records the refusal (differential review 2026-10-28)
+            return "FAILED"
         if te.attempts_used < max_att:
             scheduler.transition_task(
                 s, te.task_id, S.REVIEW.value, actor=ACTOR, reason_code="ATTEMPT_FAILED", expected_from=S.RUNNING.value,

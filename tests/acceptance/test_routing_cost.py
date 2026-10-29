@@ -147,7 +147,8 @@ def test_fable_quota_exhausted_makes_review_wait_and_never_skips_the_gate(person
     assert waiting["approved_version"] is None and waiting["allowed"]["approve"] is False
     challenge = next(s for s in waiting["stages"] if s["stage"] == "CHALLENGE_REVIEW")
     assert challenge["latest"]["status"] == "QUOTA_EXHAUSTED"
-    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+    # ADR-0131: the challenge stage requests opus, so the observed limit is scoped to the opus family
+    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "opus"))
     assert q is not None and q.state == "EXHAUSTED"
     assert state["stages"].count("challenge-findings/1") == 1 and "synthesis/1" not in state["stages"]
     # after the quota resets the pipeline resumes AT the challenge stage (nothing skipped, no fallback model)
@@ -181,8 +182,9 @@ def test_supervisor_alias_resolving_to_a_new_model_is_a_new_configuration(person
     assert changed["config_changed_at"] is not None
     reg = checks_by_id(personal_client)["route.registry"]
     assert reg["effective_status"] == "STALE", "checks depending on config:routes must be re-run"
-    # an answer from outside the policy family is never accepted as the old baseline
-    fake.resolved["fable"] = "claude-opus-4-8"
+    # an answer from outside the policy family is never accepted as the old baseline (ADR-0131: every stage
+    # requests opus; an opus request answered by a Fable model stops at the first stage)
+    fake.resolved["opus"] = "claude-fable-5-1"
     r = personal_client.post(f"/api/projects/{project['id']}/plans",
                              json={"title": "ketiga", "prompt": "Aplikasi pencatat tugas pribadi ekspor CSV"})
     pid = r.json()["id"]
@@ -192,7 +194,7 @@ def test_supervisor_alias_resolving_to_a_new_model_is_a_new_configuration(person
     runner.join_all(60)
     third = personal_client.get(f"/api/plans/{pid}").json()
     assert third["state"] != "READY_FOR_HUMAN_REVIEW"
-    ch = next(s for s in third["stages"] if s["stage"] == "CHALLENGE_REVIEW")["latest"]
+    ch = next(s for s in third["stages"] if s["stage"] == "PRIMARY_PLANNING")["latest"]
     assert ch["status"] in ("FAILED", "MODEL_MISMATCH") and ch["error_code"] in ("MODEL_POLICY_MISMATCH", "MODEL_MISMATCH")
 
 

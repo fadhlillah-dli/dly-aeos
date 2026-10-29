@@ -172,3 +172,13 @@
   of decision 2, follow-up).
 * Admission and routing with the category agents on a real host (unit tests on macOS arm64 only, E2); Windows and
   macOS Intel run them only in CI.
+
+## Amendment 2026-10-28 (owner decision R34, ADR-0129)
+
+* Gemini 4 Argon and the Qwen models are listed again (owner answer 3 of R34: probe them through Go's chat-completions
+  translation). Until their probes pass, their eligibility keeps them from serving, not this list.
+  `role_agents.NEVER_PREFERRED` is replaced by the one invariant 6 check `aeos.core.model_policy`, which refuses
+  Claude-family models and meta-routers in the catalog check and in the generator.
+* One release per category gains one exception, `served_builds`. A route takes the release that scored the build it
+  serves (Go deepseek-v4.1-flash: release 2026-10-14), and only in a category where that release is comparable. The
+  1017 score goes to the paid `openrouter/deepseek/deepseek-v4.1-flash-1017`, in the last tier, `OPENROUTER_PAID`.

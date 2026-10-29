@@ -437,7 +437,12 @@ def checkpoint_artifacts(session: Session, project_id: str) -> list[tuple[str, d
     """Input artifacts a plan task may name, newest first: ``doc_checkpoint:<revision id>`` -> exactly that recorded
     package, and ``documentation_checkpoint:<project>:<kind>:<ref>`` -> the newest package of that checkpoint (the
     index keeps the first hit). Hash-bound DATA: the compiled TaskSpec carries the content, so the writer reads
-    exactly what was recorded."""
+    exactly what was recorded. ADR-0133: each entry records its ``classification``, the project's class when the
+    package was recorded, so a compiled copy keeps it."""
+    from aeos.portfolio import facade as portfolio
+
+    project = session.get(Project, project_id)
+    class_at = portfolio.classification_at(session, project) if project is not None else None
     out: list[tuple[str, dict[str, Any]]] = []
     for rev in session.scalars(select(DocumentRevision).where(
             DocumentRevision.project_id == project_id, DocumentRevision.kind == CHECKPOINT_KIND)
@@ -451,7 +456,8 @@ def checkpoint_artifacts(session: Session, project_id: str) -> list[tuple[str, d
                                         for c in view.get("changed_documents") or []][:40]
         content["writer_task"] = {k: writer.get(k) for k in ("goal", "changed_sections", "diagrams")}
         entry = {"ref": f"doc_checkpoint:{rev.id}", "kind": "documentation_checkpoint", "sha256": rev.content_hash,
-                 "name": f"Documentation checkpoint {view.get('kind')} {view.get('ref')}", "content": content}
+                 "name": f"Documentation checkpoint {view.get('kind')} {view.get('ref')}", "content": content,
+                 "classification": class_at(rev.created_at) if class_at is not None else "RESTRICTED"}
         for label in [package_label(rev), *(writer.get("input_artifacts") or [])]:
             out.append((str(label), entry))
     return out

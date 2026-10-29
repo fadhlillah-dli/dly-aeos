@@ -245,7 +245,7 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
 
 - **Backend shards.** On each host OS the full backend suite is split by test file: 3 shards on `windows-latest`
   (Windows jobs do not use the macOS slots), 2 on each macOS host (`macos-latest`, `macos-26-intel`). The jobs are
-  named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical --shard K/N`. Every shard is the same job
+  named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical -o faulthandler_timeout=300 --shard K/N` (a test over 5 minutes prints its traceback). Every shard is the same job
   and uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Static checks.** `static checks [G1] (ubuntu-latest)` runs ruff, mypy for `--platform darwin` and
   `--platform win32`, the secret scan, `shellcheck` over the shell scripts (`scripts/*.sh`,
@@ -318,14 +318,26 @@ is added or dropped.
 
 Standalone helpers in `scripts/` (stdlib only, ASCII output, last line is the verdict):
 
-- **`scripts/worktree.py`** makes git worktrees safe. `python scripts/worktree.py add <name> <branch> [<base>]`
-  creates `<main checkout>-wt-<name>` on a new branch, marks it as created by the tool and prints the
-  interpreter of the main checkout (`.venv` there) and the `PYTHONPATH=backend` hint. Never put a `.venv`
-  symlink or junction inside a worktree: `git worktree remove` can follow the link and delete the real
-  environment. `list` shows every worktree with merged, pushed, marker and LINKS columns. `remove <name>`
-  refuses a worktree that holds a link, has no marker (`--foreign`), has uncommitted changes, or whose branch is
-  neither merged into origin/main nor pushed (`--force`); `--unlink-links` removes only the link entries, then
-  scans again. Merged and pushed come from the remote-tracking refs of the last `git fetch`.
+- **`scripts/worktree.py`** makes git worktrees safe. Every worktree lives in ONE folder next to the main
+  checkout, `<main checkout>-worktrees/<name>` (for a checkout at `~/Documents/dly-aeos` that is
+  `~/Documents/dly-aeos-worktrees/<name>`); the main checkout itself stays on `main`.
+  `python scripts/worktree.py add <name> <branch> [<base>]` creates `<main checkout>-worktrees/<name>` on a new
+  branch (and the folder when it is missing, as a real directory: a folder that is a link or a file is refused),
+  marks it as created by the tool and prints the interpreter of the main checkout (`.venv` there) and the
+  `PYTHONPATH=backend` hint. Never put a `.venv` symlink or junction inside a worktree: `git worktree remove` can
+  follow the link and delete the real environment. `list` shows every worktree with merged, pushed, marker and
+  LINKS columns, and flags `legacy-location` on a worktree made before 2026-10-28 as a sibling
+  `<main checkout>-wt-<name>`. `remove <name>` finds the worktree in the folder or, for those older ones, in the
+  legacy location (a name used in both places is refused as ambiguous: move one of them with `git worktree move`,
+  never `git worktree remove` by hand; a link at either path, or a `<main checkout>-worktrees` that is a link, is
+  refused and never followed; on macOS and Windows `Old` and `old` are the same name), and refuses a worktree that
+  holds a link, has no marker (`--foreign`), has uncommitted changes, or whose branch is neither merged into
+  origin/main nor pushed (`--force`); `--unlink-links` removes only the link entries, then scans again. After a
+  removal from the folder it deletes the folder too once it is empty (`rmdir`, never a link). Merged and pushed
+  come from the remote-tracking refs of the last `git fetch`. To move an older worktree into the folder, create
+  the folder and give the full target path:
+  `git worktree move <main checkout>-wt-<name> <main checkout>-worktrees/<name>` (on an existing directory as
+  target, git would nest the worktree under its old name).
 - **`scripts/ci_status.py`** gives one verdict for one exact commit: `--sha <40-hex>`, `--pr <n>`
   (`--expect-sha <sha>` exits 1 if the pull request points at another commit) or `--after-merge <n>` (the merge
   commit on `main`). It reads the check runs with `gh api` and the required contexts from the repository
@@ -438,8 +450,8 @@ test runs only on Windows.
 
 #### Claude Code hooks
 
-The committed `.claude/settings.json` registers two Claude Code hooks for anyone who works on this repository with
-Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). Both are fail-open: whatever goes wrong inside
+The committed `.claude/settings.json` registers three Claude Code hooks for anyone who works on this repository with
+Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). All are fail-open: whatever goes wrong inside
 a hook (a missing `python3`, bad input, an exception, a timeout), the session or the prompt goes on unchanged.
 
 - **SessionStart** runs `scripts/claude_hooks/session_facts.py`, which runs `scripts/preflight.py --facts` with the
@@ -456,6 +468,8 @@ a hook (a missing `python3`, bad input, an exception, a timeout), the session or
   a secret seen in chat is burned). A block keeps the secret from the model; Claude Code may still keep the typed text
   in its local prompt history, which is another reason to rotate. Ordinary prose, git SHAs, UUIDs, digests and
   placeholders such as `<your-token>` pass.
+- **PreToolUse** (matcher `Bash`) runs `scripts/claude_hooks/zsh_wordsplit_guard.py` (stdlib only, zsh sessions only):
+  it denies, with the fix, `set -- $var`, `for x in $var` and a bare-glob `$(...)` fed to pytest (LESSONS L14).
 
 To switch them off for yourself, put `"disableAllHooks": true` in `.claude/settings.local.json` (not committed): it
 turns off every hook of the session, not one of them. For a single run use

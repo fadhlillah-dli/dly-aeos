@@ -60,7 +60,7 @@ def test_pass_review_records_review_verify_verdict_and_accepts(db, world, wf, mo
     assert rec.review["outcome"] == "adds mul()" and rec.verify["test_ids"]
     assert set(rec.non_regression) == {k for k, _ in review.NON_REGRESSION_SCOPE}
     assert rec.target_hash == report.environment["artifact_hash"]
-    assert rec.model_resolved == "claude-fable-5-1"
+    assert rec.model_resolved == "claude-opus-5-5"
     # the checkpoint package is structured (no transcript) and stored as evidence
     req = bridge.requests[0]
     # §12: package inline -> no file tools, so the supervisor cannot read outside the package
@@ -183,7 +183,7 @@ def test_not_proven_without_requested_checks_still_requests_repair(db, world, wf
     assert wf.of("request_repair")
 
 
-@pytest.mark.parametrize("model", [None, "UNKNOWN", "claude-sonnet-4-5", "gpt-5"])
+@pytest.mark.parametrize("model", [None, "UNKNOWN", "claude-sonnet-4-5", "gpt-5", "claude-fable-5-1"])
 def test_unproven_or_off_family_reviewer_identity_never_counts(db, world, wf, monkeypatch, model):
     """§15: without a proven Claude identity of the requested family the review does not count —
     even when the TaskSpec has no allowed_models list — and it is not the implementer's fault."""
@@ -259,7 +259,7 @@ def test_mock_review_never_accepts(db, world, wf, monkeypatch):
     assert not wf.of("mark_accepted")
 
 
-def _envelope(payload, model="claude-fable-5-1"):
+def _envelope(payload, model="claude-opus-5-5"):
     from tests.unit.test_verification_support import claude_envelope
 
     return claude_envelope(payload, model=model)
@@ -289,7 +289,7 @@ def test_manual_result_import(db, world, wf, monkeypatch):
     out = review.collect_manual_review(db, waiting.id, actor="owner", structured=_envelope(review_payload()))
     db.commit()
     assert out.review.mode == "MANUAL_FALLBACK" and out.review.supersedes_id == waiting.id
-    assert out.review.verdict == "PASS-CONTROLLED" and out.review.model_resolved == "claude-fable-5-1"
+    assert out.review.verdict == "PASS-CONTROLLED" and out.review.model_resolved == "claude-opus-5-5"
     assert out.acceptance and out.acceptance["acceptance_status"] == "ACCEPTED"
     with pytest.raises(Conflict):
         review.collect_manual_review(db, out.review.id, actor="owner", structured=review_payload())

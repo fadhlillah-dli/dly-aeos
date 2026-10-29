@@ -26,13 +26,14 @@ from aeos.models.workforce import TaskExecution
 from aeos.policy.facade import InterlockResult
 from aeos.verification import acceptance
 from tests.conftest import create_admin
+from tests.unit.review_gate_support import record_claude_review
 from tests.unit.test_verification_support import (
+    NR_COVERED,
     FakeWorkforce,
     git,
     install_module,
     install_planning,
     make_candidate,
-    make_review,
     make_world,
     record_verification,
     requires_git,
@@ -77,9 +78,12 @@ def office_accepted(db, wf, monkeypatch, settings, secrets_memory, tmp_path):
     cand, base, head = make_candidate(settings, w, head_files={"backend/extra.py": "X = 1\n"})
     git(cand, "branch", BRANCH, head)
     w.run.workspace_ref = str(cand)
+    w.run.git_dir_ref = str(cand / ".git")  # the trusted git dir the runtime records (ADR-0132)
     install_planning(monkeypatch, w.version)
     report = record_verification(db, w, head=head, base=base)
-    make_review(db, w, report)
+    # the Claude review PASS bound to this head, as review_run records it (owner rule R44, ADR-0132)
+    record_claude_review(db, w.run, head=head, artifact_hash=report.environment["artifact_hash"],
+                         non_regression=NR_COVERED)
     acc = acceptance.evaluate_acceptance(db, w.run.id)
     db.add(TaskExecution(task_id=w.task.id, project_id=w.project.id, domain="OFFICE", state="DONE",
                          accepted_run_id=w.run.id, plan_id=w.plan.id, plan_version_id=w.version.id,

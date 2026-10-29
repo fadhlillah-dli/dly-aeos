@@ -18,7 +18,7 @@ RULES (lesson ids in brackets)
    IDENTITY: <name> <email> (set with git config user.name and user.email in this repo, then check
    with git config user.email before the first commit). No AI name, co-author trailer, "generated" footer,
    robot emoji or AI address anywhere. Never write literal attribution samples into a file; build
-   them from parts.
+   them from parts. Paraphrase an owner quote that the attribution guard reads as an AI line.
 2. Branch and HEAD [L6]. After committing, check that 'git branch --show-current' is the branch
    and that 'git rev-parse <branch>' equals 'git rev-parse HEAD'. Never push from a detached HEAD.
 3. No links in a worktree [L4]. Never create a symlink or junction in a worktree (a .venv link once
@@ -52,6 +52,9 @@ RULES (lesson ids in brackets)
 11. Diagnosis order [L14]. Input, then environment, then code. No background job without a
     deadline and a failure marker file; check the marker, not the silence. Run tests through
     scripts/run_tests.sh; zsh does not word-split a variable, so use an array, never 'set -- $var'.
+    Shell loops list their items explicitly ('for x in a b c'); a loop that needs word splitting runs
+    under bash -c '...' or splits with a zsh array (${=var}), never 'for x in $var'. Tests take
+    explicit paths, never a glob or a command substitution that can come back empty.
 12. CI state [L7, L18]. Never hand-write a CI wait loop: use scripts/ci_status.py --wait --deadline, and
     --required-only for a merge decision. A check list that is empty or pending is not green; name each
     required check. A job cancelled because no runner acquired it is INFRA: re-run it, do not debug code.
@@ -76,6 +79,9 @@ RULES (lesson ids in brackets)
 18. Dependent steps [L22]. Chain a step whose failure must stop the next one with && or a checked if, never ';' or
     a separate line, and run chains with 'set -o pipefail' (a gate piped into tail or grep hides its exit code). Check
     each result before a commit, merge or push; the pre-push hook refuses static-gate failures and conflict markers.
+19. No secret shapes in reports [L26]. Never write a secret-shaped string in a report, log or message, not even a
+   synthetic test value (a provider key prefix with a body, a vault token, a PEM header, a JWT): name the case by its
+   corpus variant, pattern or test name. Test corpora assemble secret samples from parts at run time.
 
 REPORT (at most 15 lines): commit sha, files changed, gate results, bite-test results
 (violating fixture red, near-miss fixture green), NOT-PROVEN items.

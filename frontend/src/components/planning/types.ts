@@ -202,7 +202,7 @@ export interface PlanDetail extends PlanSummary {
   resolutions: { finding_key: string; action: string; note: string }[];
   verdict: FinalReview | null;
   verdict_effective: string | null;
-  /** Version the final reviewer judged; a later human edit has not been reviewed by Fable. */
+  /** Version the final reviewer judged; a later human edit has not been reviewed by the Final Planning Reviewer. */
   verdict_version_id?: string | null;
   current_version_reviewed?: boolean;
   decisions: DecisionView[];

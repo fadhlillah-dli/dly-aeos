@@ -15,6 +15,10 @@ from sqlalchemy.orm import Session
 
 from aeos.core.config import Settings
 from aeos.models.decisions import Decision
+from aeos.policy import catalog as _catalog
+
+# Additive (ADR-0133): the decision target of a lowered project classification (``aeos project reclassify``).
+PROJECT_CLASSIFICATION_TARGET: str = _catalog.TARGET_PROJECT_CLASSIFICATION
 
 
 @dataclass(frozen=True)
@@ -305,3 +309,25 @@ def write_enablement(session: Session, provider: str, *, domain: str) -> dict[st
     flag = enablement.flag(session, canonical)
     return {"provider": canonical, "status": "ENABLED" if flag and decision is not None else "NOT_ENABLED",
             "decision_id": decision.id if decision is not None else None, "flag": flag, "scope": "provider"}
+
+
+# ---- additive (ADR-0133): the POLICY decision behind lowering a project's data classification ----------------
+
+
+def record_classification_lowering(session: Session, *, project_id: str, project_key: str, domain: str,
+                                   from_class: str, to_class: str, actor_user_id: str, reason: str,
+                                   details: dict[str, Any] | None = None) -> tuple[Decision, list[str]]:
+    """Record the POLICY decision on ``project_classification/<project id>`` (``aeos project reclassify`` only);
+    return it and the ids of the earlier lowering decisions it superseded. The registry re-checks the actor."""
+    kwargs = dict(locals())
+    from aeos.policy.reclassification import record_lowering as impl
+
+    return impl(**kwargs)
+
+
+def end_classification_lowerings(session: Session, *, project_id: str, actor_user_id: str, reason: str) -> list[str]:
+    """After a raise: invalidate the project's ACTIVE lowering decisions (they no longer describe the class)."""
+    kwargs = dict(locals())
+    from aeos.policy.reclassification import end_lowerings as impl
+
+    return impl(**kwargs)

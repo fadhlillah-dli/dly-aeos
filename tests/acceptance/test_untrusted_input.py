@@ -199,7 +199,7 @@ def test_repository_file_with_secret_and_instructions_is_redacted_untrusted_cont
     assert repo_items and all(i.get("trust", "UNTRUSTED_DATA") != "TRUSTED" for i in repo_items)
     assert db.scalar(select(func.count()).select_from(Decision)) == 0
     # a supervisor prompt carrying a credential is never sent to the model
-    res = bridge.run_structured(bridge.ClaudeRequest(purpose="review.checkpoint", role="Reviewer", model="fable",
+    res = bridge.run_structured(bridge.ClaudeRequest(purpose="review.checkpoint", role="Reviewer", model="opus",
                                                      prompt=f"review this: TOKEN={token}", json_schema=SCHEMA,
                                                      domain="PERSONAL"))
     assert res.ok is False and res.error_code == "SECRET_IN_PROMPT"

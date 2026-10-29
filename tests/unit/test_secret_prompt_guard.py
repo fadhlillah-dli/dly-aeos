@@ -137,8 +137,13 @@ def test_noisy_short_forms_are_skipped_on_purpose_and_still_exist_canonically() 
 
     for prefix in guard.SKIPPED_PATTERN_PREFIXES:
         assert any(p.pattern.startswith(prefix) for p in _PATTERNS), f"stale skip entry {prefix!r}"
-    noisy = "see model" + "s" + ".CustomerSubscriptionHistoryRecord"  # built from parts: secret_scan flags this shape
-    assert contains_high_confidence_secret(noisy)  # why the guard skips the short Vault form
+    # built from parts: secret_scan flags this shape. The raw canonical short form matches a member access such as
+    # ``models.Customer...`` (it has no look-behind, so log redaction still masks a token glued to a letter); only the
+    # module's high-confidence scan skips a body that reads as an identifier (ADR-0127)
+    noisy = "see model" + "s" + ".CustomerSubscriptionHistoryRecord"
+    short = [p for p in _PATTERNS if p.pattern.startswith(guard.SKIPPED_PATTERN_PREFIXES[0])]
+    assert short and all(p.search(noisy) for p in short)  # why the guard skips the short Vault form
+    assert not contains_high_confidence_secret(noisy)
     assert _decide(noisy) is None
 
 

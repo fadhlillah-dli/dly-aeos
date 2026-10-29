@@ -22,7 +22,7 @@ from pathlib import Path
 import httpx
 import pytest
 import respx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from aeos.broker import bitbucket_broker, git_broker
 from aeos.broker import facade as broker
@@ -33,11 +33,12 @@ from aeos.core.timeutil import utcnow
 from aeos.delivery import bitbucket, gates, provider
 from aeos.models.audit import AuditEvent
 from aeos.models.broker_ext import BrokerSideEffect
-from aeos.models.evidence import EvidenceArtifact
+from aeos.models.evidence import EvidenceArtifact, ReviewRecord
 from aeos.models.planning import Plan, PlanVersion, TaskSpec
 from aeos.models.portfolio import Project, ProjectIntegration, RepositoryReference
 from aeos.models.workforce import WorkerRun
 from tests.conftest import create_admin
+from tests.unit.review_gate_support import record_claude_review, record_push
 from tests.unit.test_workforce_support import init_git_repo
 
 REPO = "company_ws/svc"  # the underscore is valid for a Bitbucket workspace, invalid as a GitHub owner
@@ -351,7 +352,7 @@ def office_run(db, owner, ready_office, tmp_path):
                              auth_scope={"provider": "bitbucket"}, rationale="enable", details={"enabled": True})
     enablement.set_flag(db, "bitbucket", True)
     src = tmp_path / "candidate"
-    init_git_repo(src)
+    base = init_git_repo(src)
     _git(src, "checkout", "-q", "-b", BRANCH)
     (src / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(src, "add", "-A")
@@ -364,8 +365,11 @@ def office_run(db, owner, ready_office, tmp_path):
         db.add(task)
         db.flush()
     run = WorkerRun(task_id=task.id, project_id=ready_office.id, domain="OFFICE", execution_status="REVIEW",
-                    workspace_ref=str(src), branch=BRANCH, head_commit=head, requested_by=owner.id)
+                    workspace_ref=str(src), branch=BRANCH, head_commit=head, base_commit=base,
+                    requested_by=owner.id)
     db.add(run)
+    db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     db.commit()
     bare = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
@@ -473,6 +477,7 @@ def test_reconcile_and_readiness_refuse_a_target_the_company_did_not_approve(db,
                                                                             monkeypatch):
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -598,6 +603,7 @@ def test_push_whose_commit_carries_ai_attribution_is_refused_on_bitbucket(db, of
                    check=True, capture_output=True)
     head = _git(src, "rev-parse", "HEAD")
     run.head_commit = head
+    record_claude_review(db, run)  # reviewed by Claude: the commit gate still refuses the attribution
     db.commit()
     _grants(db, run)
     real = bitbucket_broker.push_from_mirror
@@ -663,6 +669,7 @@ def test_push_credential_never_goes_to_another_host_or_repository(db, office_run
 def test_draft_pr_is_created_once_behind_the_interlock(db, office_run):
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         route = mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={
             "id": 5, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/5"}},
@@ -683,6 +690,7 @@ def test_draft_pr_is_created_once_behind_the_interlock(db, office_run):
 def test_pr_timeout_is_reconciled_or_unknown_and_reconcile_is_read_only(db, office_run):
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -705,6 +713,7 @@ def test_pr_retry_after_unknown_reads_first_and_never_posts_a_second_pr(db, offi
     an unreadable provider keeps it UNKNOWN without a POST, an existing PR is adopted without a POST."""
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -723,7 +732,8 @@ def test_pr_retry_after_unknown_reads_first_and_never_posts_a_second_pr(db, offi
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         post = mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={"id": 77}))
         listed = mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": [
-            {"id": 9, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/9"}}}]}))
+            {"id": 9, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/9"}},
+             "source": {"commit": {"hash": run.head_commit[:12]}}}]}))
         done = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
                                           title="t", body="b")
         assert not post.called and set(listed.calls[0].request.url.params.get_list("state")) == {
@@ -739,6 +749,7 @@ def test_reconcile_without_company_authorisation_never_reads_the_office_credenti
 
     run = office_run["run"]
     _grants(db, run)
+    record_push(db, run, repo=REPO, provider="bitbucket")  # the broker pushed this head first
     with respx.mock(assert_all_mocked=True, assert_all_called=False) as mock:
         mock.post(f"{API}/pullrequests").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get(f"{API}/pullrequests").mock(return_value=httpx.Response(200, json={"values": []}))
@@ -846,3 +857,103 @@ def test_the_attribution_samples_of_this_file_are_attribution_for_the_canonical_
     for trailer in ATTRIBUTION_TRAILERS + ["[AEOS] t\n\nevidence\n\n\U0001F916 Generated with Claude Code"]:
         assert find_ai_attribution(f"aeos: candidate\n\n{trailer}"), trailer
     assert not find_ai_attribution("aeos: candidate\n\nRefs: nothing")
+
+
+# ------------------------------------------------------------------------------------------- owner rule R44
+# (2026-10-28, ADR-0132; paraphrased: all OpenCode and OpenRouter work must pass a Claude review): the Bitbucket
+# push and PR of a worker run need the run's latest Claude checkpoint review to be a PASS of exactly the head being
+# published, before any grant, credential or request (the GitHub path: tests/unit/test_broker_publication_review.py).
+def _new_head(office_run) -> str:
+    from tests.conftest import TEST_GIT_EMAIL, TEST_GIT_NAME
+
+    src = office_run["src"]
+    (src / "later.txt").write_text("a later candidate of the same run\n", encoding="utf-8")
+    _git(src, "add", "-A")
+    # amended: the new head is again the single candidate commit on the base (only the reviewed head differs)
+    subprocess.run(["git", "-c", f"user.name={TEST_GIT_NAME}", "-c", f"user.email={TEST_GIT_EMAIL}", "-c",
+                    "commit.gpgsign=false", "commit", "-q", "--amend", "-m", "aeos: candidate"], cwd=src, check=True,
+                   capture_output=True)
+    return _git(src, "rev-parse", "HEAD")
+
+
+@pytest.mark.parametrize("case,message,reason", [
+    ("none", "no Claude checkpoint review exists for this run", "NO_REVIEW"),
+    ("older", "the latest Claude checkpoint review covers head {old}, not this head", "OTHER_HEAD"),
+    ("fail", "the latest Claude checkpoint review verdict is FAIL", "NOT_PASS"),
+])
+def test_bitbucket_push_and_pr_need_a_claude_pass_of_the_head(db, office_run, secrets_memory, monkeypatch, case,
+                                                              message, reason):
+    run = office_run["run"]
+    old = run.head_commit
+    if case == "none":
+        db.execute(delete(ReviewRecord).where(ReviewRecord.run_id == run.id))
+    elif case == "older":
+        run.head_commit = _new_head(office_run)  # the fixture's PASS now covers the head before this commit
+    else:
+        record_claude_review(db, run, verdict="FAIL")
+    db.commit()
+    _grants(db, run)
+    message = message.format(old=old[:12])
+    reads = _count_secret_reads(monkeypatch, secrets_memory)
+    real = bitbucket_broker.push_from_mirror
+    monkeypatch.setattr(bitbucket_broker, "push_from_mirror",
+                        lambda **kw: real(**{**kw, "remote_url": str(office_run["bare"])}))
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as pushed:
+            broker.push_task_branch(db, run_id=run.id, worktree=str(office_run["src"]), branch=BRANCH,
+                                    repo_full_name=REPO, expected_head_sha=run.head_commit)
+        with pytest.raises(PolicyDenied) as opened:
+            broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main", title="t",
+                                       body="b")
+        assert not mock.calls, "no request reached Bitbucket"
+    for e in (pushed, opened):
+        assert e.value.code == "REVIEW_REQUIRED" and message in e.value.message, e.value.message
+        assert e.value.details["reason"] == reason and e.value.details["head_commit"] == run.head_commit
+    assert reads == [], "the OFFICE credential is never read for a refused write"
+    assert _git(office_run["bare"], "for-each-ref", "--format=%(refname)") == ""
+    assert db.scalar(select(BrokerSideEffect).where(BrokerSideEffect.run_id == run.id)) is None
+    for action in ("broker.bitbucket.push_branch", "broker.bitbucket.create_pr"):
+        row = db.scalar(select(AuditEvent).where(AuditEvent.action == action, AuditEvent.result == "DENIED"))
+        assert row is not None and row.details["code"] == "REVIEW_REQUIRED" and row.details["reason"] == reason
+    # near miss: Claude passes exactly this head -> the same push and PR go through
+    record_claude_review(db, run)
+    db.commit()
+    res = broker.push_task_branch(db, run_id=run.id, worktree=str(office_run["src"]), branch=BRANCH,
+                                  repo_full_name=REPO, expected_head_sha=run.head_commit)
+    assert res["ok"] and res["head_sha"] == run.head_commit, res
+    assert _git(office_run["bare"], "rev-parse", f"refs/heads/{BRANCH}") == run.head_commit
+    with respx.mock(assert_all_mocked=True) as mock:
+        route = mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={
+            "id": 6, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/6"}},
+            "source": {"commit": {"hash": run.head_commit[:12]}}}))
+        pr = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                        title="t", body="b")
+        assert route.called
+    assert pr["ok"] and pr["head_sha"] == run.head_commit
+
+
+def test_bitbucket_pr_needs_a_recorded_push_of_exactly_this_head(db, office_run, secrets_memory, monkeypatch):
+    """ADR-0132 decision 3: a PR is opened only for a branch the broker pushed with this head (the push is where the
+    reviewed history is checked) - and a PR whose reported head is another commit is not counted."""
+    run = office_run["run"]
+    _grants(db, run)
+    reads = _count_secret_reads(monkeypatch, secrets_memory)
+    record_push(db, run, repo=REPO, provider="bitbucket", head="0" * 40)  # another head
+    record_push(db, run, repo=REPO, head=run.head_commit)  # this head, but a GitHub push record
+    with respx.mock(assert_all_mocked=True) as mock:
+        with pytest.raises(PolicyDenied) as e:
+            broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main", title="t",
+                                       body="b")
+        assert not mock.calls
+    assert e.value.code == "REVIEW_REQUIRED" and e.value.details["reason"] == "NOT_PUSHED"
+    assert f"no reviewed push of head {run.head_commit[:12]} to {REPO}:{BRANCH}: NOT_PUSHED" in e.value.message
+    assert reads == []
+    record_push(db, run, repo=REPO, provider="bitbucket")  # near miss: the broker's push of exactly this head
+    with respx.mock(assert_all_mocked=True) as mock:
+        mock.post(f"{API}/pullrequests").mock(return_value=httpx.Response(201, json={
+            "id": 8, "links": {"html": {"href": "https://bitbucket.org/company_ws/svc/pull-requests/8"}},
+            "source": {"commit": {"hash": "abcdef123456"}}}))
+        moved = broker.create_pull_request(db, run_id=run.id, repo_full_name=REPO, head=BRANCH, base="main",
+                                           title="t", body="b")
+    assert not moved["ok"] and moved["status"] == "FAILED"
+    assert moved["error"].startswith("HEAD_MISMATCH: the pull request's head abcdef123456 is not the reviewed head")

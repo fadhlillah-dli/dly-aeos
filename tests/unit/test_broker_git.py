@@ -18,6 +18,7 @@ from aeos.core.errors import Blocked, PolicyDenied, ValidationFailed
 from aeos.models.audit import AuditEvent
 from aeos.models.broker_ext import BrokerSideEffect
 from aeos.models.workforce import WorkerRun
+from tests.unit.review_gate_support import record_claude_review, record_push
 from tests.unit.test_workforce_support import FakeModules, init_git_repo, make_project
 
 BRANCH = "aeos/task-a-1234abcd"
@@ -33,7 +34,7 @@ def _git(cwd: Path, *args: str) -> str:
 @pytest.fixture
 def repo_env(db, tmp_path):
     src = tmp_path / "candidate"
-    init_git_repo(src)
+    base = init_git_repo(src)
     _git(src, "checkout", "-q", "-b", BRANCH)
     (src / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(src, "add", "-A")
@@ -43,9 +44,10 @@ def repo_env(db, tmp_path):
     subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
     p = make_project(db)
     run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="REVIEW", workspace_ref=str(src),
-                    branch=BRANCH, head_commit=head)
+                    branch=BRANCH, head_commit=head, base_commit=base)
     db.add(run)
     db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     return {"src": src, "bare": bare, "run": run, "head": head}
 
 
@@ -190,6 +192,7 @@ def _pr_env(db, monkeypatch, secrets_memory, repo_env, *, interlock=True):
     secrets_memory.put("personal/github", TOKEN, actor="test")
     _grant(db, repo_env["run"], kind="PR_CREATE", scope={"repo": "owner/repo", "head": BRANCH, "base": "main"},
            max_requests=3)
+    record_push(db, repo_env["run"], repo="owner/repo")  # the broker pushed this head first (ADR-0132)
     return fk
 
 
@@ -197,7 +200,8 @@ def test_create_pr_draft_and_token_never_returned(db, monkeypatch, secrets_memor
     _pr_env(db, monkeypatch, secrets_memory, repo_env)
     with respx.mock(assert_all_mocked=True) as mock:
         route = mock.post("https://api.github.com/repos/owner/repo/pulls").mock(
-            return_value=httpx.Response(201, json={"number": 7, "html_url": "https://github.com/owner/repo/pull/7"}))
+            return_value=httpx.Response(201, json={"number": 7, "html_url": "https://github.com/owner/repo/pull/7",
+                                                   "head": {"sha": repo_env["head"]}}))
         res = git_broker.create_pull_request(db, run_id=repo_env["run"].id, repo_full_name="owner/repo", head=BRANCH,
                                              base="main", title="Task A", body="evidence: NOT-PROVEN")
         sent = route.calls[0].request
@@ -218,7 +222,7 @@ def test_create_pr_reconciles_existing_and_timeouts(db, monkeypatch, secrets_mem
     with respx.mock(assert_all_mocked=True) as mock:
         mock.post("https://api.github.com/repos/owner/repo/pulls").mock(side_effect=httpx.ReadTimeout("slow"))
         mock.get("https://api.github.com/repos/owner/repo/pulls").mock(
-            return_value=httpx.Response(200, json=[{"number": 9, "html_url": "u"}]))
+            return_value=httpx.Response(200, json=[{"number": 9, "html_url": "u", "head": {"sha": repo_env["head"]}}]))
         res = git_broker.create_pull_request(db, run_id=repo_env["run"].id, repo_full_name="owner/repo", head=BRANCH,
                                              base="main", title="t", body="b")
     assert res["ok"] and res["number"] == "9"

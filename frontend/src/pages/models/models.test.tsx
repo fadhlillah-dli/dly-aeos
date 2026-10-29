@@ -58,7 +58,7 @@ const STATUS = {
   bridge_status: "CONFIGURED",
   env_hygiene: { status: "OK", forbidden_present: [], running_inside_claude_session: false, note: "" },
   invocation: { argv_template: [], forbidden_flags: ["--bare"], prompt_via: "stdin", workspace: "" },
-  policy: { allowed_families: ["opus", "fable"], stages: { "planning.primary": "opus" }, fallback: "NONE", mode: "DESIGN" },
+  policy: { allowed_families: ["opus"], stages: { "planning.primary": "opus" }, fallback: "NONE", mode: "DESIGN" },
   models: [{ route_key: "claude-native/fable", alias: "fable", model_id: "claude-fable-5-1", resolved_version: "UNKNOWN", resolved_observed_at: null, status: "CANDIDATE", mode: "DESIGN" }],
   last_capability_test: null,
   quota: { state: "UNKNOWN", source: "UNKNOWN", observed_at: null, resets_at: null, note: "Sisa kuota Max tidak tersedia secara resmi" },

@@ -36,7 +36,11 @@ ADR = ROOT / "docs" / "decisions" / "ADR-0126-per-role-category-agents.md"
 # every servable Go WORKER-capable route of the registry (owner 2026-10-28: use every servable model of the plan)
 SERVABLE_GO = {"kimi-k3.1-pro", "mimo-v2.6-pro", "minimax-m3.1-flash", "kimi-k3", "glm-5.3-flash", "glm-5.3",
                "glm-5.2", "step-5-preview", "kimi-k2.7-code", "mimo-v2.6-flash", "longcat-2.0", "hy3",
-               "deepseek-v4.1-flash"}
+               "deepseek-v4.1-flash",
+               # owner decision R34 (ADR-0129): the remaining Go models and the Console-translation candidates
+               "deepseek-v4-pro", "hy4-preview", "mimo-v2.5", "mimo-v2.5-pro", "gemini-4-argon", "qwen3.8-max",
+               "qwen3.8-flash", "qwen3.7-plus", "minimax-m3"}
+PAID_1017 = "openrouter/deepseek/deepseek-v4.1-flash-1017"
 # the owner's brief (2026-10-28): category agent -> the roles it serves
 EXPECTED_ROLES = {
     "agentic-coder": {"backend-api-engineer", "frontend-engineer", "db-data-engineer", "integration-engineer",
@@ -164,32 +168,36 @@ def test_implementer_definition_is_unchanged_so_its_doctor_fingerprint_stays():
 
 
 # ----------------------------------------------------------------------------- preferred routes (contract a)
-def test_preferred_routes_are_every_servable_go_route_then_free_openrouter_and_never_argon_qwen_or_claude():
+def test_preferred_routes_are_every_go_route_then_free_then_paid_openrouter_and_never_claude():
     for key in catalog.CATEGORY_AGENTS:
         prefs = _defs()[key]["route_policy"]["preferred_routes"]
         assert prefs, key
         go = [p for p in prefs if p.startswith("opencode-go/")]
-        free = [p for p in prefs if p.startswith("openrouter/")]
-        assert prefs == go + free, "Go routes first, then the free OpenRouter fallback"
+        free = [p for p in prefs if p.startswith("openrouter/") and p.endswith(":free")]
+        paid = [p for p in prefs if p.startswith("openrouter/") and not p.endswith(":free")]
+        # Go first, then the free OpenRouter fallback, then the paid route (escalation/overflow only, never PUBLIC)
+        assert prefs == go + free + paid and paid == [PAID_1017], key
+        assert go[-2:] == ["opencode-go/mimo-v2.5", "opencode-go/mimo-v2.5-pro"], "superseded last (overflow only)"
         missing = SERVABLE_GO - {p.removeprefix("opencode-go/") for p in go}
         assert not missing, f"agent {key} omits servable Go routes {sorted(missing)} (never omitted, ADR-0126)"
         assert {p.removeprefix("opencode-go/") for p in go} == SERVABLE_GO
         assert "opencode-go/mimo-v2.6-flash" in prefs and "opencode-go/deepseek-v4.1-flash" in prefs, key
-        assert all(p.endswith(":free") for p in free)
-        assert not [p for p in prefs if any(m in p for m in ("argon", "qwen", "claude", "anthropic/"))]
+        assert not [p for p in prefs if any(m in p for m in ("claude", "anthropic"))]
+        assert {"opencode-go/gemini-4-argon", "opencode-go/qwen3.8-max"} <= set(prefs)  # allowed since owner R34
     assert role_agents.catalog_problems() == []
 
 
-def test_preferred_route_check_bites_on_argon_qwen_claude_and_meta_routers_and_allows_deepseek():
-    for bad, family in (("opencode-go/gemini-4-argon", "argon"), ("opencode-go/qwen3.8-max", "qwen"),
-                        ("openrouter/qwen/qwen3-coder:free", "qwen"), ("openrouter/anthropic/claude-x", "claude"),
-                        ("opencode-go/claude-y", "claude"), ("openrouter/openrouter/auto", "meta-router")):
+def test_preferred_route_check_bites_on_claude_and_meta_routers_and_allows_argon_qwen_and_deepseek():
+    for bad, family in (("openrouter/anthropic/claude-x", "claude"), ("opencode-go/claude-haiku-5-5", "claude"),
+                        ("openrouter/~anthropic/claude-sonnet-latest", "claude"),
+                        ("openrouter/openrouter/auto", "meta-router"), ("openrouter/openrouter/fusion", "meta-router")):
         defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)
         next(a for a in defs if a["agent_key"] == "reasoner")["route_policy"]["preferred_routes"].insert(0, bad)
-        assert f"agent reasoner prefers route {bad} ({family} is never preferred, ADR-0126)" in \
-            role_agents.catalog_problems(defs)
-    for near in ("opencode-go/glm-5.2", "opencode-go/deepseek-v4.1-flash"):
-        # near miss: a servable Go route moved to the front; DeepSeek is allowed (owner R32, 2026-10-28)
+        assert f"agent reasoner prefers route {bad} ({family} is never preferred, AGENTS.md invariant 6, ADR-0129)" \
+            in role_agents.catalog_problems(defs)
+    for near in ("opencode-go/glm-5.2", "opencode-go/deepseek-v4.1-flash", "opencode-go/gemini-4-argon",
+                 "opencode-go/qwen3.8-max"):
+        # near miss: a listed Go route moved to the front; DeepSeek (owner R32), Argon and Qwen (owner R34) are allowed
         defs = copy.deepcopy(catalog.AGENT_DEFINITIONS)
         prefs = next(a for a in defs if a["agent_key"] == "reasoner")["route_policy"]["preferred_routes"]
         prefs.insert(0, prefs.pop(prefs.index(near)))
@@ -206,7 +214,10 @@ def test_ranking_data_file_is_the_generator_output_for_the_committed_inputs(tmp_
         for e in agent["entries"]:
             for ref in e["source_refs"]:
                 assert set(ref) == {"url", "release", "category", "score", "nq", "band", "date"}
-                assert ref["release"] == agent["release"]  # one release per category (critic H7)
+                # one release per category (critic H7); a served build takes its own release (ADR-0129)
+                want = data["served_builds"][e["route_key"]]["release"] if e["route_key"] in data["served_builds"] \
+                    else agent["release"]
+                assert ref["release"] == want, e["route_key"]
     # red: a hand edit of one score
     edited = tmp_path / "role_route_preferences.json"
     edited.write_text(mod.DATA.read_text(encoding="utf-8").replace('"score": 39.1', '"score": 49.1', 1),
@@ -227,10 +238,16 @@ def test_snapshot_keeps_only_mapped_rows_and_go_allowances_match_the_route_seed(
     snap = json.loads(mod.INPUTS.read_text(encoding="utf-8"))
     for release in ("2.0", "v1"):
         assert snap["rows"][release] and all(mod.route_for(release, r["model"]) for r in snap["rows"][release])
-    seeded = {m: float(a) for m, _d, a, *_ in (*route_seed.GO_WORKERS, *route_seed.GO_WATCH)}
+    # 2026-10-14: the served builds, plus only models of the 2.0 rows (the comparability evidence)
+    mapped = {r["model"] for r in snap["rows"]["2.0"]}
+    assert all(mod.route_for(mod.R1014, r["model"]) or r["model"] in mapped for r in snap["rows"][mod.R1014])
+    seeded = {m: float(a) for m, _d, a, *_ in (
+        *route_seed.GO_WORKERS, *route_seed.GO_WATCH, *route_seed.GO_WORKERS_R31, route_seed.GO_DEEPSEEK_PRO,
+        *route_seed.GO_DIRECT_R34, *route_seed.GO_TRANSLATION_R34, *route_seed.GO_SUPERSEDED_R34)}
+    seeded["deepseek-v4.1-flash"] = 80.0  # seeded on its own (peak rates)
+    assert set(mod.GO_ALLOWANCE) == set(seeded), "every seeded Go chat-completions route is ranked"
     for model, allowance in mod.GO_ALLOWANCE.items():
-        if model in seeded:
-            assert seeded[model] == allowance, model
+        assert seeded[model] == allowance, model
 
 
 def test_ranking_orders_best_score_first_and_keeps_the_band_as_metadata_only():
