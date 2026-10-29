@@ -24,6 +24,7 @@ from aeos.core.enums import Domain
 from aeos.core.errors import ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.core.paths import repo_root
+from aeos.core.tool_names import canonical_tools
 from aeos.events import service as events
 from aeos.models.planning import Feature, Milestone, Plan, PlanVersion, TaskDependency, TaskSpec
 from aeos.models.portfolio import Project
@@ -664,7 +665,7 @@ def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVer
         "base_commit": None,  # pinned by the scheduler at lease time from the known repository state
         "allowed_paths": allowed,
         "forbidden_paths": forbidden,
-        "tools_allowed": _str_list(task.get("tools_allowed")) or list(DEFAULT_TOOLS),
+        "tools_allowed": canonical_tools(_str_list(task.get("tools_allowed"))) or list(DEFAULT_TOOLS),
         "egress_allowed": _str_list(task.get("egress_allowed")),  # default deny = empty
         "capability_scope": {
             "kind": "TASK_WORKSPACE", "branch_prefix": "aeos/", "operations": _str_list(cap_in.get("operations")),
