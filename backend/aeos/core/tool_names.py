@@ -1,4 +1,4 @@
-"""The worker tool vocabulary and the synonyms a planner may write for it (LESSONS L29).
+"""The worker tool and verifier suite vocabularies, and what a planner's free text maps to (LESSONS L29).
 
 TaskSpecs name the tools a worker may use; routes record the tool set the owner reviewed at activation, in the same
 vocabulary (``fs.read``, ``fs.write:allowed_paths``, ``tests.run``, plus ``bash``/``bash:<pattern>`` and ``webfetch``
@@ -14,6 +14,12 @@ path-scoped write, running the tests is the test runner. The agent's own task li
 no repository file and asks for no capability, so it is dropped. Anything else (``bash``, ``bash:<pattern>``,
 ``webfetch``, an unknown name) is kept as written, so an unknown tool still makes the task ineligible with its own name
 in the reason (fail closed).
+
+``canonical_suites`` does the same for ``verifier_policy.suites`` (L29 strike 3). The verifier selects the candidate's
+test directories by the names ``unit`` and ``integration`` only (``aeos.verification.verifier.SUITE_DIRS``); the revised
+plans of 2026-10-29 wrote free text ("trusted suite base vs head", "pytest routing"), which selects no directory, so
+none of the worker's tests would have run. A name the verifier does not know is dropped, and a list with no known
+name leaves the verifier's default selection (all candidate test directories).
 """
 
 from __future__ import annotations
@@ -35,6 +41,12 @@ SYNONYMS: dict[str, str] = {
 }
 AGENT_TASK_LIST_TOOLS = frozenset({"todowrite", "todoread"})
 
+VERIFIER_SUITES = ("unit", "integration")
+SUITE_SYNONYMS: dict[str, str] = {
+    **dict.fromkeys(("unit", "unit tests", "tests/unit"), "unit"),
+    **dict.fromkeys(("integration", "integration tests", "tests/integration"), "integration"),
+}
+
 
 def canonical_tool(name: str) -> str:
     """The reviewed name for ``name`` when it is a known synonym (case and surrounding space ignored), else ``name``."""
@@ -49,4 +61,15 @@ def canonical_tools(names: Iterable[str] | None) -> list[str]:
         tool = canonical_tool(name)
         if tool and tool.lower() not in AGENT_TASK_LIST_TOOLS and tool not in out:
             out.append(tool)
+    return out
+
+
+def canonical_suites(names: Iterable[str] | None) -> list[str]:
+    """The verifier suites ``names`` mean (case and surrounding space ignored), in order, without repeats; names the
+    verifier does not select by are dropped."""
+    out: list[str] = []
+    for name in names or []:
+        suite = SUITE_SYNONYMS.get(str(name).strip().lower())
+        if suite and suite not in out:
+            out.append(suite)
     return out

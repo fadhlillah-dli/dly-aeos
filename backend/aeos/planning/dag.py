@@ -24,7 +24,7 @@ from aeos.core.enums import Domain
 from aeos.core.errors import ValidationFailed
 from aeos.core.hashing import content_hash
 from aeos.core.paths import repo_root
-from aeos.core.tool_names import canonical_tools
+from aeos.core.tool_names import canonical_suites, canonical_tools
 from aeos.events import service as events
 from aeos.models.planning import Feature, Milestone, Plan, PlanVersion, TaskDependency, TaskSpec
 from aeos.models.portfolio import Project
@@ -684,7 +684,8 @@ def task_spec_fields(task: dict[str, Any], *, project: Project, version: PlanVer
         "reviewer_policy": reviewer,
         "verifier_policy": {
             "required": True, "independent": True, "suite_read_only": True,
-            "suites": _str_list(verifier_in.get("suites")) or ["unit", "integration", "acceptance"],
+            # free text the verifier cannot select by is dropped, so it never silently runs no test (L29)
+            "suites": canonical_suites(_str_list(verifier_in.get("suites"))) or ["unit", "integration", "acceptance"],
             "negative_tests_required": verifier_in.get("negative_tests_required") is not False,
         },
         "limits": limits,

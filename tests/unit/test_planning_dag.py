@@ -89,6 +89,19 @@ def test_compile_rejects_invalid_graph(db):
     assert db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id)) is None
 
 
+def test_compile_keeps_only_the_suites_the_verifier_selects(db):
+    """Red before L29 strike 3: free-text suites were stored as written and the verifier selected no test directory."""
+    project = make_project(db)
+    free = task("T1", verifier_policy={"suites": ["trusted suite base vs head", "pytest routing"]})
+    named = task("T2", verifier_policy={"suites": ["Unit", "pytest routing", "unit"]})
+    _, v = _version(db, project, sample_content(tasks=[free, named]))
+    dag.compile_version(db, v, actor="tester")
+    db.commit()
+    suites = {s.task_key: s.verifier_policy["suites"]
+              for s in db.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == v.id))}
+    assert suites == {"T1": ["unit", "integration", "acceptance"], "T2": ["unit"]}
+
+
 def test_compile_fills_every_section21_field_and_is_idempotent(db):
     project = make_project(db, classification="CONFIDENTIAL")
     t1 = task("T1", limits={"max_attempts": 5, "timeout_seconds": 0, "max_output_tokens": 999999},

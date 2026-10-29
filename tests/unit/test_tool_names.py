@@ -6,11 +6,29 @@ from types import SimpleNamespace
 
 import pytest
 
-from aeos.core.tool_names import CANONICAL_WORKER_TOOLS, canonical_tool, canonical_tools
+from aeos.core.tool_names import (
+    CANONICAL_WORKER_TOOLS,
+    VERIFIER_SUITES,
+    canonical_suites,
+    canonical_tool,
+    canonical_tools,
+)
 from aeos.routing import service
+from aeos.verification.verifier import SUITE_DIRS
 from aeos.worker_runtime.opencode import BASE_ALLOW
 
 REVIEWED = list(CANONICAL_WORKER_TOOLS)
+
+
+def test_the_suite_vocabulary_is_what_the_verifier_selects_by():
+    assert set(VERIFIER_SUITES) == set(SUITE_DIRS)
+
+
+def test_free_text_suites_are_dropped_and_known_names_kept_once():
+    """Red before L29 strike 3: plan B v6 wrote 'trusted suite base vs head' and 'pytest routing'."""
+    assert canonical_suites(["trusted suite base vs head", "pytest routing"]) == []
+    assert canonical_suites([" Unit ", "integration tests", "unit", "tests/integration"]) == ["unit", "integration"]
+    assert canonical_suites(None) == []
 
 
 @pytest.mark.parametrize(("name", "expected"), [
