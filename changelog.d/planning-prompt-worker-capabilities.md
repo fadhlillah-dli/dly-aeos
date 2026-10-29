@@ -1,0 +1,3 @@
+### Fixed
+
+- **The planning prompt states what a worker can do.** The first live plans contained tasks whose deliverable was the output of running a command (a full-suite baseline, an export dry-run); a worker only reads and edits files (read, glob, grep, list, edit, todowrite) and has no shell, so its run refused to invent the result and every dependent task waited. A fixed planning rule now names the runtime's tool list, says the verifier produces the baseline for every task, forbids command-output tasks (they are maintainer or runbook steps) and names the reviewed tool vocabulary; a test keeps the named tools equal to the runtime's list (planning-prompts/3, LESSONS L30). Evidence: E2 unit run on macOS arm64; the new tests are red on the previous prompt.
