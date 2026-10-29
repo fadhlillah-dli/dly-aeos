@@ -1,0 +1,3 @@
+### Fixed
+
+- **A planning stage may run 30 minutes instead of 15.** The generation stages (Primary Planner, Synthesizer) grow with every revision cycle because the plan and its notes do; on 2026-10-29 they took 343-885 s on Opus 5.5 and the fifth Primary Planner run of a 14-task plan was killed at the former 900 s limit, so the plan went to PLANNING_FAILED. The limit is now 1800 s, twice the longest successful stage and within the bridge's 3600 s bound; a test keeps that headroom and keeps the stale-run grace above the limit (ADR-0030 amendment, LESSONS L31). Evidence: E2 unit run on macOS arm64; the new test is red at 900 s.
