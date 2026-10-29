@@ -32,6 +32,11 @@ DELIVERY_TARGETS = [{"provider": "github-repo", "repo": PLATFORM_REPO}]
 
 
 def _accepted(client, db, monkeypatch, tmp_path, host, settings, *, targets: list[dict] | None = None) -> dict:
+    from aeos.verification import review as review_mod
+
+    # The broker publishes only a head with an Opus checkpoint review PASS (owner rule R44 and the owner rule of
+    # 2026-10-28: the checkpoint review is Opus, never Fable; ADR-0132): the review is requested from Opus.
+    monkeypatch.setattr(review_mod, "DEFAULT_REVIEW_MODEL", "opus")
     w = self_build(client, db, monkeypatch, tmp_path, host, settings, targets=targets)
     assert verify(client, w["run_id"])["status"] == "PASS"
     assert manual_review(client, w["run_id"])["acceptance"]["acceptance_status"] == "ACCEPTED"

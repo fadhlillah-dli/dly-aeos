@@ -4,6 +4,7 @@ Ditolak sebelum promotion/remote publication', 'Provider timeout setelah create 
 
 from __future__ import annotations
 
+import importlib
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,7 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from aeos.api.routers import MODULE_ROUTERS
 from aeos.broker import facade as broker
 from aeos.broker import git_broker
 from aeos.core.errors import PolicyDenied
@@ -22,7 +24,14 @@ from aeos.models.decisions import Decision
 from aeos.models.workforce import WorkerRun
 from aeos.workforce.integrations import QUARANTINE_TARGET_TYPE
 from tests.conftest import make_app
+from tests.unit.review_gate_support import record_claude_review
 from tests.unit.test_workforce_support import FakeModules, init_git_repo, make_project, make_route
+
+# The real routers (and the services they import at module level) load before the proxy fixture's FakeModules replace
+# implementation modules in sys.modules, so this file also runs on its own and in any order (as
+# tests/unit/test_broker_model_proxy.py does; otherwise make_app imported aeos.doctor.views against the fake doctor).
+for _mod in MODULE_ROUTERS:
+    importlib.import_module(_mod)
 
 BRANCH = "aeos/task-a-1234abcd"
 TOKEN = "ghp_" + "t" * 36
@@ -35,7 +44,7 @@ def _git(cwd: Path, *args: str) -> str:
 @pytest.fixture
 def env(db, tmp_path):
     src = tmp_path / "candidate"
-    init_git_repo(src)
+    base = init_git_repo(src)
     _git(src, "checkout", "-q", "-b", BRANCH)
     (src / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(src, "add", "-A")
@@ -45,9 +54,10 @@ def env(db, tmp_path):
     subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
     p = make_project(db)
     run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="REVIEW", workspace_ref=str(src),
-                    branch=BRANCH, head_commit=head, git_dir_ref=str(src / ".git"))
+                    branch=BRANCH, head_commit=head, base_commit=base, git_dir_ref=str(src / ".git"))
     db.add(run)
     db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     return {"src": src, "bare": bare, "run": run, "head": head}
 
 

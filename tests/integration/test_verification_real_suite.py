@@ -45,6 +45,7 @@ def _candidate_from_controller(settings, world, name):
 
 def _verify(db, world, cand, base, head):
     world.run.workspace_ref, world.run.base_commit, world.run.head_commit = str(cand), base, head
+    world.run.git_dir_ref = str(cand / ".git")  # the trusted git dir the runtime records (ADR-0132)
     db.commit()
     out = verifier.verify_run(db, world.run.id, actor="it", request_repair_on_fail=False)
     db.commit()

@@ -150,6 +150,7 @@ def make_candidate(settings, world: World, *, head_files: dict[str, str | None],
 
 def bind_candidate(db, world: World, cand: Path, base: str, head: str) -> None:
     world.run.workspace_ref = str(cand)
+    world.run.git_dir_ref = str(cand / ".git")  # what the runtime records: the trusted git dir (ADR-0132)
     world.run.base_commit = base
     world.run.head_commit = head
     db.commit()
@@ -232,7 +233,8 @@ BASE = "b" * 40
 
 def record_verification(db, world: World, *, status: str = "PASS", head: str = HEAD, base: str = BASE,
                         artifact_hash: str = "sha256:" + "c" * 64, changed: list[str] | None = None,
-                        mode: str = "LIVE", config_hash: str | None = None, ruff: str = "PASS", leak: str = "PASS"):
+                        mode: str = "LIVE", config_hash: str | None = None, ruff: str = "PASS", leak: str = "PASS",
+                        numstat: dict[str, dict[str, int | None]] | None = None):
     """Record evidence the way the verifier does (origin verifier) without running subprocesses."""
     from aeos.verification import collector
     from aeos.verification.scope import check_scope
@@ -249,7 +251,9 @@ def record_verification(db, world: World, *, status: str = "PASS", head: str = H
                   subject_id=world.run.id, project_id=world.project.id, domain=world.project.domain,
                   run_id=world.run.id, task_id=world.task.id, environment=env, mode=mode)
     sc = collector.collect_evidence(db, kind="SCOPE_CHECK", claim="scope", content={**scope.to_dict(),
-                                    "name_status": [{"status": "A", "path": p} for p in changed], "numstat": {}},
+                                    "name_status": [{"status": "A", "path": p} for p in changed],
+                                    "numstat": numstat if numstat is not None
+                                    else {p: {"added": 1, "deleted": 0} for p in changed}},
                                     evidence_level="E1", **common)
     df = collector.collect_evidence(db, kind="DIFF", claim="diff", content="+++ b/backend/extra.py\n+X = 1\n",
                                     evidence_level="E1", **common)

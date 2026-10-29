@@ -11,6 +11,11 @@ Boundary rules (each tested):
   never written to any config file and never passed on the command line;
 * every operation needs an ACTIVE run-bound capability grant (GIT_BRANCH / PR_CREATE) and, for a
   remote write, the external-write interlock (§26);
+* owner rule R44 (ADR-0132): every push and PR of a worker run needs the run's latest Claude checkpoint review to
+  be a PASS bound to exactly the head commit being published - otherwise ``REVIEW_REQUIRED``, audited, before any
+  grant is consumed or credential read; and the pushed history must be exactly the runtime's single candidate
+  commit on the run's base (the net diff the reviewer saw) - worker-made commits are never published
+  (``REVIEW_REQUIRED``, reason ``HISTORY``);
 * the broker has no capability to integrate a PR into any branch: human-only (U-09, §31);
 * owner rule (AGENTS.md invariant 11): before any push every commit of the pushed range (every commit of the
   head that no branch of the remote reaches yet) is authored AND committed by the configured identity of the
@@ -248,6 +253,8 @@ def _interlock(session: Session, run: WorkerRun, *, provider: str, operation: st
 
 
 PUBLISHABLE_RUN_STATES = frozenset({"REVIEW", "DONE"})
+# Owner rule R44 (2026-10-28, ADR-0132): no worker candidate is published before a Claude review PASS of its exact head.
+REVIEW_REQUIRED = "REVIEW_REQUIRED"
 
 
 def _require_publishable(session: Session, run: WorkerRun, operation: str) -> None:
@@ -257,7 +264,11 @@ def _require_publishable(session: Session, run: WorkerRun, operation: str) -> No
     * the run finished its execution phase (REVIEW/DONE) — never a running, failed or cancelled one;
     * the runtime recorded the candidate head commit (what verification/review looked at);
     * a quarantined patch needs an ACTIVE human EXCEPTION decision bound to this run and that exact
-      head commit (special review, ADR-0054)."""
+      head commit (special review, ADR-0054);
+    * owner rule R44 (ADR-0132): the run's latest Claude checkpoint review is a PASS bound to exactly that head
+      commit (``_require_claude_review``).
+
+    Every remote write of a run calls this first - GitHub and Bitbucket push and PR creation."""
     from aeos.workforce.integrations import quarantine_release
 
     if run.execution_status not in PUBLISHABLE_RUN_STATES:
@@ -273,6 +284,37 @@ def _require_publishable(session: Session, run: WorkerRun, operation: str) -> No
         raise PolicyDenied("patch is quarantined: special review + owner release decision bound to the head "
                            "commit is required before remote publication", code="QUARANTINED",
                            details={"reasons": [str(r) for r in (run.quarantine_reasons or [])[:20]]})
+    _require_claude_review(session, run, operation)
+
+
+def _require_claude_review(session: Session, run: WorkerRun, operation: str) -> None:
+    """Owner rule R44 (2026-10-28, ADR-0132), paraphrased: all OpenCode and OpenRouter work passes a Claude review; a
+    worker has no right to commit, push, let alone merge (the verbatim text is in the owner requests register).
+
+    The run's runtime-recorded head - the only commit the broker pushes or opens a PR for - must carry a Claude
+    checkpoint review PASS bound to exactly that commit (``aeos.verification.facade.publication_review``). No review,
+    a review of another (older) head, a review of a truncated package, a non-PASS verdict, a PASS contradicted by its
+    own findings, a MOCK review or a resolved reviewer model that is not Opus (owner rule 2026-10-28: never Fable):
+    ``PolicyDenied(REVIEW_REQUIRED)``, audited, before any grant is consumed or credential read. The verification
+    module missing is a refusal too (fail closed). The pushed history is checked in the mirror (``_history_problem``)."""
+    head = run.head_commit or ""
+    try:
+        from aeos.verification import facade as verification
+
+        gate = verification.publication_review(session, run, head)
+    except ImportError:
+        reason, message, details = ("REVIEW_GATE_UNAVAILABLE",
+                                    f"no Claude review PASS for head {head[:12] or 'NONE'}: the review gate is "
+                                    "unavailable (fail closed)", {})
+    else:
+        if gate.allowed:
+            return
+        reason, message, details = gate.reason, gate.message, gate.as_dict()
+    details = {**details, "reason": reason, "head_commit": head, "operation": operation}
+    audit.record(session, actor_type="service", actor_id="broker", action=f"broker.{operation}", result="DENIED",
+                 target_type="run", target_id=run.id, project_id=run.project_id, domain=run.domain,
+                 reason=f"{REVIEW_REQUIRED}: {message}"[:500], details={"code": REVIEW_REQUIRED, **details})
+    raise PolicyDenied(message, code=REVIEW_REQUIRED, details=details)
 
 
 def _side_effect(session: Session, run: WorkerRun, *, kind: str, key: str, target: dict[str, Any]) -> BrokerSideEffect:
@@ -406,19 +448,41 @@ def refuse_push(session: Session, run: WorkerRun, se: BrokerSideEffect, res: dic
     """A push the commit gate refused: nothing reached the remote. The outbox row is FAILED, the refusal audited,
     and ``PolicyDenied`` raised with the gate's code (the caller commits before re-raising, like delivery does)."""
     problems = list(res.get("problems") or [])[:20]
+    reason = {"reason": str(res["reason"])} if res.get("reason") else {}
     se.status = "FAILED"
     se.commit_sha = res.get("commit")
     se.result_summary = str(res.get("error") or "")[:500]
     audit.record(session, actor_type="service", actor_id="broker", action=action, result="DENIED", target_type="run",
                  target_id=run.id, project_id=run.project_id, domain=run.domain, reason=str(res.get("error", ""))[:500],
                  details={"code": res.get("code"), "provider": provider, "commit": res.get("commit"),
-                          "problems": problems})
+                          "problems": problems, **reason})
     events.emit(session, source="broker", kind="run.side_effect", entity_type="run", entity_id=run.id, run_id=run.id,
                 project_id=run.project_id, domain=run.domain,
                 payload={"kind": "PUSH_BRANCH", "status": "REFUSED", "code": res.get("code"), "provider": provider,
                          "commit": res.get("commit")})
     raise PolicyDenied(str(res.get("error") or "push refused"), code=str(res.get("code") or cid.CODE_IDENTITY_MISMATCH),
-                       details={"side_effect_id": se.id, "provider": provider, "problems": problems})
+                       details={"side_effect_id": se.id, "provider": provider, "problems": problems,
+                                "head_commit": res.get("commit"), **reason})
+
+
+def _history_problem(mirror: Path, env: dict[str, str], hooks: Path, head: str, base: str) -> str | None:
+    """Owner rule R44 (ADR-0132): what is pushed is what the reviewer saw. The checkpoint review looks at the net diff
+    ``base..head``; a history with worker-made commits could carry content that a later commit removed (a secret
+    added and deleted) and the review never saw. So the head must be one commit whose only parent is the run's
+    runtime-recorded base. Returns why not (None = exactly one candidate commit on the base)."""
+    if not _SHA_RE.match(base or ""):
+        return "the run has no runtime-recorded base commit, so the reviewed history is unknown"
+    line = _git(["rev-list", "--parents", "--max-count=1", head], cwd=mirror, env=env, hooks=hooks)
+    shas = line.stdout.split() if line.returncode == 0 else []
+    if not shas or shas[0] != head:
+        return "the head's parents could not be read"
+    parents = shas[1:]
+    if parents == [base]:
+        return None
+    counted = _git(["rev-list", "--count", head, "--not", base], cwd=mirror, env=env, hooks=hooks)
+    count = counted.stdout.strip() if counted.returncode == 0 else "an unknown number of"
+    return (f"base {base[:12]}..head is {count} commit(s) and the head's parents are "
+            f"{', '.join(p[:12] for p in parents) or 'none'}, not the single runtime candidate commit on the base")
 
 
 def guard_outbound_text(session: Session, run: WorkerRun, *, action: str, where: str, texts: dict[str, str]) -> None:
@@ -436,15 +500,61 @@ def guard_outbound_text(session: Session, run: WorkerRun, *, action: str, where:
         raise PolicyDenied(message, code="AI_ATTRIBUTION_IN_TEXT", details=details)
 
 
+def require_pushed_head(session: Session, run: WorkerRun, *, repo: str, branch: str, provider: str,
+                        action: str) -> None:
+    """Owner rule R44 (ADR-0132): a pull request is opened only for a branch the broker itself pushed with exactly the
+    run's head - the push is where the pushed history is checked against what the reviewer saw (``HISTORY``). Without
+    a SUCCEEDED push record of this run, repository, branch and head: ``PolicyDenied(REVIEW_REQUIRED)``, reason
+    ``NOT_PUSHED``, audited, before any grant, credential or request."""
+    head = run.head_commit or ""
+    rows = session.scalars(select(BrokerSideEffect).where(BrokerSideEffect.run_id == run.id,
+                                                          BrokerSideEffect.kind == "PUSH_BRANCH",
+                                                          BrokerSideEffect.status == "SUCCEEDED"))
+    for se in rows:
+        t = se.target or {}
+        if (head and se.commit_sha == head and t.get("repo") == repo and t.get("branch") == branch
+                and str(t.get("provider") or cid.GITHUB) == provider):
+            return
+    message = (f"no reviewed push of head {head[:12] or 'NONE'} to {repo}:{branch}: NOT_PUSHED - the broker has no "
+               "successful push of exactly this head (the push checks the history the reviewer saw); push the branch "
+               "through the broker first")
+    details = {"reason": "NOT_PUSHED", "head_commit": head, "repo": repo, "branch": branch, "provider": provider}
+    audit.record(session, actor_type="service", actor_id="broker", action=action, result="DENIED", target_type="run",
+                 target_id=run.id, project_id=run.project_id, domain=run.domain, reason=message[:500],
+                 details={"code": REVIEW_REQUIRED, **details})
+    raise PolicyDenied(message, code=REVIEW_REQUIRED, details=details)
+
+
+PR_HEAD_MIN_PREFIX = 12
+
+
+def pr_head_mismatch(run: WorkerRun, observed: str | None) -> str | None:
+    """Why the head a provider reports for a just-created PR is not the run's reviewed head (None = it is). Bitbucket
+    reports an abbreviated hash: a prefix of at least ``PR_HEAD_MIN_PREFIX`` hex digits matches. A provider answer that
+    names no head proves nothing and is a mismatch too (fail closed)."""
+    head = (run.head_commit or "").lower()
+    seen = str(observed or "").strip().lower()
+    if not seen:
+        return ("HEAD_MISMATCH: the provider's answer names no head commit, so the pull request is not proven to "
+                f"show the reviewed head {head[:12]}; the PR is not counted")
+    if head and len(seen) >= PR_HEAD_MIN_PREFIX and re.fullmatch(r"[0-9a-f]+", seen) and head.startswith(seen):
+        return None
+    return (f"HEAD_MISMATCH: the pull request's head {seen[:12]} is not the reviewed head {head[:12]} (the branch "
+            "moved after the broker's push, or the provider's hash is too short to compare); the PR is not counted")
+
+
 def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: str | None, work_root: Path,
                      commit_policy: CommitPolicy, expected_head: str | None = None,
-                     basic_user: str = GITHUB_GIT_USER) -> dict[str, Any]:
+                     basic_user: str = GITHUB_GIT_USER, reviewed_base: str | None = None) -> dict[str, Any]:
     """Fetch the task branch from the untrusted candidate into a private bare mirror and push it.
 
     With ``expected_head`` the push is sha-pinned (``<sha>:refs/heads/<branch>``, never forced): exactly
     the verified commit is published even if the branch tip moved between fetch and push. ``commit_policy`` is
     required: every commit of the pushed range is checked in the mirror before the push (owner rule); a violation
-    returns ``refused`` with its ``code`` and nothing is pushed."""
+    returns ``refused`` with its ``code`` and nothing is pushed. With ``reviewed_base`` (a run's push always passes
+    the run's base, an empty string when it has none) the head must be one commit whose only parent is that base -
+    the diff the Claude review saw (owner rule R44): otherwise ``refused`` with code ``REVIEW_REQUIRED`` and reason
+    ``HISTORY``, nothing pushed."""
     src, dst = validate_refspec(f"refs/heads/{branch}:refs/heads/{branch}")
     validate_remote_url(remote_url)
     if token:
@@ -486,6 +596,15 @@ def push_from_mirror(*, source_repo: Path, branch: str, remote_url: str, token: 
             detail = "; ".join(f"{p['sha'][:12]} {p['detail']}" for p in problems[:3])
             return {"ok": False, "stage": stage, "commit": head, "refused": True, "code": code, "problems": problems,
                     "error": f"{code}: push refused - {detail}"[:800]}
+        if reviewed_base is not None:
+            stage = "history"
+            why = _history_problem(mirror, base_env, hooks, head, reviewed_base)
+            if why is not None:
+                return {"ok": False, "stage": stage, "commit": head, "refused": True, "code": REVIEW_REQUIRED,
+                        "reason": "HISTORY", "problems": [{"sha": head, "code": "HISTORY", "detail": why}],
+                        "error": (f"no Claude review PASS for head {head[:12]}: HISTORY - {why}; the reviewer saw only "
+                                  "the net diff, so worker-made commits are never published: run the task again "
+                                  "(the runtime commits the candidate once, on the base)")[:800]}
         stage = "push"
         pinned_src, _ = validate_refspec(f"{head}:{dst}") if _SHA_RE.match(head or "") else (src, dst)
         push = _git(["push", "--porcelain", "--no-verify", remote_url, f"{pinned_src}:{dst}"], cwd=mirror, env=env,
@@ -580,7 +699,7 @@ def push_task_branch(
     work_root = get_settings().layout.root / "broker" / "git"
     work_root.mkdir(parents=True, exist_ok=True)
     res = push_from_mirror(source_repo=source, branch=branch, remote_url=url, token=token, work_root=work_root,
-                           expected_head=expected_head, commit_policy=policy)
+                           expected_head=expected_head, commit_policy=policy, reviewed_base=run.base_commit or "")
     if res.get("refused"):
         refuse_push(session, run, se, res, action="broker.git.push_branch", provider=cid.GITHUB)
     se.status = "SUCCEEDED" if res["ok"] else ("UNKNOWN" if res.get("unknown") else "FAILED")
@@ -657,6 +776,8 @@ def create_pull_request(
     # Owner rule (AGENTS.md invariant 11): no AI attribution in what lands on GitHub - refused, never stripped.
     guard_outbound_text(session, run, action="broker.github.create_pr", where="GitHub pull request",
                         texts={"title": title, "body": body})
+    require_pushed_head(session, run, repo=repo_full_name, branch=head, provider=cid.GITHUB,
+                        action="broker.github.create_pr")
     target = {"repo": repo_full_name, "head": head, "base": base}
     grant = _require_grant(session, run, "PR_CREATE", target)
     _interlock(session, run, provider="github-repo", operation="create_pr", target=target, grant=grant)
@@ -701,6 +822,10 @@ def create_pull_request(
             detail = "timeout; reconciled" if pr else "timeout; outcome UNKNOWN until reconciled"
         except httpx.HTTPError as exc:
             detail = type(exc).__name__
+    observed = ((pr or {}).get("head") or {}).get("sha") if isinstance((pr or {}).get("head"), dict) else None
+    mismatch = pr_head_mismatch(run, observed) if outcome == "SUCCEEDED" else None
+    if mismatch:
+        outcome, detail = "FAILED", mismatch
     se.status = outcome
     if pr:
         se.external_id = str(pr.get("number"))

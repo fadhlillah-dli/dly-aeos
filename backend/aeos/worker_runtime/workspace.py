@@ -133,8 +133,10 @@ class Workspace:
 
 # ----------------------------------------------------------------------------- git control files
 def _control_paths(git_dir: Path, common_dir: Path) -> list[Path]:
+    # ``commondir`` redirects git to another git dir (ADR-0132): planting one is as much a control change as a config
     paths = [git_dir / "config", git_dir / "config.worktree", common_dir / "config",
-             common_dir / "config.worktree", common_dir / "info" / "attributes"]
+             common_dir / "config.worktree", common_dir / "info" / "attributes", git_dir / "commondir",
+             common_dir / "commondir"]
     out: list[Path] = []
     for p in paths:
         if p not in out:
@@ -345,7 +347,7 @@ def collect_changes(ws: Workspace) -> dict[str, Any]:
     control files changed during the run (ADR-0054)."""
     verify_control_files(ws)
     cand_git(ws, ["add", "-A", "--", "."])
-    diff = ["diff", "--cached", "--no-ext-diff", "--no-textconv"]
+    diff = ["diff", "--cached", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none"]
     changes = _parse_name_status(cand_git(ws, [*diff, "--name-status", "-z", "-M", ws.base_commit]).stdout)
     raw = cand_git(ws, [*diff, "--raw", "-z", "--no-renames", ws.base_commit]).stdout
     modes: dict[str, str] = {}
