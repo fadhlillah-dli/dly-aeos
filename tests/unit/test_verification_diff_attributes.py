@@ -127,6 +127,9 @@ def test_a_rewritten_pointer_to_a_planted_git_dir_is_never_followed(tmp_path):
     (planted / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8", newline="\n")
     head_tree, base_tree = _git(work, "rev-parse", f"{head}^{{tree}}"), _git(work, "rev-parse", f"{base}^{{tree}}")
     _git(tmp_path, "--git-dir", str(planted), "replace", "-f", head_tree, base_tree)
+    # Git for Windows marks a .git file hidden (core.hideDotFiles) and Windows refuses to open a hidden file for
+    # writing; removing it first works on every platform.
+    (work / ".git").unlink()
     (work / ".git").write_text(f"gitdir: {planted.as_posix()}\n", encoding="utf-8", newline="\n")
     hidden = subprocess.run(["git", "diff", "--numstat", base, head], cwd=work, capture_output=True, text=True,
                             check=True, timeout=60).stdout
