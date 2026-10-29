@@ -4,12 +4,16 @@ TaskSpecs name the tools a worker may use; routes record the tool set the owner 
 vocabulary (``fs.read``, ``fs.write:allowed_paths``, ``tests.run``, plus ``bash``/``bash:<pattern>`` and ``webfetch``
 when a task truly needs them). The planning model writes free text, and on 2026-10-29 the first live plan named its
 tools ``read_file``, ``write_file``, ``run_tests`` and ``git_diff``: every route then refused every task as "outside the
-reviewed tool set" and no worker could start.
+reviewed tool set" and no worker could start. The same day the revised plans named the runtime's own tools (``read``,
+``glob``, ``grep``, ``list``, ``edit``, ``todowrite``: opencode ``BASE_ALLOW``), and ``list`` and ``todowrite`` were
+unknown, so every task was refused again (L29 strike 2): every runtime tool name now has its meaning here.
 
 ``canonical_tools`` maps the synonyms that mean exactly one of the three reviewed capabilities onto it. A synonym never
-widens a capability: reading a diff is reading files, writing or editing a file is the path-scoped write, running the
-tests is the test runner. Anything else (``bash``, ``bash:<pattern>``, ``webfetch``, an unknown name) is kept as
-written, so an unknown tool still makes the task ineligible with its own name in the reason (fail closed).
+widens a capability: reading a diff or listing a directory is reading files, writing or editing a file is the
+path-scoped write, running the tests is the test runner. The agent's own task list (``todowrite``/``todoread``) touches
+no repository file and asks for no capability, so it is dropped. Anything else (``bash``, ``bash:<pattern>``,
+``webfetch``, an unknown name) is kept as written, so an unknown tool still makes the task ineligible with its own name
+in the reason (fail closed).
 """
 
 from __future__ import annotations
@@ -22,13 +26,14 @@ TESTS_RUN = "tests.run"
 CANONICAL_WORKER_TOOLS = (FS_READ, FS_WRITE, TESTS_RUN)
 
 SYNONYMS: dict[str, str] = {
-    **dict.fromkeys(("read_file", "read", "read_files", "view", "view_file", "open_file", "list_files", "list_dir",
-                     "glob", "grep", "search", "search_files", "git_diff", "git_status", "git_log", "git_show",
-                     "diff"), FS_READ),
+    **dict.fromkeys(("read_file", "read", "read_files", "view", "view_file", "open_file", "list", "list_files",
+                     "list_dir", "glob", "grep", "search", "search_files", "git_diff", "git_status", "git_log",
+                     "git_show", "diff"), FS_READ),
     **dict.fromkeys(("write_file", "write", "edit_file", "edit", "apply_patch", "patch", "create_file", "fs.write"),
                     FS_WRITE),
     **dict.fromkeys(("run_tests", "run_test", "test", "tests", "pytest", "vitest", "npm_test"), TESTS_RUN),
 }
+AGENT_TASK_LIST_TOOLS = frozenset({"todowrite", "todoread"})
 
 
 def canonical_tool(name: str) -> str:
@@ -38,10 +43,10 @@ def canonical_tool(name: str) -> str:
 
 
 def canonical_tools(names: Iterable[str] | None) -> list[str]:
-    """Each name mapped by ``canonical_tool``, in order, without repeats."""
+    """Each name mapped by ``canonical_tool``, in order, without repeats and without the agent's own task list."""
     out: list[str] = []
     for name in names or []:
         tool = canonical_tool(name)
-        if tool and tool not in out:
+        if tool and tool.lower() not in AGENT_TASK_LIST_TOOLS and tool not in out:
             out.append(tool)
     return out
