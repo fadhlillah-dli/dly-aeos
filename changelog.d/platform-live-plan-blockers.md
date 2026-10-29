@@ -1,0 +1,8 @@
+### Fixed
+
+- **A dependent task starts only from a base that holds its dependencies' accepted changes.** A dependency is DONE at acceptance, before its pull request is merged, and the dependent started from the controller checkout's HEAD, so it could build on a base without the code it depends on. Readiness and admission now wait with `DEPENDENCY_NOT_IN_BASE` until every dependency's accepted head is in the source checkout's HEAD (pull request merged with a merge commit and the checkout updated); an unknown head or an unavailable checkout waits too (ADR-0050 amendment, LESSONS L32).
+- **The verifier runs the workers' tests whatever a plan calls its suites.** The verifier selects the candidate's test directories by `unit` and `integration` only; the revised plans wrote free text ("pytest routing"), which selects nothing, so no worker test would have run. The compiler keeps only the names the verifier knows and otherwise leaves its default selection, and the planning prompt names them (planning-prompts/4, LESSONS L29 strike 3).
+- **A candidate of this repository can finish its tests.** The candidate tests run serially, and this repository's tests/unit took about 2650 s that way against a 900 s limit. The default is now 3600 s, the policy bound, and a test keeps it above the serial time measured in tests/ci_durations.json (LESSONS L31 strike 2).
+- **The planning prompt states what the verifier really checks.** The trusted suite runs on the base and the head; the worker's own tests run on the head only, so a criterion that a new test fails on the base is NOT_PROVEN unless a reviewer checks it; a dependent starts after its dependencies' changes are merged.
+
+Evidence: E2 unit runs on macOS arm64; each new test is red without its change.
