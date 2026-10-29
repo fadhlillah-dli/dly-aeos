@@ -1403,8 +1403,7 @@
             "type": "array",
             "items": {
               "type": "string"
-            },
-            "description": "Worker tools, exactly these names: fs.read, fs.write:allowed_paths, tests.run; add bash or bash:<command pattern> and webfetch only when the task truly needs them"
+            }
           },
           "egress_allowed": {
             "type": "array",
