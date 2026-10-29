@@ -58,8 +58,8 @@ def _owner_home(tmp_path: Path) -> Path:
     home = tmp_path / "owner-home"
     (home / ".config").mkdir(parents=True)
     store = home / ".git-credentials"
-    store.write_text(f"https://owner:{PLACEHOLDER}@github.com\n", encoding="utf-8")
-    (home / ".gitconfig").write_text(f"[credential]\n\thelper = store --file={store.as_posix()}\n", encoding="utf-8")
+    store.write_text(f"https://owner:{PLACEHOLDER}@github.com\n", encoding="utf-8", newline="\n")
+    (home / ".gitconfig").write_text(f"[credential]\n\thelper = store --file={store.as_posix()}\n", encoding="utf-8", newline="\n")
     return home
 
 
@@ -104,15 +104,15 @@ def _fake_ssh(tmp_path: Path) -> tuple[str, Path]:
     """A stand-in for ssh that serves the repository locally (never the owner's ssh or key): the command for
     ``core.sshCommand`` and the log of its invocations. On POSIX also an ``ssh`` on PATH running the same."""
     script = tmp_path / "fake_ssh.py"
-    script.write_text(FAKE_SSH, encoding="utf-8")
+    script.write_text(FAKE_SSH, encoding="utf-8", newline="\n")
     log = tmp_path / "fake-ssh.log"
-    log.write_text("", encoding="utf-8")
+    log.write_text("", encoding="utf-8", newline="\n")
     command = f'"{Path(sys.executable).as_posix()}" "{script.as_posix()}" "{log.as_posix()}"'
     if sys.platform != "win32":
         bin_dir = tmp_path / "fake-bin"
         bin_dir.mkdir()
         shim = bin_dir / "ssh"
-        shim.write_text(f"#!/bin/sh\nexec {command} \"$@\"\n", encoding="utf-8")
+        shim.write_text(f"#!/bin/sh\nexec {command} \"$@\"\n", encoding="utf-8", newline="\n")
         shim.chmod(0o755)
     return command, log
 
@@ -170,7 +170,7 @@ def test_local_git_still_works_in_the_worker_environment_and_file_stays_user_onl
     assert env["GIT_CONFIG_KEY_2"] == "protocol.file.allow" and env["GIT_CONFIG_VALUE_2"] == "user"
     assert "GIT_ALLOW_PROTOCOL" not in env
     assert _git(["status", "--porcelain"], cwd=src, env=env).returncode == 0
-    (src / "notes.md").write_text("local work\n", encoding="utf-8")
+    (src / "notes.md").write_text("local work\n", encoding="utf-8", newline="\n")
     assert _git(["add", "-A"], cwd=src, env=env).returncode == 0
     committed = _git(["-c", "user.name=Worker", "-c", "user.email=worker@example.invalid", "-c",
                       "commit.gpgsign=false", "commit", "-q", "-m", "local"], cwd=src, env=env)

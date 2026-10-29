@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,12 +34,12 @@ def _candidate(tmp_path: Path) -> tuple[Path, str, str]:
     repo = tmp_path / "candidate"
     (repo / "src").mkdir(parents=True)
     _git(tmp_path, "init", "-q", str(repo))
-    (repo / "src" / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (repo / "src" / "app.py").write_text("value = 1\n", encoding="utf-8", newline="\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "base")
     base = _git(repo, "rev-parse", "HEAD")
-    (repo / "src" / ".gitattributes").write_text("* -diff\n", encoding="utf-8")
-    (repo / "src" / "app.py").write_text("value = 2  # changed where the reviewer must see it\n", encoding="utf-8")
+    (repo / "src" / ".gitattributes").write_text("* -diff\n", encoding="utf-8", newline="\n")
+    (repo / "src" / "app.py").write_text("value = 2  # changed where the reviewer must see it\n", encoding="utf-8", newline="\n")
     (repo / "assets").mkdir()
     (repo / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00binary")
     _git(repo, "add", "-A")
@@ -94,11 +95,11 @@ def _separate(tmp_path: Path) -> tuple[Path, Path, str, str]:
     (trusted) git dir. The head changes text and adds a real binary file."""
     work, trusted = tmp_path / "work", tmp_path / "trusted.git"
     _git(tmp_path, "init", "-q", f"--separate-git-dir={trusted.as_posix()}", str(work))
-    (work / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (work / "app.py").write_text("value = 1\n", encoding="utf-8", newline="\n")
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "base")
     base = _git(work, "rev-parse", "HEAD")
-    (work / "app.py").write_text("value = 2\n", encoding="utf-8")
+    (work / "app.py").write_text("value = 2\n", encoding="utf-8", newline="\n")
     (work / "blob.bin").write_bytes(b"BIN\x00\x00payload\n")
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "aeos: candidate")
@@ -121,12 +122,12 @@ def test_a_rewritten_pointer_to_a_planted_git_dir_is_never_followed(tmp_path):
     planted = tmp_path / "planted.git"
     _git(tmp_path, "init", "-q", "--bare", str(planted))
     (planted / "objects" / "info" / "alternates").write_text((trusted / "objects").as_posix() + "\n",
-                                                              encoding="utf-8")
+                                                              encoding="utf-8", newline="\n")
     (planted / "info").mkdir(exist_ok=True)
-    (planted / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8")
+    (planted / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8", newline="\n")
     head_tree, base_tree = _git(work, "rev-parse", f"{head}^{{tree}}"), _git(work, "rev-parse", f"{base}^{{tree}}")
     _git(tmp_path, "--git-dir", str(planted), "replace", "-f", head_tree, base_tree)
-    (work / ".git").write_text(f"gitdir: {planted.as_posix()}\n", encoding="utf-8")
+    (work / ".git").write_text(f"gitdir: {planted.as_posix()}\n", encoding="utf-8", newline="\n")
     hidden = subprocess.run(["git", "diff", "--numstat", base, head], cwd=work, capture_output=True, text=True,
                             check=True, timeout=60).stdout
     assert hidden.strip() == "", "through the pointer the change is gone (the bite is real)"
@@ -160,13 +161,13 @@ def test_global_and_xdg_attribute_files_do_not_shape_the_diff(tmp_path, monkeypa
     work, trusted, base, head = _separate(tmp_path)
     home = _attr_home(tmp_path)
     attrs = home / "global-attributes"
-    attrs.write_text("*.bin diff\n", encoding="utf-8")
+    attrs.write_text("*.bin diff\n", encoding="utf-8", newline="\n")
     for channel in ("global", "xdg"):
         if channel == "global":
-            (home / ".gitconfig").write_text(f"[core]\n\tattributesFile = {attrs.as_posix()}\n", encoding="utf-8")
+            (home / ".gitconfig").write_text(f"[core]\n\tattributesFile = {attrs.as_posix()}\n", encoding="utf-8", newline="\n")
         else:
             (home / ".gitconfig").unlink()
-            (home / ".config" / "git" / "attributes").write_text("*.bin diff\n", encoding="utf-8")
+            (home / ".config" / "git" / "attributes").write_text("*.bin diff\n", encoding="utf-8", newline="\n")
         env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "GIT_CONFIG_NOSYSTEM": "1"}
         plain = subprocess.run(["git", "diff", "--numstat", base, head, "--", "blob.bin"], cwd=work, env=env,
                                capture_output=True, text=True, check=True, timeout=60).stdout
@@ -189,9 +190,9 @@ def test_info_attributes_in_the_trusted_git_dir_is_reported(tmp_path):
     work, trusted, base, head = _separate(tmp_path)
     git = GitReader(work, git_dir=trusted)
     (trusted / "info").mkdir(exist_ok=True)
-    (trusted / "info" / "attributes").write_text("# comments only\n\n", encoding="utf-8")
+    (trusted / "info" / "attributes").write_text("# comments only\n\n", encoding="utf-8", newline="\n")
     assert git.integrity_problem() is None  # near miss
-    (trusted / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8")
+    (trusted / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8", newline="\n")
     problem = git.integrity_problem()
     assert problem is not None and "info" in problem and "repository attributes shape every diff" in problem
 
@@ -215,6 +216,8 @@ def _tree_repo(tmp_path: Path, base_files: dict[str, bytes], head_files: dict[st
     return repo, shas[0], shas[1]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Git for Windows refuses a tab in an index path "
+                    "(core.protectNTFS), so no candidate there can hold one; the parsing is proven on macOS")
 def test_a_tab_in_a_path_never_hides_a_binary_file(tmp_path):
     binary, text = b"BIN\x00\x00payload\n", b"plain text\n"
     repo, base, head = _tree_repo(tmp_path, {"keep.txt": text}, {"keep.txt": text, "x\tA": binary, "x\tB": text})
@@ -240,7 +243,7 @@ def _with_gitlink(work: Path, *, ignore_in_config: bool = False) -> str:
     on top of the candidate; returns the new head."""
     target = _git(work, "rev-parse", "HEAD")
     (work / ".gitmodules").write_text('[submodule "lib"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = all\n',
-                                      encoding="utf-8")
+                                      encoding="utf-8", newline="\n")
     _git(work, "add", ".gitmodules")
     _git(work, "update-index", "--add", "--cacheinfo", f"160000,{target},vendor/lib")
     if ignore_in_config:
@@ -278,13 +281,13 @@ def test_a_commondir_file_in_the_trusted_git_dir_is_refused(tmp_path):
     planted = tmp_path / "planted.git"
     _git(tmp_path, "init", "-q", "--bare", str(planted))
     (planted / "objects" / "info" / "alternates").write_text((trusted / "objects").as_posix() + "\n",
-                                                              encoding="utf-8")
+                                                              encoding="utf-8", newline="\n")
     _git(tmp_path, "--git-dir", str(planted), "config", "diff.ignoreSubmodules", "all")
-    (trusted / "commondir").write_text(planted.as_posix() + "\n", encoding="utf-8")
+    (trusted / "commondir").write_text(planted.as_posix() + "\n", encoding="utf-8", newline="\n")
     problem = git.integrity_problem()
     assert problem is not None and "commondir exists: it would redirect git to another git dir" in problem
     (trusted / "commondir").unlink()
-    (trusted / "gitdir").write_text(planted.as_posix() + "\n", encoding="utf-8")
+    (trusted / "gitdir").write_text(planted.as_posix() + "\n", encoding="utf-8", newline="\n")
     assert "gitdir exists" in (git.integrity_problem() or "")
 
 
@@ -300,7 +303,7 @@ def test_a_planted_commondir_is_a_control_change_for_the_runtime(tmp_path):
                                     run_id="run-0003-cccc", task_key="Task C", source_repo=src, base_commit=None,
                                     isolated=True)
     workspace.verify_control_files(ws)  # near miss: untouched
-    (ws.git_dir / "commondir").write_text((tmp_path / "elsewhere").as_posix() + "\n", encoding="utf-8")
+    (ws.git_dir / "commondir").write_text((tmp_path / "elsewhere").as_posix() + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(workspace.GitControlTampered):
         workspace.verify_control_files(ws)
 
@@ -310,18 +313,18 @@ def test_the_host_global_config_does_not_change_a_read(tmp_path, monkeypatch):
     includeIf pulls in) would shape the diff the reviewer sees - here ``diff.context = 0`` drops every context line."""
     work, trusted, _base, _head = _separate(tmp_path)
     lines = [f"line {i}\n" for i in range(1, 10)]
-    (work / "app.py").write_text("".join(lines), encoding="utf-8")
+    (work / "app.py").write_text("".join(lines), encoding="utf-8", newline="\n")
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "nine lines")
     before = _git(work, "rev-parse", "HEAD")
     lines[4] = "line five changed\n"
-    (work / "app.py").write_text("".join(lines), encoding="utf-8")
+    (work / "app.py").write_text("".join(lines), encoding="utf-8", newline="\n")
     _git(work, "add", "-A")
     _git(work, "commit", "-q", "-m", "one line")
     after = _git(work, "rev-parse", "HEAD")
     home = tmp_path / "config-home"
     home.mkdir()
-    (home / ".gitconfig").write_text("[diff]\n\tcontext = 0\n", encoding="utf-8")
+    (home / ".gitconfig").write_text("[diff]\n\tcontext = 0\n", encoding="utf-8", newline="\n")
     env = {**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"), "GIT_CONFIG_NOSYSTEM": "1"}
     plain = subprocess.run(["git", "diff", before, after], cwd=work, env=env, capture_output=True, text=True,
                            check=True, timeout=60).stdout

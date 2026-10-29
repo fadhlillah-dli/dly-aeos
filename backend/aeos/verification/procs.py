@@ -442,10 +442,11 @@ class GitReader:
         if self.git_dir is not None:
             for name in ("commondir", "gitdir"):
                 if (self.git_dir / name).exists():
-                    return f"{self.git_dir / name} exists: it would redirect git to another git dir"
+                    return f"{(self.git_dir / name).as_posix()} exists: it would redirect git to another git dir"
             common = self.run("rev-parse", "--path-format=absolute", "--git-common-dir").stdout.decode().strip()
             if not common or Path(common).resolve() != self.git_dir.resolve():
-                return f"git resolves the common git dir to {common or 'nothing'}, not the trusted {self.git_dir}"
+                return (f"git resolves the common git dir to {common or 'nothing'}, not the trusted "
+                        f"{self.git_dir.as_posix()}")
         refs = self.run("for-each-ref", "--format=%(refname)", "refs/replace/").stdout.decode().split()
         if refs:
             return f"replace refs are present ({', '.join(refs[:3])}): they swap one object for another"
@@ -454,8 +455,8 @@ class GitReader:
         for d in sorted(x for x in dirs if x):
             for name, why in (("grafts", "grafts rewrite commit parents"),
                               ("attributes", "repository attributes shape every diff")):
-                if _has_entries(Path(d) / "info" / name):
-                    return f"{Path(d) / 'info' / name} is not empty: {why}"
+                if _has_entries(Path(d) / "info" / name):  # one spelling on every OS (``/``)
+                    return f"{(Path(d) / 'info' / name).as_posix()} is not empty: {why}"
         return None
 
     def run(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:

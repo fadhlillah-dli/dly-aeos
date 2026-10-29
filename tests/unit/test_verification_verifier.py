@@ -195,7 +195,7 @@ def test_e4_reference_to_a_changed_protected_suite_is_capped_at_e2(db, settings,
     assert trusted.evidence_level == "E4"
     # the grader changes afterwards: the same reference is no longer the current protected suite
     (controller / "tests" / "acceptance" / "test_new.py").write_text("def test_new():\n    assert True\n",
-                                                                       encoding="utf-8")
+                                                                       encoding="utf-8", newline="\n")
     again = collector.collect_evidence(db, kind="TEST_REPORT", origin="verifier", collector_identity="v",
                                        claim="stale reference", content={"status": "PASS"}, evidence_level="E4",
                                        project_id=world.project.id, environment=dict(trusted.environment))
@@ -529,10 +529,10 @@ def test_shadowed_modules_ignores_platform_packages(tmp_path):
     cand = tmp_path / "cand" / "backend"
     for root in (trusted, cand):
         (root / "aeos").mkdir(parents=True)
-        (root / "aeos" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "aeos" / "__init__.py").write_text("", encoding="utf-8", newline="\n")
     (cand / "newpkg_aeos_test_only").mkdir()
-    (cand / "newpkg_aeos_test_only" / "__init__.py").write_text("", encoding="utf-8")
-    (cand / "pluggy.py").write_text("", encoding="utf-8")
+    (cand / "newpkg_aeos_test_only" / "__init__.py").write_text("", encoding="utf-8", newline="\n")
+    (cand / "pluggy.py").write_text("", encoding="utf-8", newline="\n")
     assert verifier.shadowed_modules(cand, trusted) == ["pluggy"]
 
 
@@ -691,10 +691,10 @@ def test_a_candidate_without_a_trusted_git_dir_is_blocked(db, settings, controll
 @pytest.mark.parametrize("plant,needle", [
     (lambda cand, base, head: git(cand, "replace", head, base), "replace refs are present"),
     (lambda cand, base, head: (cand / ".git" / "info").mkdir(exist_ok=True)
-     or (cand / ".git" / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8"),
+     or (cand / ".git" / "info" / "attributes").write_text("*.bin diff\n", encoding="utf-8", newline="\n"),
      "info/attributes is not empty"),
     (lambda cand, base, head: (cand / ".git" / "info").mkdir(exist_ok=True)
-     or (cand / ".git" / "info" / "grafts").write_text(f"{head}\n", encoding="utf-8"), "info/grafts is not empty"),
+     or (cand / ".git" / "info" / "grafts").write_text(f"{head}\n", encoding="utf-8", newline="\n"), "info/grafts is not empty"),
 ])
 def test_a_trusted_git_dir_that_could_change_what_is_read_is_blocked(db, settings, controller, wf, plant, needle):
     world = make_world(db, verifier_policy=FAST)
@@ -712,7 +712,7 @@ def test_a_comment_only_info_attributes_file_is_not_blocked(db, settings, contro
     cand, base, head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
     bind_candidate(db, world, cand, base, head)
     (cand / ".git" / "info").mkdir(exist_ok=True)
-    (cand / ".git" / "info" / "attributes").write_text("# no attributes\n\n", encoding="utf-8")
+    (cand / ".git" / "info" / "attributes").write_text("# no attributes\n\n", encoding="utf-8", newline="\n")
     out = _verify(db, world)
     assert out.blocked_code != "GIT_CONTROL_UNTRUSTED", out.reasons
 
@@ -723,7 +723,7 @@ def test_a_head_with_a_submodule_entry_is_blocked(db, settings, controller, wf):
     world = make_world(db, verifier_policy=FAST)
     cand, base, _head = make_candidate(settings, world, head_files={"backend/extra.py": "X = 1\n"})
     (cand / ".gitmodules").write_text('[submodule "lib"]\n\tpath = vendor/lib\n\turl = ./lib\n\tignore = all\n',
-                                      encoding="utf-8")
+                                      encoding="utf-8", newline="\n")
     git(cand, "add", ".gitmodules")
     git(cand, "update-index", "--add", "--cacheinfo", f"160000,{base},vendor/lib")
     git(cand, "commit", "-q", "-m", "with a submodule")
