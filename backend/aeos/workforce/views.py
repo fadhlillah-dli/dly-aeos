@@ -30,7 +30,8 @@ from aeos.workforce.catalog import GROUP_LABELS, GROUPS
 S = ExecutionState
 STALE_HEARTBEAT_SECONDS = 60
 BLOCKING_WAIT_CODES = frozenset({"CAPABILITY_NOT_READY", "SANDBOX_NOT_READY", "ROUTE_INELIGIBLE", "AGENT_DISABLED",
-                                 "OFFICE_DENIED", "PLAN_NOT_APPROVED", "DEPENDENCY_NOT_ACCEPTED", "COST_UNKNOWN",
+                                 "OFFICE_DENIED", "PLAN_NOT_APPROVED", "DEPENDENCY_NOT_ACCEPTED",
+                                 "DEPENDENCY_NOT_IN_BASE", "COST_UNKNOWN",
                                  "MODULE_UNAVAILABLE", "FAN_OUT_FORBIDDEN", "NO_ALLOWED_PATHS", "NO_EXPECTED_OUTPUT",
                                  "ROLE_UNKNOWN", "ROLE_NOT_EVALUATED", "ROLE_RESULT_NOT_ADOPTED", "AGENT_OUT_OF_SCOPE",
                                  "CONTEXT_TOO_LARGE",

@@ -193,3 +193,14 @@ made to work end to end (`tests/e2e/test_e2e_execution_chain.py`). Reconciled co
    also checked on the worktree after the run, not only on tool events; and the repair task's dependency re-checks
    the choice's hash against the reports on record at use (a changed comparison needs a new choice). A refused CLI
    `agent-enable` keeps its DENIED audit row, as the Control Center does.
+
+## Amendment 2026-10-29 (a dependency's accepted change is in the dependent's base)
+
+* **`DEPENDENCY_NOT_IN_BASE` (point 6).** A dependency is DONE at acceptance, before its pull request is merged, and
+  a dependent task starts from the HEAD of the project's source checkout (its `base_commit` is pinned at the first
+  lease). Readiness and admission therefore also require every dependency's accepted head commit to be in that HEAD
+  (`git merge-base --is-ancestor`, through `worker_runtime.facade.source_head_contains`); until its pull request is
+  merged and the checkout updated, the dependent waits with `DEPENDENCY_NOT_IN_BASE`, a blocking wait code in the
+  Control Center. An accepted head the checkout does not know, a missing accepted head and an unavailable checkout
+  also wait (fail closed). Investigation dependencies keep their own rule. A squash merge never contains the
+  accepted head, so dependent work needs merge commits, the repository's practice (LESSONS L32).

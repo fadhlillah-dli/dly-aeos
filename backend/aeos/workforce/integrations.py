@@ -62,6 +62,15 @@ def acceptance_valid_for_run(session: Session, task: TaskSpec, base_commit: str 
     return bool(ok), "" if ok else "acceptance record is not ACCEPTED/valid for this base/plan identity"
 
 
+def dependency_in_base(session: Session, task: TaskSpec, accepted_head: str | None) -> tuple[bool, str]:
+    from aeos.worker_runtime import facade as worker_runtime
+
+    try:
+        return worker_runtime.source_head_contains(session, task.project_id, accepted_head)
+    except ImportError as exc:
+        return False, _unavailable("worker_runtime", exc)
+
+
 def documentation_blockers(session: Session, task: TaskSpec, version: PlanVersion) -> list[tuple[str, str]]:
     """§41 readiness criteria: the documentation sections required before implementation (PROJECT_CREATION and
     the task's FEATURE_APPROVAL PRD/test plan) must be complete; otherwise the task WAITS (fail closed: an
