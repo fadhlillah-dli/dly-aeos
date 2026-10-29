@@ -245,6 +245,16 @@ Decision: `macos-26-intel` runs 3 shards, like `windows-latest`; the timeout sta
 fails. A third Intel shard uses one more macOS slot; jobs that wait for a slot queue, and queue time does not count
 toward the timeout.
 
+## Amendment 2026-10-29 (2) — rebalanced weights and a hang report on every shard
+
+On PR #56 `macos-26-intel` shard 2/3 ran past the 25-minute limit and was cancelled with no log, while the same shard
+took 98 s on an Apple M4 and the three Intel shards of main (CI run 40773669961) took 303, 457 and 551 s of test time.
+That is more like one test hanging on Intel than a slow runner, so the limit stays 25 minutes. Decision: (1) every shard
+runs pytest with `-o faulthandler_timeout=300` (built into pytest, no new dependency): a test that runs longer than 5
+minutes prints every thread's traceback, so a hang names itself before the job limit cancels it; (2) the shard weights
+in `tests/ci_durations.json` are rebuilt from every shard's JUnit report of that main run, because many newer test files
+had no weight.
+
 ## Amendment 2026-10-27 — merge policy: merge commit only, two more required checks, settings as code
 
 **Decision** (owner, 2026-10-27: "Keputusan yang lain lakukan rekomendasi yang terbaik yang tidak mengganggu atau

@@ -443,7 +443,9 @@ def proxy(settings, db, secrets_memory, monkeypatch):
     """The real routing rule behind the broker, a decision C route and a PUBLIC task's run."""
     fk = FakeModules().install(monkeypatch, skip=("aeos.routing.service",))
     secrets_memory.put("workers/openrouter", KEY, actor="test")
-    p = make_project(db)
+    # a PUBLIC project: routing applies max(task class, project class), and the compiler never puts a PUBLIC task into
+    # an INTERNAL project (ADR-0133); the INTERNAL task below is still refused
+    p = make_project(db, classification="PUBLIC")
     route = make_route(db, key=FREE, model_id="cohere/north-mini-code:free", status="TRIAL",
                        pricing=dict(FREE_PRICING), data_classes=["PUBLIC"])
     _plan, _pv, specs = make_plan(db, p, [{"task_key": "pub", "data_classification": "PUBLIC"},

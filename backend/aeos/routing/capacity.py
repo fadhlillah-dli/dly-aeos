@@ -62,6 +62,7 @@ from aeos.models.planning import TaskSpec
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
 from aeos.routing import free_tier
+from aeos.routing.task_class import effective_task_class
 
 ROUTE_BUSY = "ROUTE_BUSY"
 ALLOWANCE_FIT = "ALLOWANCE_FIT"
@@ -346,7 +347,8 @@ def capacity_skip(session: Session, route: ModelRoute, *, task: TaskSpec, runs: 
     busy = busy_problem(session, route, runs, settings)
     if busy:
         return ROUTE_BUSY, busy
-    fit = allowance_fit(session, route, role=task.role_key, data_classification=task.data_classification, runs=runs,
+    fit = allowance_fit(session, route, role=task.role_key, data_classification=effective_task_class(session, task),
+                        runs=runs,
                         settings=settings)
     if fit is not None and fit.get("skip"):
         code, why = fit["skip"]
@@ -368,7 +370,8 @@ def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> di
     if busy_problem(session, route, runs, settings) is not None:
         out["wait"] = {"code": CODE_CAPACITY, "reason": f"{ROUTE_BUSY}: route {route.route_key} or its provider group "
                                                         "is at its concurrency cap; the task waits - never a paid route"}
-    fit = allowance_fit(session, route, role=task.role_key, data_classification=task.data_classification, runs=runs,
+    fit = allowance_fit(session, route, role=task.role_key, data_classification=effective_task_class(session, task),
+                        runs=runs,
                         settings=settings)
     if fit is not None:
         skip = fit.pop("skip", None)

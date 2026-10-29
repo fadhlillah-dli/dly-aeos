@@ -3,7 +3,8 @@
 Domain-first (U-05): a project is created only with an explicit, human-chosen domain that equals
 the session's active domain. The domain is never inferred from names, prompts, attachments or
 model output and never changes afterwards (PATCH rejects it; a DB trigger blocks it as well).
-Identity is a UUID; ``project_key`` is a unique display slug.
+Identity is a UUID; ``project_key`` is a unique display slug. The data classification is set at creation and changed
+only by ``aeos project reclassify`` (``aeos.portfolio.reclassify``, ADR-0133); PATCH refuses it.
 """
 
 from __future__ import annotations
@@ -214,6 +215,14 @@ def update_project(session: Session, principal: Principal, project: Project, bod
         _deny(session, principal, action="portfolio.project.update", code="DOMAIN_IMMUTABLE", project=project,
               reason="project domain is immutable; moving a project between domains is a migration that "
                      "needs an owner decision", details={"fields": domain_keys})
+    if "data_classification" in body:
+        # ADR-0133: the class is changed only by `aeos project reclassify`. Lowering it is a POLICY decision with its
+        # own checks (never OFFICE, an active SUPER_ADMIN, decision + audit + event naming old/new class, reason and
+        # actor); a field edit here would skip them, and two paths would drift apart (one control plane, U-12).
+        raise ValidationFailed("data_classification is not editable here; the owner changes it with "
+                               "`aeos project reclassify` (ADR-0133)", code="FIELD_NOT_EDITABLE",
+                               details={"fields": ["data_classification"], "editable": sorted(EDITABLE_FIELDS),
+                                        "use": "aeos project reclassify"})
     unknown = sorted(k for k in body if k not in EDITABLE_FIELDS)
     if unknown:
         raise ValidationFailed(f"fields not editable: {', '.join(unknown)}", code="FIELD_NOT_EDITABLE",

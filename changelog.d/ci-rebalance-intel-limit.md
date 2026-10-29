@@ -1,0 +1,3 @@
+### Changed
+
+- **CI: a hang report on every shard and rebalanced shard weights.** PR #56 was red because macOS Intel shard 2/3 ran past the 25-minute job limit with no log, while the same shard takes 98 s locally and main's Intel shards took 5 to 9 minutes of test time. Every shard now runs pytest with `-o faulthandler_timeout=300`, so a test running longer than 5 minutes prints its traceback before the job is cancelled, and the weights are rebuilt from every shard's JUnit report of CI run 40773669961 (ADR-0115 amendment 2026-10-29 (2), LESSONS L15). Evidence: E1 static; this PR's own CI run is the proof.

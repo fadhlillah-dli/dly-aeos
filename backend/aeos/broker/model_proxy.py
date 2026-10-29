@@ -497,6 +497,11 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
             else:
                 _deny(s, grant, code, message)
             raise ProxyError(status, code, message, retry_after=retry)
+        # ADR-0133, any route: the run's task at its effective class (a raise of its project applies to this request)
+        class_problem = task_class_refusal(s, grant, models[exposed])
+        if class_problem is not None:
+            _deny(s, grant, TASK_CLASS_NOT_ALLOWED, class_problem)
+            raise ProxyError(403, TASK_CLASS_NOT_ALLOWED, class_problem)
         if not grants.consume_request(s, grant.id):
             s.rollback()
             fresh = s.get(CapabilityGrant, grant.id)
@@ -544,6 +549,25 @@ def _prepare(headers: dict[str, str], cookies: dict[str, str], body: dict[str, A
 
 
 FREE_WORKER_INELIGIBLE = "FREE_WORKER_ROUTE_INELIGIBLE"
+TASK_CLASS_NOT_ALLOWED = "TASK_CLASS_NOT_ALLOWED"
+
+
+def task_class_refusal(s: Any, grant: CapabilityGrant, route_key: str) -> str | None:
+    """Why this request may not go to *route_key* because of the run's data class, or None (ADR-0133). Checked on
+    every request for every route, before it counts: the task's effective class (the higher of its compiled class and
+    its project's current class) must be allowed by the route and its data terms, so raising a project stops a running
+    run's next model call on a route that may not carry the new class (403, nothing sent). A grant without a task is
+    not judged here; routing unavailable while the grant has a run -> refused (fail closed)."""
+    route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
+    if route is None:
+        return None  # resolve_upstream refuses it (ROUTE_UNKNOWN)
+    try:
+        from aeos.routing import facade as routing
+
+        return routing.run_class_problem(s, route, run_id=grant.run_id)
+    except (ImportError, AttributeError):
+        return ("routing module unavailable: the run's data class cannot be checked (fail closed)"
+                if grant.run_id else None)
 
 
 def _is_free_model(s: Any, route_key: str) -> bool:

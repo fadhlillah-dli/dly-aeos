@@ -87,11 +87,17 @@ TARGET_ROLE_ADOPTION = "role_adoption"
 # or ``aeos policy adr-decide`` with the password). A later edit of the file makes that owner status STALE.
 TARGET_ADR = "adr"
 ADR_OUTCOMES: tuple[str, ...] = ("ACCEPTED", "REJECTED", "SUPERSEDED")
+# ADR-0133 (§04, §23): lowering a project's data classification is a POLICY decision on
+# project_classification/<project id>, recorded only by ``aeos project reclassify`` in the same transaction as the
+# change (details state from/to; target_version = the new class). An OFFICE project is never lowered that way.
+TARGET_PROJECT_CLASSIFICATION = "project_classification"
+PROJECT_CLASSIFICATION_OPERATIONS: tuple[str, ...] = ("lower_data_classification",)
 DEDICATED_TARGETS: dict[str, str] = {
     TARGET_OFFICE_ROUTE: "POST /api/policy/office/routes",
     TARGET_WORKFORCE: "POST /api/workforce/concurrency",
     TARGET_ROLE_ADOPTION: "POST /api/workforce/roles/{role_key}/adopt",
     TARGET_ADR: "POST /api/adrs/{adr_key}/decision",
+    TARGET_PROJECT_CLASSIFICATION: "aeos project reclassify",
 }
 # §41/§43 "Perubahan policy, model, tool schema, hooks, prompt/memory, fallback, context strategy tetap system
 # change dengan eval/decision/rollback": a generic POLICY decision on one of these targets changes how agents/models
