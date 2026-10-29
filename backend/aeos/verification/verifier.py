@@ -274,7 +274,11 @@ def current_config_hash(task: TaskSpec, session: Session | None = None) -> str |
 @dataclass
 class VerifierLimits:
     suite_timeout: float = 900.0
-    unit_timeout: float = 900.0
+    # The candidate tests run every selected test directory in one serial pytest process. On 2026-10-29 the
+    # platform's own tests/unit took about 2650 s serially (tests/ci_durations.json), so the former 900 s limit would
+    # fail every candidate of this repository by timeout (LESSONS L31). The default is the policy bound, 3600 s;
+    # a test keeps it above the measured serial time, and a parallel candidate run is the next step.
+    unit_timeout: float = 3600.0
     ruff_timeout: float = 180.0
     collect_timeout: float = 300.0
     preflight_timeout: float = 120.0
