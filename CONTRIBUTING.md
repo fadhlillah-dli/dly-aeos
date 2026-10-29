@@ -232,7 +232,7 @@ push to `main` ([ADR-0115](docs/decisions/ADR-0115-public-repository-on-github-f
 
 - **Backend shards.** On each host OS the full backend suite is split by test file: 3 shards on `windows-latest`
   (Windows jobs do not use the macOS slots), 2 on each macOS host (`macos-latest`, `macos-26-intel`). The jobs are
-  named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical --shard K/N`. Every shard is the same job
+  named `backend shard K/N [G2] (<os>)` and each runs `pytest -n logical -o faulthandler_timeout=300 --shard K/N` (a test over 5 minutes prints its traceback). Every shard is the same job
   and uploads its JUnit XML as the artifact `junit-backend-<os>-shard-<k>`.
 - **Static checks.** `static checks [G1] (ubuntu-latest)` runs ruff, mypy for `--platform darwin` and
   `--platform win32`, the secret scan, `shellcheck` over the shell scripts (`scripts/*.sh`,
@@ -425,8 +425,8 @@ test runs only on Windows.
 
 #### Claude Code hooks
 
-The committed `.claude/settings.json` registers two Claude Code hooks for anyone who works on this repository with
-Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). Both are fail-open: whatever goes wrong inside
+The committed `.claude/settings.json` registers three Claude Code hooks for anyone who works on this repository with
+Claude Code (hooks reference: <https://code.claude.com/docs/en/hooks>). All are fail-open: whatever goes wrong inside
 a hook (a missing `python3`, bad input, an exception, a timeout), the session or the prompt goes on unchanged.
 
 - **SessionStart** runs `scripts/claude_hooks/session_facts.py`, which runs `scripts/preflight.py --facts` with the
@@ -443,6 +443,8 @@ a hook (a missing `python3`, bad input, an exception, a timeout), the session or
   a secret seen in chat is burned). A block keeps the secret from the model; Claude Code may still keep the typed text
   in its local prompt history, which is another reason to rotate. Ordinary prose, git SHAs, UUIDs, digests and
   placeholders such as `<your-token>` pass.
+- **PreToolUse** (matcher `Bash`) runs `scripts/claude_hooks/zsh_wordsplit_guard.py` (stdlib only, zsh sessions only):
+  it denies, with the fix, `set -- $var`, `for x in $var` and a bare-glob `$(...)` fed to pytest (LESSONS L14).
 
 To switch them off for yourself, put `"disableAllHooks": true` in `.claude/settings.local.json` (not committed): it
 turns off every hook of the session, not one of them. For a single run use

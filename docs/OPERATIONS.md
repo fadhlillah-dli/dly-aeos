@@ -63,6 +63,7 @@ that does not read it, when its "Source" does not match its readers, and when a 
 |---|---|---|---|---|
 | `AEOS_CANDIDATE_BUILD` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a candidate build. If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
 | `AEOS_CAPABILITY_TOKEN` | direct read | `backend/aeos/operations/_util.py` | unset (never set for the owner) | Worker-context marker: present in a process that holds a worker capability token (the name is listed, never a value). If it is set and non-empty, every human-only operation that calls `refuse_worker_context` is refused (listed under the table; §09, §40). The owner never sets it. Reserved: no code in this repository sets it today, a worker or candidate runtime that carries it must set it itself |
+| `AEOS_CCUSAGE_EXPORT_PATH` | Settings field | `Settings` | unset (the usage report states that Claude Max use is measured by ccusage outside AEOS) | Path of an optional `ccusage daily --json` export file. `aeos usage report` only reads it and shows its token totals for the month, never a dollar figure; a missing or unreadable file is reported as FAILED (see "Usage value report") |
 | `AEOS_CLAUDE_BINARY` | Settings field | `Settings` | unset (the `claude` binary on `PATH`) | Path of the official `claude` binary; when set it is the only candidate (an unusable path is reported, `PATH` is not tried) |
 | `AEOS_COMMIT_AUTHOR_EMAIL` | Settings field | `Settings` | unset | Fallback commit e-mail for the **github** identity only; `commit_identities` wins (see "Commit identity and no AI attribution") |
 | `AEOS_COMMIT_AUTHOR_NAME` | Settings field | `Settings` | unset | Fallback commit name for the **github** identity only |
@@ -92,6 +93,8 @@ that does not read it, when its "Source" does not match its readers, and when a 
 | `AEOS_OPENROUTER_FREE_DAILY_LIMIT` | Settings field | `Settings` | `50` | Requests per UTC day for `:free` models; 1 to 1000 (1000 only after at least 10 credits were bought). The cap in force is the lower of this value and the limit the OpenRouter key endpoint reported at the last catalog refresh |
 | `AEOS_OPENROUTER_FREE_MAX_ACTIVE` | Settings field | `Settings` | `1` | Tasks running at once across every OpenRouter `:free` route (one account-wide rate limit), 1 to 2. A free route past it is skipped (`ROUTE_BUSY`) (ADR-0124) |
 | `AEOS_OPENROUTER_FREE_RPM_LIMIT` | Settings field | `Settings` | `20` | Requests per minute for `:free` models; 1 to 20 |
+| `AEOS_PAID_ESCALATION` | Settings field | `Settings` | `true` | ESCALATION of an INTERNAL task to a per-token paid route (OpenRouter credits) after 2 of its finished attempts on $0-marginal routes failed for quality (verifier FAIL, review findings or a REJECTED acceptance; never a quota, time-out, resource, lease or exit stop). While it applies the paid routes are tried first (after a quota stop on another route only that route may go first, ADR-0124). Under the §21 pilot cap of 2 attempts the second failure blocks the task (`NEEDS_DECISION`), so escalation applies to the attempt an owner retry with `extra_attempts` grants. `false` turns it off. PUBLIC tasks are never paid. The paid route still needs its ACTIVE decision with the owner's BUDGET decision, the TaskSpec `limits.max_cost_usd` and the GLOBAL budget. Not part of a route's configuration identity (ADR-0128) |
+| `AEOS_PAID_OVERFLOW` | Settings field | `Settings` | `true` | OVERFLOW of an INTERNAL task to a per-token paid route when every $0-marginal route eligible for it is busy (`ROUTE_BUSY`), out of its 5h allowance fit (`ALLOWANCE_FIT`) or cooling down, and at least one such route exists. `false` makes the task wait (`ROUTE_CAPACITY`) as before. PUBLIC tasks are never paid. Every admitted paid run is recorded (event `route.paid_admitted`, audit `routing.route.paid_admitted`) (ADR-0128) |
 | `AEOS_PLATFORM_REPO_SLUG` | Settings field | `Settings` | `fadhlillah-dli/dly-aeos` | `owner/name` of this platform repository, used by the Doctor repository and delivery checks and the research registry seed |
 | `AEOS_PORT` | Settings field | `Settings` | `8787` | Port of the control plane. `aeos serve --port` sets it for its own process |
 | `AEOS_PUSH_WITHOUT_FULL_SUITE` | script | `scripts/gates.py` | unset (a push needs a passing full-suite record) | A non-empty reason lets the pre-push hook (`scripts/gates.py --hook`) push a commit whose tree has no passing full-suite record from `scripts/run_tests.sh`; the `full-suite` guard is then SKIPPED with the reason printed, never PASS (LESSONS L8). Set it for one push only: `AEOS_PUSH_WITHOUT_FULL_SUITE='docs only' git push` in sh (macOS, Git Bash); in cmd `cmd /c "set "AEOS_PUSH_WITHOUT_FULL_SUITE=docs only" && git push"` (a bare `set` keeps it for every later push from that window); the PowerShell form is in `CONTRIBUTING.md`. On Windows the record comes from `scripts/run_tests.sh` run with Git Bash; a direct `python -m pytest` writes none |
@@ -325,6 +328,28 @@ compared); a `git pull` that changes only `frontend/` while the server runs is n
 bundle is unchanged until the restart rebuilds it; the `post-merge` hook and `runtime.frontend_fresh` report it); the
 banner is proven by component tests with a mocked health response, not in a browser against a real rebuild.
 
+## Usage value report (owner request R34)
+
+`aeos usage report [--month YYYY-MM] [--json]` · `GET /api/usage/report?month=YYYY-MM`. Read-only: it adds, changes
+and deletes nothing and calls no network. Scope is PERSONAL only; an OFFICE session gets 403
+`USAGE_REPORT_PERSONAL_ONLY`. The month is a calendar month in UTC (default: the current one). It answers whether the
+two $10 plans are used well, from records AEOS already keeps:
+
+| Part | What it shows (computed from) |
+|---|---|
+| OpenCode Go | Per SUBSCRIPTION route: allowance used in the trailing 5h window, the trailing week (both for the current month only) and the month, against the window's limit (seeded monthly allowance x 20 %, 50 %, 100 %), in percent; the plan fee once; allowance used per fee dollar; WORKER routes never used in the month (usage ledger: the recorded `usage.opencode.allowance`, else the cost module's estimate). Routes with UNTRUSTED terms are listed but not counted in the total (`routes_untrusted`); when they had calls, or a call's allowance is UNKNOWN, the total is marked `LOWER_BOUND` (JSON `totals.state`, text "LOWER BOUND") |
+| OpenRouter | `:free` requests counted today (UTC) against the daily cap; paid spend per route and per role, actual, estimate and UNKNOWN apart (usage ledger, worker runs); the GLOBAL and `openrouter/*` ROUTE budgets (limit, spent, held, remaining) and the key limit from the last `aeos routes refresh` |
+| Work | Tasks and runs per role; verifier pass rate per (route, role) (NOT_RUN is undecided, NOT_PROVEN is not a pass); paid admissions: the `route.paid_admitted` events of the paid-admission change counted by their reason, ESCALATION, OVERFLOW or unclassified (`NO_EVENTS` when none happened or that change is not installed); median run wall-clock and plan wall-clock per plan |
+| Claude | States that Claude Max token use is measured by ccusage outside AEOS. With `ccusage_export_path` set (`AEOS_CCUSAGE_EXPORT_PATH`), the token totals of that export for the month (an ESTIMATE, never dollars); beside it the NATIVE_CLAUDE rows AEOS recorded itself |
+
+Limits: AEOS counts only the calls made through this instance, so the provider's own count can be higher; the Go
+month is the calendar month, not the provider's billing cycle. The GLOBAL and ROUTE budget figures and the key limit
+cover every domain, so the API shows them only to a principal who can see every domain (the same rule as
+`GET /api/budgets`); the ccusage totals follow the same rule. A project-scoped principal sees ledger rows, runs and
+paid-admission events of its allowed projects (and project-less ones) only. Only route keys, role keys, plan ids, counts and
+amounts are output: no task text, error text, event payload or secret. Proven by unit tests on macOS arm64;
+NOT-PROVEN on Windows and Intel macOS until CI runs them.
+
 ## SLIs and alerts
 
 `aeos ops sli --domain PERSONAL|OFFICE [--raise-alerts] [--json]` · `GET /api/ops/sli` ·
@@ -408,6 +433,39 @@ snapshot is never a live status.
   decision bound to the shown `checklist_hash` (409 `RETIREMENT_BLOCKING_ITEMS` /
   `RETIREMENT_CHECKLIST_STALE` / `RETIREMENT_REQUIRES_RETIRING`); lifecycle `RETIRED` is refused
   (`RETIREMENT_NOT_VERIFIED`) unless that decision still matches the current checklist.
+
+## Project data classification (ADR-0133)
+
+A project's data classification is chosen when it is created (`aeos seed` registers the DLY AEOS project INTERNAL)
+and is the floor of its work. At compile time a task with no stated class gets the project's class, a stated class
+can only raise it, and an unknown label becomes RESTRICTED (listed under `classification_findings` in the compile
+result). Routing applies the higher of the task's class and the project's current class, and sends a task only to
+routes that allow it. `aeos project reclassify` is the one path that changes the project's class
+(owner decision 2026-10-28: the DLY AEOS project becomes PUBLIC, [OWNER_ACTIONS 2.13](OWNER_ACTIONS.md#213-data-classification-of-the-dly-aeos-project-per-machine)):
+
+```bash
+./aeos project reclassify --project dly-aeos --domain PERSONAL \
+  --to PUBLIC --actor "<admin>" \
+  --approval-ref "chat 2026-10-28, owner rule R43" \
+  --reason "owner decision 2026-10-28: the repository is public"
+```
+
+| Question | Answer |
+|---|---|
+| Raise (more restrictive) | allowed for an active SUPER_ADMIN whose scope covers the project, in both domains; audit record `portfolio.project.reclassify` and event `portfolio.project.reclassified`, no decision. It ends (INVALIDATED) the project's ACTIVE lowering decision and applies to open tasks at once: routing no longer selects a route that may not carry the new class, the broker refuses a running run's next model request on such a route (403 `TASK_CLASS_NOT_ALLOWED`, any route, nothing sent) and a run whose context pack the route may not carry does not start (`CONTEXT_CLASS_NOT_ALLOWED`) |
+| Lower | a POLICY decision on `project_classification:<project id>` (`target_version` = the new class, details `from_classification`/`to_classification`), plus the audit record and the event; all three name old class, new class, reason and actor. Needs an active SUPER_ADMIN (`LOWERING_NEEDS_SUPER_ADMIN` otherwise); an ARCHIVED or RETIRED project is refused (`PROJECT_READ_ONLY`). A newer lowering supersedes the previous decision |
+| Lowering with content | refused (`LOWERING_BLOCKED_BY_CONTENT`, nothing changed, DENIED audit record) while the project has any plans, plan versions, planning contexts or runs, task specs, worker runs, reviews, documents or document revisions (checkpoints included), memory records, attachments, evidence, context packs, decision requests, eval case candidates, export snapshots or change proposals; the message lists the count per kind. Copies of older content (compiled task inputs, re-rendered documents, context packs) would otherwise reach lower-class tasks and routes. Archive or delete the content first; plan versions, task specs and evidence are append-only, so a project that has them keeps its class (a new project at the lower class takes that work). Repositories and integrations are not content, nor is platform probe evidence (`PROVIDER_CAPABILITY` without a run or task, decision 19: it never reaches a task's context; the output counts it as not counted). `portfolio.reclassify.CONTENT_TABLES` is the list, and a test fails when a new project table is neither content nor named as not content |
+| OFFICE | never lowered by this command (`OFFICE_LOWERING_DENIED`): which OFFICE data classes may leave the host is the company's authorisation (master §23, `approved_data_classes`). Raising is allowed |
+| In-flight work | TaskSpecs are immutable and never rewritten. A lowering never relaxes them (routing keeps the task's own class as the floor); only plans and task DAGs compiled afterwards use the new class. The delivery gate G0 refuses a task below the project class |
+| Context after a lowering (defence in depth) | a lowering happens only without content, so this applies to a project lowered before that rule or by a direct database edit: every item keeps the class it had when it was created (its own label; else the project's class when the record was created, from the reclassification audit trail; the highest class the project ever had when the time is unknown); repository files at the task's commit take the current class. Compiled task inputs carry the class recorded at compile time (a PRD section: the class when its plan version was created; a documentation checkpoint: the class when it was recorded). A task-bound pack leaves out every item above the task's effective class (`omitted`, reason "classification ..."); every input artifact but a plain label above it is withheld from the prompt; a pack above the task's class is never given to the worker, also when it was not rebuilt; the owner-local MCI source never goes into a pack for a PUBLIC task |
+| Refused input | an unknown class (`INVALID_CLASSIFICATION`), a reason under 10 characters (`REASON_TOO_SHORT`), an actor who is not active (exit 2) or is VIEWER, a project of the other domain ("not found"). Every policy refusal is a DENIED audit record. The same class again records nothing. A stored label that is not a known class (for example `Secret`) is read as RESTRICTED, as routing reads it: a lowering from it records RESTRICTED (the raw label in `from_label`) and a revocation restores RESTRICTED; `--to RESTRICTED` normalises it |
+| Undo | raise it again with the same command, or revoke the decision (`aeos policy revoke <decision id>`): a revoked lowering decision that still backs the class restores the class before its chain of lowerings (`restore_to`: CONFIDENTIAL -> INTERNAL -> PUBLIC, revoke the newest -> CONFIDENTIAL; audit trigger `decision_inactive`) |
+| Not here | `PATCH /api/projects/{id}` refuses `data_classification` (`FIELD_NOT_EDITABLE`, pointing at this command); `aeos policy decide` refuses the target (`DEDICATED_ENDPOINT_REQUIRED`) |
+| Actor and approval | the command names the actor and asks no password: that is allowed only because the owner approves in chat and the maintainer runs it as the owner's actor (owner rule R43). `actor_check` in the decision and the audit record states this, and `--approval-ref` (for example "chat 2026-10-28, owner rule R43") is stored in the decision, the audit record and the event; without it they say null |
+
+How to read it: *Keputusan* lists the POLICY decision (`./aeos policy decisions --kind POLICY --target-type
+project_classification`); *Riwayat, Audit & Pemulihan* > Audit shows `portfolio.project.reclassify` with
+`from`, `to`, `direction`, `actor_username`, `approval_ref`, `decision_id` and the in-flight TaskSpec counts.
 
 ## Dependency lockfile
 
@@ -824,6 +882,29 @@ Wave 7 additions:
   `worker_route_behaviour:tool_schema_failures` and `details.max_failure_rate` (0..1, `POST /api/decisions`; in
   the Control Center: Kesiapan -> the check -> **Tetapkan ambang pemilik**, PERSONAL session, entered as a percentage).
   Without it, measured failures are reported, never judged.
+
+## Outgoing model-request guard (ADR-0127)
+
+Owner request 2026-10-28: nothing sensitive leaves this host in a model request, so training-capable routes
+(OpenRouter `:free`, DeepSeek) and OpenCode Go can serve PUBLIC tasks. The broker scans every request before it is
+forwarded, on every route and pool, worker calls and feasibility probes alike. There is no setting to turn it off.
+
+| Question | Answer |
+|---|---|
+| Blocked | a credential shape that `aeos.core.redaction` knows (OpenRouter, Anthropic and OpenAI-style keys, GitHub tokens, AWS access key ids, Google keys and tokens, Vault/OpenBao tokens and labelled unseal/root material, Slack tokens, PEM private key blocks) and any secret value AEOS loaded at run time (provider keys, capability tokens, code-host tokens), anywhere in the request: system, user, assistant and tool messages, tool calls and their arguments, tool definitions; also right after a JSON escape (`\n`, `\t`, `\"`, `\u00e9`), a terminal colour code (`ESC[31m`, raw, JSON-escaped or written as text such as `\e[31m`), the OSC-8 hyperlink terminator (ESC + backslash) or any URL-encoded byte (`%3D`, `%2F`, `%40`, `%5C`) |
+| Not blocked | personal data such as e-mail addresses (code is full of them), generic `password = ...` or `Bearer <opaque>` text, a low-entropy secret AEOS never loaded, shapes the redaction module does not define yet, encoded or split secrets. Code and data that only look like a token pass: a short `s.`/`b.`/`r.` form followed by a member name (Go receivers: `s.` then `registerServiceWithHealthCheck`), `1//` floor division, `AIza` or `1//` inside base64 (an image data URI, a lockfile integrity hash). These are the residual risks of ADR-0127 |
+| What the worker sees | HTTP 403, code `SENSITIVE_CONTENT_BLOCKED`, a message naming only the detector kinds; nothing was sent and nothing is counted against the grant or a free-model limit |
+| What the run does | it is stopped at the next heartbeat (or when the worker exits) as FAILED with outcome code `SENSITIVE_CONTENT_BLOCKED`, even when a quota stop, a shutdown or a lost lease came later (no attempt refund); the task goes to REVIEW (attempt failed, diagnosis required) or FAILED when no attempt is left. An investigation task goes BLOCKED instead (the next hypothesis would be refused again): remove the credential from what the worker reads, then retry the task |
+| A probe | refused with `SENSITIVE_CONTENT_BLOCKED` before anything is sent or counted |
+
+How to read it: in the Control Center open the run (**Pekerjaan Live**, run detail). Its timeline shows "Permintaan
+model ditahan, tidak dikirim: berisi kredensial (kinds)" (event `run.model_call_blocked`), and its outcome code is
+`SENSITIVE_CONTENT_BLOCKED`. In **Riwayat, Audit & Pemulihan** > Audit, the record
+`broker.model_proxy.sensitive_blocked` (DENIED, target = the route key) lists `kinds` and `findings`: each finding is
+a detector kind with the offset and length of the match in the scanned request, never the text and nothing derived
+from it (an unkeyed hash of a short secret such as a password could be brute-forced). What to do: find where the worker read the credential (a key file, an environment file, a log, a fixture),
+move it out of the repository or the task's inputs, rotate it if it is real (AGENTS.md invariant 12), then let the
+task run again. A fixture that only looks like a key is assembled from parts at run time instead of written literally.
 
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 

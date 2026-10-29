@@ -21,8 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from aeos.claude_bridge.facade import ClaudeRequest, ClaudeResult
+from aeos.claude_bridge.parsing import (
+    REFUSAL_BASIS,
+    parse_output,
+    redact_strings,
+    refused_family,
+    schema_errors,
+)
 from aeos.claude_bridge.parsing import cli_schema as _cli_schema
-from aeos.claude_bridge.parsing import parse_output, redact_strings, schema_errors
 from aeos.claude_bridge.workspace import WorkspaceError, copy_context, remove_tree
 from aeos.core.config import get_settings
 from aeos.core.errors import AeosError, Conflict, NotFound, PolicyDenied, ValidationFailed
@@ -170,15 +176,23 @@ def read_manual_result(package_id: str) -> ClaudeResult | None:
     if not pkg.is_dir():
         raise NotFound(f"manual package {package_id} not found")
     meta = _load_meta(pkg)
-    result_path = pkg / RESULT_FILE
-    if not result_path.is_file():
-        return None
     model = str(meta.get("model_requested") or "")
 
     def fail(code: str, error: str) -> ClaudeResult:
         return ClaudeResult(ok=False, structured=None, text="", model_requested=model, model_resolved=None,
                             engine_version=None, session_id=None, usage={}, duration_ms=None, error_code=code,
                             error=error, mode="MANUAL_FALLBACK")
+
+    fam = refused_family(model)
+    if fam:
+        # ADR-0131: a package written for Fable (before the decision) is refused whether or not a result exists yet
+        return fail("MODEL_FAMILY_REFUSED",
+                    f"manual package {package_id} was written for {model!r} (Claude {fam} family), which DLY AEOS "
+                    f"never uses ({REFUSAL_BASIS}); its result is not imported. Run the stage or review again: the new "
+                    "package uses opus.")
+    result_path = pkg / RESULT_FILE
+    if not result_path.is_file():
+        return None
 
     try:
         prompt = (pkg / "PROMPT.md").read_text(encoding="utf-8")

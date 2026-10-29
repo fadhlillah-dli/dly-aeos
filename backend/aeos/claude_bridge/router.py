@@ -35,7 +35,7 @@ def claude_status(db: DB, settings: SettingsDep, principal: CurrentPrincipal, re
 
 
 class CapabilityTestBody(BaseModel):
-    model: Literal["opus", "fable"] = "opus"
+    model: Literal["opus"] = "opus"  # ADR-0131: the Claude Fable family is never requested
 
 
 def require_subscription_owner(db: DB, principal: Principal) -> None:

@@ -42,8 +42,11 @@ LEGAL_TRANSITIONS: dict[ExecutionState, frozenset[ExecutionState]] = {
 # Reason codes that justify RUNNING -> BLOCKED (controller-enforced stop conditions, §22).
 # WORKER_BLOCKER: §21 "worker berhenti dan mengirim blocker/decision request" (a schema-valid worker report;
 # the task then waits for the owner, never for a tick).
+# SENSITIVE_CONTENT_BLOCKED (ADR-0127, aeos.broker.facade): an investigation run whose model request carried a
+# credential; the next hypothesis would be refused again, so the task waits for the owner.
 RUNNING_STOP_CODES = frozenset({"LEASE_LOST", "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "REASSIGNED",
-                                "CONTROLLER_SHUTDOWN", "POLICY_CHANGED", "WORKER_BLOCKER"})
+                                "CONTROLLER_SHUTDOWN", "POLICY_CHANGED", "WORKER_BLOCKER",
+                                "SENSITIVE_CONTENT_BLOCKED"})
 # Reason codes that justify leaving DONE (acceptance invalidated by a head/base/config/plan change).
 REOPEN_CODES = frozenset({"ACCEPTANCE_STALE"})
 

@@ -16,6 +16,7 @@ from aeos.core.errors import NotFound, PolicyDenied, ValidationFailed
 from aeos.core.timeutil import utcnow
 from aeos.cost import service
 from aeos.cost.ccusage import ccusage_estimate
+from aeos.cost.usage_report import build_report as build_usage_report
 from aeos.identity.facade import Principal
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
@@ -112,6 +113,18 @@ def list_quotas(db: DB, principal: CurrentPrincipal) -> dict[str, Any]:
     return {"items": service.list_quotas(db), "source": "quota_states (official / provider-header / observed-429)",
             "checked_at": utcnow().isoformat(), "mode": "LIVE",
             "note": "Sisa kuota langganan Max hanya ditampilkan bila sumber resmi tersedia; selain itu UNKNOWN."}
+
+
+@router.get("/api/usage/report")
+def usage_report(db: DB, principal: CurrentPrincipal, domain: ActiveDomain,
+                 month: str | None = Query(None, max_length=16)) -> dict[str, Any]:
+    """Owner request R34: the read-only usage value report (OpenCode Go allowance, OpenRouter free and paid use, work,
+    Claude). PERSONAL scope only: an OFFICE session is refused rather than shown PERSONAL figures (LESSONS L12)."""
+    if domain != Domain.PERSONAL:
+        raise PolicyDenied("the usage report covers the PERSONAL domain only; select PERSONAL to read it",
+                           code="USAGE_REPORT_PERSONAL_ONLY")
+    return build_usage_report(db, month=month, allowed_project_ids=principal.allowed_project_ids,
+                              cross_domain_visible=_cross_domain(principal))
 
 
 @router.post("/api/costs/native-estimate")

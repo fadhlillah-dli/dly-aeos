@@ -1,0 +1,238 @@
+"""The class a task gets and the class routing applies to it (ADR-0133).
+
+* DAG compile: a task with no stated class takes its project's class; a stated class can only raise it; an unknown
+  label (task or project) becomes the strictest class, RESTRICTED, with its own finding in the compile output.
+* Routing: the higher of the task's compiled class and its project's current class, so raising a project stops a
+  less restrictive route from taking its open tasks at once; a project that did not change still routes.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+
+from aeos.core.errors import Blocked
+from aeos.core.hashing import content_hash
+from aeos.models.planning import Plan, PlanVersion, TaskSpec
+from aeos.models.workforce import WorkerRun
+from aeos.planning import dag
+from aeos.routing import seed, service
+from aeos.routing.facade import select_route
+from tests.conftest import create_admin
+from tests.unit.test_planning_support import make_project, sample_content, task
+
+REASON = "owner raised the class after review (test)"
+
+
+# ---------------------------------------------------------------- DAG compile
+
+
+@pytest.mark.parametrize(("project_class", "stated", "expected"), [
+    ("PUBLIC", None, "PUBLIC"),            # unstated: the project's class, not a fixed INTERNAL
+    ("PUBLIC", "", "PUBLIC"),
+    ("PUBLIC", "INTERNAL", "INTERNAL"),    # a stated class raises it
+    ("INTERNAL", "PUBLIC", "INTERNAL"),    # and never lowers it below the project
+    ("INTERNAL", None, "INTERNAL"),
+    ("CONFIDENTIAL", "public", "CONFIDENTIAL"),
+    ("PUBLIC", "public", "PUBLIC"),        # case does not matter
+])
+def test_task_class_follows_the_project_and_a_stated_class_only_raises_it(project_class, stated, expected):
+    klass, finding = dag.task_classification(project_class, stated)
+    assert (klass, finding) == (expected, None)
+
+
+@pytest.mark.parametrize("stated", ["SECRET", "Top-Secret", 3, ["PUBLIC"], {"class": "PUBLIC"}])
+def test_an_unknown_task_class_is_the_strictest_with_its_own_finding(stated):
+    klass, finding = dag.task_classification("PUBLIC", stated)
+    assert klass == "RESTRICTED" and finding is not None
+    assert finding["code"] == "TASK_CLASS_UNKNOWN" and finding["applied"] == "RESTRICTED"
+    assert "compiled as RESTRICTED (the strictest class)" in finding["message"]
+
+
+def test_an_unknown_project_class_is_the_strictest_with_its_own_finding():
+    klass, finding = dag.task_classification("WEIRD", None)
+    assert klass == "RESTRICTED" and finding is not None and finding["code"] == "PROJECT_CLASS_UNKNOWN"
+    assert dag.task_classification("WEIRD", "PUBLIC")[0] == "RESTRICTED"  # a stated class never lowers it
+
+
+def _compile(db, project, tasks: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, str]]:
+    content = sample_content(tasks=tasks)
+    plan = Plan(project_id=project.id, domain=project.domain, title="t", state="APPROVED")
+    db.add(plan)
+    db.flush()
+    v = PlanVersion(plan_id=plan.id, project_id=project.id, domain=project.domain, version=1, content=content,
+                    manifest_hash=content_hash(content), mode="LIVE")
+    db.add(v)
+    db.flush()
+    plan.current_version_id = plan.approved_version_id = v.id
+    db.commit()
+    result = dag.compile_version(db, v, actor="tester")
+    db.commit()
+    classes = {t.task_key: t.data_classification
+               for t in db.scalars(select(TaskSpec).where(TaskSpec.plan_version_id == v.id))}
+    return result, classes
+
+
+def _unstated(key: str, **kw: Any) -> dict[str, Any]:
+    t = task(key, **kw)
+    del t["data_classification"]
+    return t
+
+
+def test_compile_gives_a_public_project_public_tasks_and_reports_an_unknown_class(db):
+    project = make_project(db, key="public-dag", classification="PUBLIC")
+    result, classes = _compile(db, project, [
+        _unstated("T1"),
+        task("T2", deps=["T1"], feature="F2", data_classification="INTERNAL"),
+        task("T3", feature="F2", data_classification="SECRET")])
+    assert classes == {"T1": "PUBLIC", "T2": "INTERNAL", "T3": "RESTRICTED"}
+    [finding] = result["classification_findings"]
+    assert (finding["code"], finding["task_key"], finding["stated"]) == ("TASK_CLASS_UNKNOWN", "T3", "SECRET")
+    assert "compiled as RESTRICTED" in finding["message"]
+
+
+def test_compile_keeps_the_project_floor_and_reports_nothing_when_every_class_is_known(db):
+    project = make_project(db, key="internal-dag", classification="INTERNAL")
+    result, classes = _compile(db, project, [task("T1", data_classification="PUBLIC"), _unstated("T2", feature="F2")])
+    assert classes == {"T1": "INTERNAL", "T2": "INTERNAL"}
+    assert "classification_findings" not in result
+
+
+# ---------------------------------------------------------------- routing
+
+
+@pytest.fixture
+def free_route(db, worker_keys, monkeypatch):
+    """The owner's decision C route: a free OpenRouter WORKER TRIAL that serves PUBLIC data only."""
+    from tests.unit.test_routing_fakes import install_fakes
+    from tests.unit.test_routing_free_worker import FREE, _worker
+
+    seed.run(db)
+    db.commit()
+    install_fakes(monkeypatch)
+    _worker(db)
+    return FREE
+
+
+def _open_task(db, project, key: str) -> TaskSpec:
+    from tests.unit.test_workforce_support import make_plan
+
+    _plan, _pv, [spec] = make_plan(db, project, [{"task_key": key, "data_classification": "PUBLIC"}])
+    return spec
+
+
+def test_a_raise_stops_a_public_only_route_from_taking_the_open_task_at_once(db, free_route):
+    from aeos.portfolio.reclassify import reclassify_project
+
+    admin = create_admin(db)
+    raised = make_project(db, key="raised-later", classification="PUBLIC")
+    steady = make_project(db, key="stays-public", classification="PUBLIC")
+    open_task, other = _open_task(db, raised, "open"), _open_task(db, steady, "steady")
+    # the open task's run; it does not hold the route here (model_route_key unset), so the selections below are about
+    # the class only, never "route busy"; the per-request check is given the route explicitly
+    run = WorkerRun(project_id=raised.id, domain="PERSONAL", execution_status="RUNNING", task_id=open_task.id)
+    db.add(run)
+    db.flush()
+    assert select_route(db, task=open_task).route.route_key == free_route
+    route = service.get_route(db, free_route)
+    assert service.free_worker_problem(db, route, run_id=run.id) is None
+
+    reclassify_project(db, project=raised, domain="PERSONAL", to="INTERNAL", reason=REASON, actor_user_id=admin.id)
+    db.flush()
+    with pytest.raises(Blocked) as ei:
+        select_route(db, task=open_task)
+    assert ei.value.code == "NO_ELIGIBLE_ROUTE" and ei.value.details["classification"] == "INTERNAL"
+    assert any("not allowed" in why for why in ei.value.details["rejected"][free_route])
+    # the per-request check of the broker refuses the running run's next model call as well
+    assert "the run's task is INTERNAL: decision C serves PUBLIC data only" in (
+        service.free_worker_problem(db, route, run_id=run.id) or "")
+    assert open_task.data_classification == "PUBLIC"  # the TaskSpec itself is unchanged (immutable)
+    # near miss: a project that did not change still routes its PUBLIC task to the PUBLIC-only route
+    assert select_route(db, task=other).route.route_key == free_route
+
+
+def test_a_lowered_project_never_relaxes_a_compiled_task(db, free_route):
+    """The other direction: the task's own class stays the floor (no silent downgrade of in-flight work)."""
+    from tests.unit.test_workforce_support import make_plan
+
+    project = make_project(db, key="lowered-later", classification="PUBLIC")
+    _plan, _pv, [spec] = make_plan(db, project, [{"task_key": "internal", "data_classification": "INTERNAL"}])
+    with pytest.raises(Blocked) as ei:
+        select_route(db, task=spec)
+    assert ei.value.details["classification"] == "INTERNAL"
+
+
+def test_a_raise_also_reaches_paid_admission(db, worker_keys, monkeypatch):
+    """ADR-0128 paid routes take INTERNAL tasks only: an INTERNAL task of a project raised to CONFIDENTIAL is refused."""
+    from aeos.portfolio.reclassify import reclassify_project
+    from aeos.routing import facade as routing
+    from tests.unit.test_routing_best_first import PAID, _paid
+    from tests.unit.test_routing_fakes import install_fakes
+    from tests.unit.test_routing_service import task as routing_task
+
+    seed.run(db)
+    db.commit()
+    install_fakes(monkeypatch)
+    _paid(db)
+    admin = create_admin(db)
+    project = make_project(db, key="paid-raised", classification="INTERNAL")
+    spec = routing_task(classification="INTERNAL")
+    spec.id, spec.project_id = "task-paid-raised", project.id
+    route = service.get_route(db, PAID)
+    before = routing.paid_admission(db, task=spec, route=route)
+    # near miss: an INTERNAL task of an INTERNAL project is a paid candidate (judged on escalation/overflow)
+    assert before is not None and before["data_classification"] == "INTERNAL" and "never runs" not in before["why"]
+    reclassify_project(db, project=project, domain="PERSONAL", to="CONFIDENTIAL", reason=REASON,
+                       actor_user_id=admin.id)
+    db.flush()
+    after = routing.paid_admission(db, task=spec, route=route)
+    assert after is not None and after["admitted"] is False and after["data_classification"] == "CONFIDENTIAL"
+    assert "a CONFIDENTIAL task never runs on a per-token paid route" in after["why"]
+
+
+# ---------------------------------------------------------------- one helper for every routing reader (ratchet)
+
+
+OWN_LABEL = "# own label (ADR-0133)"
+
+
+def _direct_readers(files: list[Any]) -> list[str]:
+    """Lines that read ``task.data_classification`` directly. Allowed: the helper itself, and a line that labels an
+    item with the task's own compiled class (marked ``# own label (ADR-0133)``) - never a decision where data may go."""
+    import re
+
+    pattern = re.compile(r"\btask\.data_classification\b")
+    return [f"{p}:{i}" for p in files if p.name != "task_class.py"
+            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+            if pattern.search(line) and OWN_LABEL not in line]
+
+
+def test_every_reader_of_a_task_class_goes_through_the_one_helper():
+    """A new reader of ``task.data_classification`` in routing, the context packs, the worker runtime, the task compiler
+    or the documentation engine would ignore a project raise or label a copy of older data with a lower task class
+    (ADR-0133 decisions 6, 12 and 18; reviews H1, M1 and F1)."""
+    from aeos.core.paths import repo_root
+
+    root = repo_root() / "backend" / "aeos"
+    files = [*sorted((root / "routing").glob("*.py")), root / "evaluation" / "executor.py",
+             *sorted((root / "knowledge").glob("*.py")), *sorted((root / "worker_runtime").glob("*.py")),
+             root / "planning" / "dag.py", *sorted((root / "docs_engine").glob("*.py"))]
+    assert len(files) > 25 and all(f.is_file() for f in files)
+    offenders = _direct_readers(files)
+    assert offenders == [], ("read a task's class through routing.facade.effective_task_class, or mark a line that "
+                             f"only labels an item with the task's own class '{OWN_LABEL}' (ADR-0133): {offenders}")
+
+
+def test_bite_the_ratchet_sees_a_direct_reader_and_spares_the_helper(tmp_path):
+    bad = tmp_path / "bad.py"
+    bad.write_text("klass = task.data_classification\n", encoding="utf-8")
+    ok = tmp_path / "ok.py"  # near miss: accounting by the compiled class (SQL) and the helper itself
+    ok.write_text("q = TaskSpec.data_classification == 'PUBLIC'\nk = effective_task_class(session, task)\n",
+                  encoding="utf-8")
+    helper = tmp_path / "task_class.py"
+    helper.write_text("own = task.data_classification\n", encoding="utf-8")
+    label = tmp_path / "packs.py"  # near miss: an item labelled with the task's own class, marked
+    label.write_text(f"add(classification=task.data_classification)  {OWN_LABEL}\n", encoding="utf-8")
+    assert _direct_readers([bad, ok, helper, label]) == [f"{bad}:1"]

@@ -8,6 +8,7 @@ only to already-approved routes; no silent paid fallback or supervisor downgrade
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -24,6 +25,8 @@ class RouteDecision:
     reason: str = ""
     # additive (wave 7): the RUNNING EvalRun whose exact route was selected for a TaskSpec bound to one of its slots
     eval_run_id: str | None = None
+    # additive (ADR-0128): why a per-token paid route was admitted (``reason`` ESCALATION or OVERFLOW), else None
+    paid_admission: dict[str, Any] | None = None
 
 
 def eligible_routes(
@@ -55,6 +58,29 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
     from aeos.routing.service import fallback_route as impl
 
     return impl(session, task=task, failed_route_key=failed_route_key)
+
+
+def effective_task_class(session: Session, task: TaskSpec) -> str:
+    """Additive (ADR-0133): the class routing applies to *task*, max(its compiled class, its project's current
+    class). Every reader that checks a route against a task's class uses it, so a project raise applies at once."""
+    from aeos.routing.task_class import effective_task_class as impl
+
+    return impl(session, task)
+
+
+def route_class_problem(route: ModelRoute, klass: str) -> str | None:
+    """Additive (ADR-0133): why *route* may not carry data of *klass* (allowed classes, PUBLIC-only terms), or None."""
+    from aeos.routing.task_class import route_class_problem as impl
+
+    return impl(route, klass)
+
+
+def run_class_problem(session: Session, route: ModelRoute, *, run_id: str | None) -> str | None:
+    """Additive (ADR-0133): the broker's per-request class check for any route - the run's task at its effective
+    class (a project raise applies at the next model call) must be data the route may carry; None = allowed."""
+    from aeos.routing.task_class import run_class_problem as impl
+
+    return impl(session, route, run_id=run_id)
 
 
 def terms_eligibility(route: ModelRoute, *, data_classification: str) -> list[str]:
@@ -137,6 +163,14 @@ def note_free_tier_rate_limited(session: Session, *, route_key: str, retry_after
 
     return impl(session, route_key=route_key, retry_after_seconds=retry_after_seconds, headers=headers, run_id=run_id,
                 source=source)
+
+
+def free_tier_status(session: Session, *, now: datetime | None = None) -> dict[str, Any]:
+    """The OpenRouter free-model limits in force and this instance's count of ``:free`` requests (last minute, current
+    UTC day), with its state OK / LIMIT_REACHED. Read-only (additive, owner request R34 usage report)."""
+    from aeos.routing.free_tier import status as impl
+
+    return impl(session, now=now)
 
 
 def free_tier_count_lock(session: Session) -> bool:
@@ -223,6 +257,15 @@ def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> di
     from aeos.routing.capacity import route_capacity as impl
 
     return impl(session, task=task, route=route)
+
+
+def paid_admission(session: Session, *, task: TaskSpec, route: ModelRoute) -> dict[str, Any] | None:
+    """ADR-0128 (additive): whether the per-token paid *route* may take *task* - ``admitted`` with ``reason``
+    ESCALATION or OVERFLOW, else ``code`` PAID_NOT_ADMITTED and ``why``. None for a route that is not per-token paid
+    (or a task bound to an evaluation slot). Read only."""
+    from aeos.routing.paid import paid_admission as impl
+
+    return impl(session, task, route)
 
 
 def reselect_allowed(session: Session, route_key: str) -> bool:

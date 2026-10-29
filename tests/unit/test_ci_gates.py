@@ -457,12 +457,13 @@ def test_the_aggregator_passes_only_when_every_needed_job_succeeded(tmp_path: Pa
 
 
 # The exact shard command: -n logical (one worker per logical CPU, "-n auto" counts physical cores), the same marker
-# selection the single backend job had, and the JUnit report the rebalancing script reads.
-SHARD_PYTEST = ('python -m pytest -q -m "not integration and not network" -n logical '
+# selection the single backend job had, a traceback of every thread for a test running over 5 minutes (a hang names
+# itself before the job limit; ADR-0115 amendment 2026-10-29 (2)), and the JUnit report the rebalancing script reads.
+SHARD_PYTEST = ('python -m pytest -q -m "not integration and not network" -n logical -o faulthandler_timeout=300 '
                 '--shard ${{ matrix.shard }}/${{ matrix.shards }} --junitxml=junit-backend.xml')
 # Shards per host OS (ADR-0115 amendment "rebalanced shards"): Windows jobs do not use the 5 macOS slots of GitHub
 # Free, so Windows gets 3; the macOS hosts stay at 2 each (7 macOS jobs already compete for those slots).
-SHARDS_PER_OS = {"windows-latest": 3, "macos-latest": 2, "macos-26-intel": 2}
+SHARDS_PER_OS = {"windows-latest": 3, "macos-latest": 2, "macos-26-intel": 3}
 
 
 def _shard_jobs(jobs: dict | None = None) -> dict[str, dict]:

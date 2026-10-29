@@ -562,7 +562,7 @@ def test_claude_review_receives_only_public_metadata_and_is_not_approval(db, pol
         return ClaudeResult(ok=True, structured={
             "review": {"summary": "ok"}, "verify": {"claims": [{"claim": "faster", "status": "UNKNOWN"}]},
             "verdict": "NOT-PROVEN", "recommendation": "TRIAL", "rationale": "needs trial"},
-            text="", model_requested="fable", model_resolved="claude-fable-5-1", engine_version="2.5",
+            text="", model_requested="opus", model_resolved="claude-opus-5-5", engine_version="2.5",
             session_id=None, usage={}, duration_ms=10)
 
     fake = types.ModuleType("aeos.claude_bridge.bridge")
@@ -594,7 +594,7 @@ def test_claude_review_not_sent_for_office_or_when_bridge_missing(db, policy, mo
 def test_claude_schema_mismatch_is_failed(db, monkeypatch):
     fake = types.ModuleType("aeos.claude_bridge.bridge")
     fake.run_structured = lambda req: ClaudeResult(ok=True, structured={"verdict": "PASS-PRODUCTION"}, text="",
-                                                   model_requested="fable", model_resolved=None, engine_version=None,
+                                                   model_requested="opus", model_resolved=None, engine_version=None,
                                                    session_id=None, usage={}, duration_ms=1)
     monkeypatch.setitem(sys.modules, "aeos.claude_bridge.bridge", fake)
     p = review(db, create(db, kind="ADD", sources=["https://github.com/a/d"]), with_claude=True)

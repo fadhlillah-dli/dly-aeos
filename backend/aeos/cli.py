@@ -45,6 +45,7 @@ CLI_MODULES: list[tuple[str, str]] = [
     ("aeos.docs_engine.cli", "docs"),
     ("aeos.delivery.cli", "delivery"),
     ("aeos.cost.cli", "cost"),
+    ("aeos.cost.usage_cli", "usage"),
     ("aeos.evaluation.cli", "eval"),
     ("aeos.proposals.cli", "proposal"),
     ("aeos.research.cli", "research"),
