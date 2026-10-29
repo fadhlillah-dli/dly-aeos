@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     # path inside the repository is refused when the reference is verified (aeos.policy.snapshot).
     mci_source_path: Path | None = None
 
+    # Owner request R34 (2026-10-28) usage report: an optional ccusage JSON export (``ccusage daily --json`` written to
+    # a file by the owner). ``aeos usage report`` only reads it (token totals; never a dollar figure, §42). Unset = the
+    # report says that Claude Max use is measured by ccusage outside AEOS.
+    ccusage_export_path: Path | None = None
+
     platform_repo_slug: str = "fadhlillah-dli/dly-aeos"
     # §06 + owner rule 2026-10-26 (AGENTS.md invariant 11): the commit identity per code host, keyed by provider -
     # ``{github: {name, email}, bitbucket: {name, email}}`` (the owner's GitHub identity and the company identity,
