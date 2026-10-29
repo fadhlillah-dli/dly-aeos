@@ -48,6 +48,21 @@ def _te(db, task_id: str) -> TaskExecution:
     return db.scalar(select(TaskExecution).where(TaskExecution.task_id == task_id))
 
 
+def _merge_accepted_change(monkeypatch, ws) -> None:
+    """The owner merges the task's pull request and the checkout is updated: the run's branch is merged into the
+    repository the workspace was created from, which is the source checkout the dependency gate reads (L32)."""
+    import subprocess
+
+    from aeos.worker_runtime import executor
+
+    monkeypatch.setattr(executor, "resolve_repository", lambda session, project: (ws.source_repo, True))
+    identity = ["-c", "user.email=owner@example.invalid", "-c", "user.name=owner"]
+    subprocess.run(["git", "-C", str(ws.source_repo), "fetch", "-q", str(ws.git_dir), ws.branch], check=True,
+                   capture_output=True)
+    subprocess.run(["git", *identity, "-C", str(ws.source_repo), "merge", "-q", "--no-ff", "FETCH_HEAD", "-m",
+                    "Merge pull request"], check=True, capture_output=True)
+
+
 def _row(client: AuthedClient, run_id: str) -> dict:
     return next(r for r in client.get("/api/runs").json()["items"] if r["run_id"] == run_id)
 
@@ -217,7 +232,12 @@ def test_changed_grader_or_moved_head_makes_acceptance_stale(personal_client: Au
     from aeos.workforce.loop import SchedulerLoop
 
     SchedulerLoop(get_settings()).tick(start_threads=False, admit=False)
-    assert _te(db, t2).state == "READY", "dependency accepted -> unblocked"
+    blocked = _te(db, t2)
+    # L32: accepted is not merged yet, so T2 would start from a base without T1's change
+    assert (blocked.state, blocked.reason_code) == ("BLOCKED", "DEPENDENCY_NOT_IN_BASE"), blocked.reason
+    _merge_accepted_change(monkeypatch, w["workspace"])
+    SchedulerLoop(get_settings()).tick(start_threads=False, admit=False)
+    assert _te(db, t2).state == "READY", "dependency accepted and merged -> unblocked"
     # the relevant base moved (new commits on the integration branch) -> not valid for the new base
     assert verification.acceptance_is_valid(db, w["task_id"], base_commit="f" * 40) is False
     # the grader changed (new trusted suite) -> the accepted identity no longer holds
