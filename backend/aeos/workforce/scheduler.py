@@ -55,7 +55,8 @@ DEFAULT_MAX_TOKENS = 2_000_000
 
 # Reason codes that keep a task waiting in READY (re-evaluated every tick, no state churn).
 WAIT_CODES = frozenset({"SCHEDULING_PAUSED", "CONCURRENCY_CAP", "SHARED_WRITE_CONFLICT", "PLAN_NOT_APPROVED",
-                        "DEPENDENCY_NOT_ACCEPTED", "AGENT_DISABLED", "OFFICE_DENIED", "CAPABILITY_NOT_READY",
+                        "DEPENDENCY_NOT_ACCEPTED", "DEPENDENCY_NOT_IN_BASE", "AGENT_DISABLED", "OFFICE_DENIED",
+                        "CAPABILITY_NOT_READY",
                         "SANDBOX_NOT_READY", "ROUTE_INELIGIBLE", "COST_UNKNOWN", "BUDGET_EXCEEDED",
                         "MODULE_UNAVAILABLE", "VERIFIER_UNAVAILABLE", "SIDE_EFFECT_UNRECONCILED",
                         "LEASE_LOST_PROCESS_ALIVE", "QUOTA_EXHAUSTED", "DOCS_NOT_READY",
@@ -749,6 +750,16 @@ def _fan_out_problem(task: TaskSpec) -> str | None:
     return None
 
 
+def _dependency_not_in_base(session: Session, task: TaskSpec, dep_key: str,
+                            dep_te: TaskExecution) -> tuple[str, str] | None:
+    """A dependent task starts from the HEAD of the project's source checkout (its ``base_commit`` is pinned at the
+    first lease), and a dependency is DONE at acceptance, before its pull request is merged. So the dependency's
+    accepted head must already be in that HEAD, or the dependent would build on a base without it (LESSONS L32)."""
+    run = session.get(WorkerRun, dep_te.accepted_run_id) if dep_te.accepted_run_id else None
+    ok, why = ext.dependency_in_base(session, task, run.head_commit if run is not None else None)
+    return None if ok else ("DEPENDENCY_NOT_IN_BASE", f"dependency {dep_key}: {why}")
+
+
 def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, approved_ok: bool, approval_reason: str,
                        by_key: dict[str, TaskSpec], te_by_task: dict[str, TaskExecution],
                        dag: dict[str, str]) -> list[tuple[str, str]]:
@@ -775,6 +786,10 @@ def _readiness_reasons(session: Session, te: TaskExecution, task: TaskSpec, *, a
         ok, why = ext.acceptance_valid(session, dep)
         if not ok:
             reasons.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key}: {why}"))
+            continue
+        not_in_base = _dependency_not_in_base(session, task, dep_key, dep_te)
+        if not_in_base:
+            reasons.append(not_in_base)
     fan = _fan_out_problem(task)
     if fan:
         reasons.append(("FAN_OUT_FORBIDDEN", fan))
@@ -915,7 +930,8 @@ def refresh_readiness(session: Session, plan_version_id: str, *, actor: str = "s
         else:  # READY: never moves back (no READY->BLOCKED edge in §14) — admission re-checks
             if reasons:
                 _set_wait_reason(session, te, reasons[0][0], text)
-            elif te.reason_code in ("PLAN_NOT_APPROVED", "DEPENDENCY_NOT_ACCEPTED", "INVALID_DAG"):
+            elif te.reason_code in ("PLAN_NOT_APPROVED", "DEPENDENCY_NOT_ACCEPTED", "DEPENDENCY_NOT_IN_BASE",
+                                    "INVALID_DAG"):
                 _set_wait_reason(session, te, "", "")
             counts["unchanged"] += 1
         tes[t.id] = get_te(session, t.id)
@@ -1513,6 +1529,10 @@ def admission_check(session: Session, task_id: str) -> Admission:
             dep and dep_te and dep_te.state == S.DONE.value and ext.acceptance_valid(session, dep)[0])
         if not ok:
             adm.waits.append(("DEPENDENCY_NOT_ACCEPTED", f"dependency {dep_key} not DONE with valid acceptance"))
+        elif inv_dep is None and dep_te is not None:
+            not_in_base = _dependency_not_in_base(session, task, dep_key, dep_te)
+            if not_in_base:
+                adm.waits.append(not_in_base)
     if te.attempts_used >= max_attempts(task, te):
         adm.blocks.append(("ATTEMPTS_EXHAUSTED", f"{te.attempts_used}/{max_attempts(task, te)} attempts used"))
     quota_bound = quota_stop_problem(session, task, te)

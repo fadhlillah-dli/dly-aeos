@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import re
 
-from aeos.core.tool_names import CANONICAL_WORKER_TOOLS
+from aeos.core.tool_names import CANONICAL_WORKER_TOOLS, VERIFIER_SUITES
 from aeos.planning import prompts
+from aeos.verification.verifier import SUITE_DIRS
 from aeos.worker_runtime.opencode import BASE_ALLOW
+from aeos.workforce.scheduler import WAIT_CODES
 
 
 def _capability_line() -> str:
@@ -35,4 +37,24 @@ def test_the_prompt_forbids_command_output_tasks_and_names_the_tool_vocabulary()
 
 
 def test_the_prompt_revision_moved_with_the_new_rule():
-    assert prompts.PROMPT_REVISION == "planning-prompts/3"
+    assert prompts.PROMPT_REVISION == "planning-prompts/4"
+
+
+def _verification_line() -> str:
+    lines = [p for p in prompts.FIXED_POLICY if p.startswith("Verification facts")]
+    assert len(lines) == 1, "the planning prompt must state the verification facts exactly once"
+    return lines[0]
+
+
+def test_the_prompt_names_exactly_the_suites_the_verifier_selects():
+    """Red before L29 strike 3: plans wrote free-text suites the verifier cannot select, so no worker test ran."""
+    m = re.search(r"In verifier_policy\.suites use only (.+?)\.", _verification_line())
+    assert m, "the verification line must name the suites"
+    assert [s.strip() for s in m.group(1).split(" and ")] == list(VERIFIER_SUITES)
+    assert set(VERIFIER_SUITES) == set(SUITE_DIRS)
+
+
+def test_the_prompt_states_the_head_only_tests_and_the_dependency_base_gate():
+    line = _verification_line()
+    assert "on the head only" in line and "NOT_PROVEN" in line
+    assert "DEPENDENCY_NOT_IN_BASE" in line and "DEPENDENCY_NOT_IN_BASE" in WAIT_CODES

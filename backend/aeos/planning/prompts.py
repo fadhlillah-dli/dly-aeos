@@ -19,7 +19,7 @@ from typing import Any
 from aeos.core.hashing import sha256_text
 from aeos.core.redaction import redact_text
 
-PROMPT_REVISION = "planning-prompts/3"
+PROMPT_REVISION = "planning-prompts/4"
 
 FIXED_POLICY = [
     "Human-only AUTH: plan approval, publication approval, merge to main, production deployment, risk acceptance and "
@@ -36,6 +36,11 @@ FIXED_POLICY = [
     "The independent verifier runs the trusted suite on each task's base commit and head automatically (that is the "
     "baseline). Never plan a task whose deliverable is the output of running a command: such steps are maintainer or "
     "runbook steps outside the task DAG. In tools_allowed use only fs.read, fs.write:allowed_paths and tests.run.",
+    "Verification facts (LESSONS L29, L32): the verifier also runs the candidate's own tests under tests/unit and "
+    "tests/integration on the head only; nothing runs a new test on the base, so a criterion that a new test fails "
+    "on the base is stated as NOT_PROVEN unless a reviewer checks it. In verifier_policy.suites use only unit and "
+    "integration. A dependent task starts only when its dependencies' accepted changes are merged into the "
+    "repository head it starts from (DEPENDENCY_NOT_IN_BASE until then), so a dependency's contract is in its base.",
     "Contract-first: when tasks build against the same API, schema, design tokens or shared interface, declare it in "
     "interface_contracts; every consumer task depends on the provider task, so parallel work starts only after the "
     "contract is accepted. Do not split one feature into a frontend-only and a backend-only task without a contract.",

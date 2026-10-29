@@ -134,3 +134,25 @@ def integrity_hold(session: Any, *, domain: str | None = None) -> dict[str, Any]
     from aeos.worker_runtime.integrity import hold_view as impl
 
     return impl(session, domain=domain)
+
+
+def source_head_contains(session: Any, project_id: str, commit: str | None) -> tuple[bool, str]:
+    """Whether ``commit`` is already in the HEAD of the project's source checkout, the base a new run of the project
+    starts from (§21; LESSONS L32). ``(False, why)`` when it is not, is unknown there or cannot be checked (fail
+    closed). Added 2026-10-29; existing signatures unchanged."""
+    from aeos.models.portfolio import Project
+    from aeos.worker_runtime import executor, workspace
+
+    if not commit:
+        return False, "no accepted head commit is recorded"
+    project = session.get(Project, project_id)
+    if project is None:
+        return False, "project not found"
+    try:
+        repo, _isolated = executor.resolve_repository(session, project)
+        if workspace.head_contains(repo, commit):
+            return True, ""
+    except (executor.StartError, workspace.WorkspaceError) as exc:
+        return False, f"the source checkout cannot be checked ({exc})"
+    return False, (f"its accepted head {commit[:12]} is not in the source checkout HEAD yet: merge its pull request "
+                   "and update the checkout")

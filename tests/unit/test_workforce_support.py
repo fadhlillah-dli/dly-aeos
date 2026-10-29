@@ -45,6 +45,7 @@ class FakeModules:
     interlock_allowed: bool = True
     evidence: bool = True
     route_use_problem: str | None = None
+    in_base: bool = True  # every accepted dependency's head is in the source checkout HEAD
     calls: dict[str, int] = field(default_factory=dict)
 
     def _count(self, name: str) -> None:
@@ -217,6 +218,13 @@ class FakeModules:
 
             monkeypatch.setattr(psutil, "virtual_memory",
                                 lambda: types.SimpleNamespace(total=32 * 1024 ** 3, available=16 * 1024 ** 3))
+        if "dependency_in_base" not in skip:
+            # L32: whether a dependency's accepted head is in the source checkout HEAD is a git question about the
+            # real checkout; scheduler tests state it (tests/unit/test_dependency_base.py covers the git side).
+            from aeos.workforce import integrations
+
+            monkeypatch.setattr(integrations, "dependency_in_base",
+                                lambda session, task, head: (fake.in_base, "" if fake.in_base else "fake: not merged"))
         return self
 
 

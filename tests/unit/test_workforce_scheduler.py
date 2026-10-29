@@ -127,6 +127,23 @@ def test_dependencies_need_done_and_valid_acceptance(db, fakes):
     assert scheduler.get_te(db, b.id).state == "READY"
 
 
+def test_a_dependent_waits_until_the_accepted_dependency_is_in_its_base(db, fakes):
+    """L32: a dependency is DONE at acceptance, before its pull request is merged, and the dependent starts from the
+    source checkout's HEAD; it waits (DEPENDENCY_NOT_IN_BASE) until the accepted change is there."""
+    _plan, pv, specs = _ready_env(db, fakes, [{"task_key": "a"}, {"task_key": "b", "depends_on": ["a"]}])
+    a, b = specs
+    db.execute(update(TaskExecution).where(TaskExecution.task_id == a.id).values(state="DONE"))
+    fakes.accepted.add(a.id)
+    fakes.in_base = False
+    scheduler.refresh_readiness(db, pv.id)
+    tb = scheduler.get_te(db, b.id)
+    assert tb.state == "BLOCKED" and tb.reason_code == "DEPENDENCY_NOT_IN_BASE"
+    assert "dependency a: fake: not merged" in tb.reason
+    fakes.in_base = True  # near miss: merged and pulled
+    scheduler.refresh_readiness(db, pv.id)
+    assert scheduler.get_te(db, b.id).state == "READY"
+
+
 def test_external_tracker_done_never_unlocks(db, fakes):
     """§50 'Jira/GitHub issue Done tanpa evidence runtime' -> tidak membuka dependency."""
     _plan, pv, specs = _ready_env(db, fakes, [{"task_key": "a"}, {"task_key": "b", "depends_on": ["a"]}])

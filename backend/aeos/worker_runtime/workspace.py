@@ -284,6 +284,14 @@ def resolve_base(repo: Path, base_commit: str | None) -> str:
     return out
 
 
+def head_contains(repo: Path, commit: str) -> bool:
+    """Whether ``commit`` is in the history of ``repo``'s HEAD, the base a new run starts from; a commit the
+    repository does not know (not fetched or merged yet) is not."""
+    if not _SHA.match(commit):
+        return False
+    return git(["merge-base", "--is-ancestor", commit, "HEAD"], cwd=repo, check=False).returncode == 0
+
+
 def create_workspace(
     layout: DataLayout, *, domain: Domain, project_key: str, run_id: str, task_key: str, source_repo: Path,
     base_commit: str | None, isolated: bool,
