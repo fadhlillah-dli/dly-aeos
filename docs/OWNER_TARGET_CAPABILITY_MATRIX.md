@@ -13,7 +13,7 @@ OWN/AUTH/CAP/ENF, §04 domain profiles, §08 capability gates.
 | Capability | Domain | Owner / authority | Office gate | What it covers |
 |---|---|---|---|---|
 | `CAN_OPEN_DASHBOARD` | platform | SUPER_ADMIN of the domain | no | Membuka dashboard lokal: Server lokal, database, auth bootstrap dan build Control Center. |
-| `CAN_PLAN_PERSONAL` | PERSONAL | SUPER_ADMIN of the domain | no | Merencanakan proyek PERSONAL: Planning Opus/Fable lewat Claude Code resmi (Max); tanpa bridge terbukti hanya paket manual. |
+| `CAN_PLAN_PERSONAL` | PERSONAL | SUPER_ADMIN of the domain | no | Merencanakan proyek PERSONAL: Planning empat tahap Opus lewat Claude Code resmi (Max); tanpa bridge terbukti hanya paket manual. |
 | `CAN_PLAN_OFFICE` | OFFICE | SUPER_ADMIN of the domain + company authorisation (POLICY decision) | yes | Merencanakan proyek OFFICE: Butuh otorisasi perusahaan atas data/provider (§23, §51 P1). |
 | `CAN_PUBLISH_PERSONAL` | PERSONAL | SUPER_ADMIN of the domain | no | Publikasi dokumen/tiket PERSONAL: Interlock external-write (bootstrap, write enablement manusia), token Google + GitHub dan akses target yang terbukti; setiap write tetap butuh approval versi/hash. Per proyek: root Drive proyek dan scope token. |
 | `CAN_RUN_WORKER` | platform | SUPER_ADMIN of the domain | no | Menjalankan worker dalam sandbox: OpenCode terpasang, agent opencode-implementer aktif, sandbox memenuhi ADR-0051 (live), route APPROVED/TRIAL eligible, budget admission sehat, kunci via broker dan verifier independen. |

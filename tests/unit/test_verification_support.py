@@ -150,6 +150,7 @@ def make_candidate(settings, world: World, *, head_files: dict[str, str | None],
 
 def bind_candidate(db, world: World, cand: Path, base: str, head: str) -> None:
     world.run.workspace_ref = str(cand)
+    world.run.git_dir_ref = str(cand / ".git")  # what the runtime records: the trusted git dir (ADR-0132)
     world.run.base_commit = base
     world.run.head_commit = head
     db.commit()
@@ -232,7 +233,8 @@ BASE = "b" * 40
 
 def record_verification(db, world: World, *, status: str = "PASS", head: str = HEAD, base: str = BASE,
                         artifact_hash: str = "sha256:" + "c" * 64, changed: list[str] | None = None,
-                        mode: str = "LIVE", config_hash: str | None = None, ruff: str = "PASS", leak: str = "PASS"):
+                        mode: str = "LIVE", config_hash: str | None = None, ruff: str = "PASS", leak: str = "PASS",
+                        numstat: dict[str, dict[str, int | None]] | None = None):
     """Record evidence the way the verifier does (origin verifier) without running subprocesses."""
     from aeos.verification import collector
     from aeos.verification.scope import check_scope
@@ -249,7 +251,9 @@ def record_verification(db, world: World, *, status: str = "PASS", head: str = H
                   subject_id=world.run.id, project_id=world.project.id, domain=world.project.domain,
                   run_id=world.run.id, task_id=world.task.id, environment=env, mode=mode)
     sc = collector.collect_evidence(db, kind="SCOPE_CHECK", claim="scope", content={**scope.to_dict(),
-                                    "name_status": [{"status": "A", "path": p} for p in changed], "numstat": {}},
+                                    "name_status": [{"status": "A", "path": p} for p in changed],
+                                    "numstat": numstat if numstat is not None
+                                    else {p: {"added": 1, "deleted": 0} for p in changed}},
                                     evidence_level="E1", **common)
     df = collector.collect_evidence(db, kind="DIFF", claim="diff", content="+++ b/backend/extra.py\n+X = 1\n",
                                     evidence_level="E1", **common)
@@ -274,14 +278,14 @@ NR_COVERED = {k: {"status": "COVERED", "note": "ok"} for k in (
 
 def make_review(db, world: World, report, *, verdict: str = "PASS-CONTROLLED", status: str = "COMPLETED",
                 mode: str = "LIVE", target_hash: str | None = None, kind: str = "CLAUDE",
-                non_regression: dict[str, Any] | None = None, model_resolved: str | None = "claude-fable-5-1"):
+                non_regression: dict[str, Any] | None = None, model_resolved: str | None = "claude-opus-5-5"):
     from aeos.models.evidence import ReviewRecord
 
     rec = ReviewRecord(target_type="worker_run", target_id=world.run.id,
                        target_hash=target_hash or report.environment["artifact_hash"], project_id=world.project.id,
                        domain=world.project.domain, run_id=world.run.id, task_id=world.task.id,
                        reviewer_kind=kind, verdict=verdict, status=status, mode=mode,
-                       model_requested="fable", model_resolved=model_resolved,
+                       model_requested="opus", model_resolved=model_resolved,
                        non_regression=non_regression if non_regression is not None else NR_COVERED)
     db.add(rec)
     db.commit()
@@ -306,7 +310,7 @@ def review_payload(verdict: str = "PASS-CONTROLLED", findings: list[dict[str, An
     }
 
 
-def claude_envelope(payload: dict[str, Any], model: str = "claude-fable-5-1") -> dict[str, Any]:
+def claude_envelope(payload: dict[str, Any], model: str = "claude-opus-5-5") -> dict[str, Any]:
     """The `claude -p --output-format json` result envelope of a manual package run (proves the model)."""
     import json
 
@@ -342,10 +346,10 @@ class FakeBridge:
 
 
 def claude_result(structured: dict[str, Any] | None, *, ok: bool = True, quota: bool = False, mode: str = "NATIVE",
-                  model: str | None = "claude-fable-5-1", error_code: str | None = None):
+                  model: str | None = "claude-opus-5-5", error_code: str | None = None):
     from aeos.claude_bridge.facade import ClaudeResult
 
-    return ClaudeResult(ok=ok, structured=structured, text="", model_requested="fable", model_resolved=model,
+    return ClaudeResult(ok=ok, structured=structured, text="", model_requested="opus", model_resolved=model,
                         engine_version="2.1.0", session_id="s1", usage={}, duration_ms=5, error_code=error_code,
                         quota_exhausted=quota, mode=mode)
 

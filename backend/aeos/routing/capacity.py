@@ -3,9 +3,11 @@
 The owner's words (2026-10-28): "best models first, the others after; use LiveBench or other accountable sources; the
 best available models run in parallel, matched to each role's needs". ``service.select_route`` ranks the routes that
 pass every hard filter (tier -> eval -> the agent's ``preferred_routes`` position -> priority -> key) and then takes the
-first one this module does not SKIP for load. A skip is never a failure and never a paid route: the next ranked route is
-tried, and after a skip only a route with no marginal cost (free, a loopback LOCAL route, or a SUBSCRIPTION route within
-its plan) may be chosen; otherwise the task waits (``ROUTE_CAPACITY``).
+first one this module does not SKIP for load. A skip is never a failure: the next ranked route is tried, and after a
+skip only a route with no marginal cost (free, a loopback LOCAL route, or a SUBSCRIPTION route within its plan) may be
+chosen - or, since ADR-0128, a per-token paid route that ``paid.paid_admission`` admits for an INTERNAL task (OVERFLOW:
+every $0-marginal route is skipped or limited; ESCALATION: two quality failures); otherwise the task waits
+(``ROUTE_CAPACITY``).
 
 Skips (the reason code leads the rejection text; a reason never carries allowance figures, they span domains):
 
@@ -60,6 +62,7 @@ from aeos.models.planning import TaskSpec
 from aeos.models.routing import ModelRoute
 from aeos.models.workforce import WorkerRun
 from aeos.routing import free_tier
+from aeos.routing.task_class import effective_task_class
 
 ROUTE_BUSY = "ROUTE_BUSY"
 ALLOWANCE_FIT = "ALLOWANCE_FIT"
@@ -344,7 +347,8 @@ def capacity_skip(session: Session, route: ModelRoute, *, task: TaskSpec, runs: 
     busy = busy_problem(session, route, runs, settings)
     if busy:
         return ROUTE_BUSY, busy
-    fit = allowance_fit(session, route, role=task.role_key, data_classification=task.data_classification, runs=runs,
+    fit = allowance_fit(session, route, role=task.role_key, data_classification=effective_task_class(session, task),
+                        runs=runs,
                         settings=settings)
     if fit is not None and fit.get("skip"):
         code, why = fit["skip"]
@@ -366,7 +370,8 @@ def route_capacity(session: Session, *, task: TaskSpec, route: ModelRoute) -> di
     if busy_problem(session, route, runs, settings) is not None:
         out["wait"] = {"code": CODE_CAPACITY, "reason": f"{ROUTE_BUSY}: route {route.route_key} or its provider group "
                                                         "is at its concurrency cap; the task waits - never a paid route"}
-    fit = allowance_fit(session, route, role=task.role_key, data_classification=task.data_classification, runs=runs,
+    fit = allowance_fit(session, route, role=task.role_key, data_classification=effective_task_class(session, task),
+                        runs=runs,
                         settings=settings)
     if fit is not None:
         skip = fit.pop("skip", None)

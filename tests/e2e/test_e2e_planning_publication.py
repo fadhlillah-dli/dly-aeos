@@ -141,7 +141,7 @@ def test_planning_to_publication_end_to_end(world):
     assert detail["state"] == "READY_FOR_HUMAN_REVIEW", detail["state_reason"]
     calls = claude.calls()
     assert [x["stage"] for x in calls] == ["PRIMARY_PLANNING", "CHALLENGE_REVIEW", "SYNTHESIS", "FINAL_REVIEW"]
-    assert [x["model"] for x in calls] == ["opus", "fable", "opus", "fable"]
+    assert [x["model"] for x in calls] == ["opus", "opus", "opus", "opus"]  # ADR-0131: never fable
     for x in calls:
         assert "--bare" not in x["argv"] and "ANTHROPIC_API_KEY" not in x["env"]
         assert "Brief: AEOS publication slice" not in " ".join(x["argv"])  # prompt only via stdin
@@ -149,7 +149,7 @@ def test_planning_to_publication_end_to_end(world):
     for req in world["requests"]:  # every request carries the human-selected domain and the project
         assert req.domain == "PERSONAL" and req.project_id == pid and req.context_files == []
     runs = list(db.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan_id)))
-    assert {r.model_resolved for r in runs} == set(RESOLVED.values()) and {r.mode for r in runs} == {"NATIVE"}
+    assert {r.model_resolved for r in runs} == {RESOLVED["opus"]} and {r.mode for r in runs} == {"NATIVE"}  # ADR-0131
     usage = list(db.scalars(select(UsageLedgerEntry).where(UsageLedgerEntry.category == "NATIVE_CLAUDE")))
     assert len(usage) == 4
     assert all(u.domain == "PERSONAL" and u.project_id == pid and u.cost_usd is None for u in usage)  # §42

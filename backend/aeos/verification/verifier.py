@@ -567,7 +567,7 @@ class _Verifier:
             self.env_identity["suite_hash"] = out.suite_hash
             policy = dict(task.verifier_policy or {})
             limits = VerifierLimits.from_policy(policy)
-            git = self._git(candidate, limits)
+            git = self._git(candidate, limits, run)
             self.git, self.suite_kind = git, trusted_suite.kind
             self._resolve_commits(git, run, task)
             diff = self._diff_and_scope(git, task, project)
@@ -694,13 +694,25 @@ class _Verifier:
         if candidate == trusted_root or trusted_root in candidate.parents or candidate in trusted_root.parents:
             raise _Blocked("TRUST_ZONE_OVERLAP", "candidate workspace overlaps the trusted controller checkout (§09)")
 
-    def _git(self, candidate: Path, limits: VerifierLimits) -> GitReader:
+    def _git(self, candidate: Path, limits: VerifierLimits, run: WorkerRun) -> GitReader:
+        """Git reads of the candidate through the trusted git dir the runtime recorded (owner rule R44, ADR-0132):
+        the work tree's ``.git`` pointer is worker-editable and never followed (a planted git dir could borrow the
+        trusted objects through alternates and add its own attributes or replace refs). Missing: BLOCKED. A git dir
+        whose replace refs, grafts or ``info/attributes`` could change what the reads show: BLOCKED."""
+        git_dir = Path(run.git_dir_ref) if run.git_dir_ref else None
+        if git_dir is None or not git_dir.is_dir():
+            raise _Blocked("GIT_DIR_UNKNOWN", "the runtime recorded no trusted git dir for the candidate; the "
+                                              "worker-editable .git pointer of the work tree is never followed")
         try:
-            git = GitReader(candidate, timeout=limits.git_timeout)
+            git = GitReader(candidate, timeout=limits.git_timeout, git_dir=git_dir)
             if not git.is_repository():
                 raise _Blocked("CANDIDATE_NOT_GIT", "candidate workspace is not a git repository")
+            problem = git.integrity_problem()
         except GitError as exc:
             raise _Blocked("GIT_UNAVAILABLE", str(exc)) from exc
+        if problem:
+            raise _Blocked("GIT_CONTROL_UNTRUSTED", f"the candidate's git dir could change what the verifier and "
+                                                    f"the reviewer see: {problem}")
         return git
 
     def _resolve_commits(self, git: GitReader, run: WorkerRun, task: TaskSpec) -> None:
@@ -718,8 +730,9 @@ class _Verifier:
                 out.not_proven.append(f"head commit was not recorded by the runtime; verifier used the tip of "
                                       f"branch {run.branch}")
             else:
-                out.head_commit = git.resolve_commit("HEAD")
-                out.not_proven.append("head commit was not recorded by the runtime; verifier used candidate HEAD")
+                # the trusted git dir's HEAD is not the candidate's (a worktree shares the owner's repository): no
+                # recorded head and no task branch is no identity at all
+                raise _Blocked("HEAD_UNKNOWN", "the runtime recorded neither the head commit nor the task branch")
             out.tree_hash = git.tree_of(out.head_commit)
             if not git.is_ancestor(out.base_commit, out.head_commit):
                 # base..head is then not "the worker's change": the diff/scope would also contain the
@@ -733,6 +746,16 @@ class _Verifier:
 
     def _diff_and_scope(self, git: GitReader, task: TaskSpec, project: Project) -> str:
         out = self.out
+        try:
+            submodules = git.gitlinks(out.head_commit or "")
+        except GitError as exc:
+            raise _Blocked("DIFF_FAILED", str(exc)) from exc
+        if submodules:
+            # owner rule R44 (ADR-0132): a submodule's content is another repository's; settings such as
+            # ``ignore = all`` hide even the pointer change from a diff, and the reviewer could not see what it points to
+            raise _Blocked("SUBMODULE_UNSUPPORTED", f"the candidate's head contains submodule entries "
+                                                    f"({', '.join(submodules[:5])}); submodules are not supported for "
+                                                    "worker candidates")
         try:
             changed = git.changed_files(out.base_commit or "", out.head_commit or "")
             stats = git.numstat(out.base_commit or "", out.head_commit or "")
@@ -825,10 +848,7 @@ class _Verifier:
 
     def _binary_paths(self) -> list[str]:
         """Added/modified files git reports as binary (numstat ``-``): invisible to the added-line scan."""
-        status_by_path = {p: st for st, p in self.changed_entries}
-        return sorted(p for p, s in self.numstat.items()
-                      if s.get("added") is None and s.get("deleted") is None
-                      and not status_by_path.get(p, "").startswith("D"))
+        return scope.binary_changed_paths(self.changed_entries, self.numstat)
 
     def _static_scans(self, diff_text: str, snapshot: Path | None) -> None:
         lines = scope.added_lines(diff_text)

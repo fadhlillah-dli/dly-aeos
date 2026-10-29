@@ -73,10 +73,32 @@ def test_every_request_carries_domain_and_project_and_usage_is_native(db, owner,
     assert len(usage) == 4 and {u.category for u in usage} == {"NATIVE_CLAUDE"}
     assert all(u.domain == "PERSONAL" and u.cost_usd is None and u.details["billing"] == "SUBSCRIPTION"
                for u in usage)
-    assert {u.route_key for u in usage} == {"claude-native/opus", "claude-native/fable"}
+    assert {u.route_key for u in usage} == {"claude-native/opus"}  # ADR-0131: every stage is opus, never fable
     for run in db.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan.id)):
         trace = (settings.data_dir / run.trace_ref).read_text(encoding="utf-8")
         assert "costUSD" not in trace and "total_cost_usd" not in trace  # §42: never dollars
+
+
+def test_each_stage_is_a_separate_invocation_in_a_fresh_context(db, owner, claude):
+    """ADR-0131: with one model family at every stage, the Challenger's and the Final Reviewer's independence comes
+    from a fresh context per stage: one official-binary process per stage, each in its own new supervisor directory,
+    with --no-session-persistence and no flag that resumes or names an earlier session, and four distinct sessions."""
+    plan = _plan(db, owner)
+    service.run_pipeline(db, plan.id, actor=owner.id)
+    db.refresh(plan)
+    assert plan.state == "READY_FOR_HUMAN_REVIEW", plan.state_reason
+    calls = claude.calls()
+    assert [c["stage"] for c in calls] == ["PRIMARY_PLANNING", "CHALLENGE_REVIEW", "SYNTHESIS", "FINAL_REVIEW"], \
+        "each planning stage must be exactly one bridge invocation"
+    assert [c["model"] for c in calls] == ["opus"] * 4
+    assert len({c["cwd"] for c in calls}) == 4, "every stage must run in its own fresh supervisor directory"
+    for c in calls:
+        assert "--no-session-persistence" in c["argv"], f"{c['stage']}: the session must not be persisted"
+        reused = sorted({"--resume", "--continue", "-c", "-r", "--session-id", "--fork-session"} & set(c["argv"]))
+        assert not reused, f"{c['stage']}: a stage must never resume or name an earlier session: {reused}"
+    runs = list(db.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan.id)))
+    assert len({r.session_id for r in runs}) == 4 and all(r.session_id for r in runs), \
+        "the four stages must report four distinct sessions"
 
 
 def test_quota_exhaustion_checkpoints_waits_and_resumes_the_same_stage(db, owner, claude):
@@ -87,29 +109,30 @@ def test_quota_exhaustion_checkpoints_waits_and_resumes_the_same_stage(db, owner
     assert plan.state == "NEEDS_DECISION" and plan.checkpoint["stage"] == "CHALLENGE_REVIEW"
     assert plan.checkpoint["hard_stop"]["code"] == "QUOTA_EXHAUSTED"
     assert [c["stage"] for c in claude.calls()] == ["PRIMARY_PLANNING", "CHALLENGE_REVIEW"]  # no retry, no skip
-    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "opus"))
     assert q is not None and q.state == "EXHAUSTED" and q.source == "observed-limit-message"  # via cost facade
     claude.set_override("CHALLENGE_REVIEW")
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.refresh(plan)
     calls = claude.calls()
-    assert calls[2]["stage"] == "CHALLENGE_REVIEW" and calls[2]["model"] == "fable"  # same stage, same model
+    assert calls[2]["stage"] == "CHALLENGE_REVIEW" and calls[2]["model"] == "opus"  # same stage, same model
     assert plan.state == "READY_FOR_HUMAN_REVIEW"
     db.expire_all()
-    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "fable"))
+    q = db.scalar(select(QuotaState).where(QuotaState.provider == "claude-native", QuotaState.scope == "opus"))
     assert q.state == "UNKNOWN" and q.source == "observed-successful-call"  # never "OK"
 
 
 def test_off_policy_model_from_the_bridge_is_a_hard_stop(db, owner, claude):
-    claude.set_override("FINAL_REVIEW", resolved="claude-opus-4-8")  # §12: fable answered by another model
+    # §12, ADR-0131: an opus final review answered by a Fable model is rejected (fail closed)
+    claude.set_override("FINAL_REVIEW", resolved="claude-fable-5-1")
     plan = _plan(db, owner)
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.refresh(plan)
     assert plan.state == "NEEDS_DECISION" and plan.checkpoint["stage"] == "FINAL_REVIEW"
     assert plan.checkpoint["hard_stop"]["code"] == "MODEL_POLICY_MISMATCH"
     run = db.get(PlanningRun, plan.checkpoint["run_id"])
-    assert run.status == "MODEL_MISMATCH" and run.model_resolved == "claude-opus-4-8"
-    assert [c["model"] for c in claude.calls()].count("fable") == 2  # challenge + one final; no retry
+    assert run.status == "MODEL_MISMATCH" and run.model_resolved == "claude-fable-5-1"
+    assert [c["model"] for c in claude.calls()] == ["opus"] * 4  # one call per stage, final included; no retry
     assert "verdict" not in plan.checkpoint  # the off-policy verdict was never accepted
 
 

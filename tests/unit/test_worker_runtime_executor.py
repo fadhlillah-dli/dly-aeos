@@ -405,6 +405,120 @@ def test_upstream_quota_stops_run_without_burning_into_failure(settings, setup):
     assert te.state == "BLOCKED" and te.reason_code == "QUOTA_EXHAUSTED"
 
 
+def _sensitive_blocked_row(run_id: str) -> None:
+    """What the broker records for a model request it refused to send because it carried a credential (ADR-0127)."""
+    with session_factory()() as s:
+        run = s.get(WorkerRun, run_id)
+        s.add(BrokerRequest(grant_id="g", run_id=run_id, project_id=run.project_id, domain="PERSONAL",
+                            outcome="SENSITIVE_BLOCKED", status_code=403,
+                            error_summary="SENSITIVE_CONTENT_BLOCKED: github_token"))
+        s.commit()
+
+
+def test_a_request_the_broker_refused_as_sensitive_stops_the_run(settings, setup):
+    """ADR-0127: the run fails closed with a readable reason at the next heartbeat (the worker keeps going otherwise)."""
+    make, _ = setup
+    run_id, task_id = make("sleep")
+
+    def refuse():
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            r, _ = _load(run_id, task_id)
+            if r.execution_status == "RUNNING":
+                break
+            time.sleep(0.2)
+        _sensitive_blocked_row(run_id)
+
+    threading.Thread(target=refuse).start()
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
+    run, te = _load(run_id, task_id)
+    assert res["stop_reason"] == "SENSITIVE_CONTENT_BLOCKED" and res["status"] == "FAILED"
+    assert run.execution_status == "FAILED" and run.outcome_code == "SENSITIVE_CONTENT_BLOCKED"
+    assert te.state in ("REVIEW", "FAILED") and "credential" in te.reason
+
+
+def test_a_sensitive_refusal_after_the_last_heartbeat_still_fails_an_exit_zero_run(settings, setup):
+    """Near miss of the review path: exit 0 alone goes to REVIEW; with a refused request of the run it fails closed."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _sensitive_blocked_row(run_id)
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)  # no heartbeat: the outcome phase decides
+    run, te = _load(run_id, task_id)
+    assert res["exit_code"] == 0 and res["status"] == "FAILED", res
+    assert run.outcome_code == "SENSITIVE_CONTENT_BLOCKED" and te.state != "DONE"
+
+
+@pytest.mark.parametrize("later_stop", ["QUOTA_EXHAUSTED", "CONTROLLER_SHUTDOWN", "LEASE_INVALID", "TIMEOUT"])
+def test_a_sensitive_refusal_takes_precedence_over_a_later_stop(settings, setup, monkeypatch, later_stop):
+    """Differential review 2026-10-28: a stop the monitor sets after the refusal (quota, shutdown, lost lease, time
+    limit) never hides it, and a quota stop's attempt refund never applies to it."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _sensitive_blocked_row(run_id)
+    real = executor._decide
+    monkeypatch.setattr(executor, "_decide", lambda *a, **kw: real(*a, **{**kw, "stop_reason": later_stop}))
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "FAILED" and run.outcome_code == "SENSITIVE_CONTENT_BLOCKED", (res, run.outcome_code)
+    assert te.state in ("REVIEW", "FAILED") and te.reason_code != later_stop and "credential" in te.reason
+    assert te.attempts_used == 1  # not given back
+
+
+def test_a_later_stop_without_a_sensitive_refusal_keeps_its_own_code(settings, setup, monkeypatch):
+    """Near miss: no refused request, so the quota stop stays a quota stop (BLOCKED, attempt refunded)."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    real = executor._decide
+    monkeypatch.setattr(executor, "_decide", lambda *a, **kw: real(*a, **{**kw, "stop_reason": "QUOTA_EXHAUSTED"}))
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "STOPPED" and run.outcome_code == "QUOTA_EXHAUSTED"
+    assert te.state == "BLOCKED" and te.reason_code == "QUOTA_EXHAUSTED"
+
+
+def _lose_the_lease_first(monkeypatch) -> None:
+    """The reconciler won the race: the lease expired with the worker still alive, so the task is already BLOCKED
+    (LEASE_LOST_PROCESS_ALIVE) and the run non-terminal (ORPHANED_ALIVE) when the outcome phase decides LEASE_INVALID."""
+    real = executor._decide
+
+    def decide(s, run, task, te, **kw):
+        if te is not None and te.state == "RUNNING":
+            scheduler.transition_task(s, te.task_id, "BLOCKED", actor="system:reconciler",
+                                      reason_code="LEASE_LOST_PROCESS_ALIVE", reason="lease expired (test)")
+            run.outcome_code = "ORPHANED_ALIVE"
+            s.flush()
+        return real(s, run, task, te, **{**kw, "stop_reason": "LEASE_INVALID"})
+
+    monkeypatch.setattr(executor, "_decide", decide)
+
+
+def test_bite_a_sensitive_refusal_after_a_lost_lease_keeps_the_task_state_and_records_the_code(settings, setup,
+                                                                                               monkeypatch):
+    """Differential review 2026-10-28: the sensitive override sent a lost-lease run down a transition that expects
+    RUNNING; it raised Conflict on every retry and the run stayed RUNNING with outcome UNKNOWN. Now the task keeps the
+    reconciler's state and the run still ends FAILED with SENSITIVE_CONTENT_BLOCKED."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _sensitive_blocked_row(run_id)
+    _lose_the_lease_first(monkeypatch)
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "FAILED", res
+    assert run.execution_status == "FAILED" and run.outcome_code == "SENSITIVE_CONTENT_BLOCKED", run.outcome_code
+    assert te.state == "BLOCKED" and te.reason_code == "LEASE_LOST_PROCESS_ALIVE", (te.state, te.reason_code)
+
+
+def test_a_lost_lease_without_a_sensitive_refusal_is_still_a_lease_stop(settings, setup, monkeypatch):
+    """Near miss: no refused request, so the lost lease stays LEASE_INVALID (run FAILED, task state kept)."""
+    make, _ = setup
+    run_id, task_id = make("ok")
+    _lose_the_lease_first(monkeypatch)
+    res = executor.execute_run(settings, run_id, heartbeat_seconds=3600)
+    run, te = _load(run_id, task_id)
+    assert res["status"] == "STOPPED" and run.outcome_code == "LEASE_INVALID", (res, run.outcome_code)
+    assert te.state == "BLOCKED" and te.reason_code == "LEASE_LOST_PROCESS_ALIVE"
+
+
 def test_start_blocked_without_sandbox_exception(settings, setup):
     make, _ = setup
     run_id, task_id = make("ok")
@@ -516,10 +630,11 @@ def test_out_of_scope_edit_stops_the_run_at_once(settings, setup):
     """§22 'Stop berlaku saat ... scope dilanggar': stopped at the edit, not when the worker exits."""
     make, _ = setup
     run_id, task_id = make("outside_sleep")
-    t0 = time.monotonic()
     res = executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, te = _load(run_id, task_id)
-    assert time.monotonic() - t0 < 45, "the worker would have slept 120 s / hit the 60 s timeout"
+    # No wall-clock bound (L15, 2026-10-29: 46.1 s against a 45 s bound at load average ~200, 1.4 s alone). What proves
+    # "at once" is the live stop: caps.scope_stop is set only by the monitoring loop while the worker runs, and the stop
+    # reason would be TIMEOUT if the run had waited for the 60 s task timeout (the worker sleeps 120 s).
     assert res["stop_reason"] == "SCOPE_VIOLATION" and run.outcome_code == "SCOPE_VIOLATION"
     assert run.caps["scope_stop"] is True and run.quarantined
     assert not processes.is_alive(run.pid, run.pid_create_time)
@@ -1165,3 +1280,22 @@ def test_container_run_with_a_granted_shell_allows_only_the_aeos_runner(settings
     assert runner.read_text(encoding="utf-8") == container.SHELL_RUNNER_JS
     prompt = (Path(run.sandbox_ref) / "config" / "aeos-task.md").read_text(encoding="utf-8")
     assert "## Shell" in prompt and container.SHELL_RUNNER_COMMAND in prompt
+
+
+def test_a_context_pack_the_route_may_not_carry_never_starts_the_run(settings, setup):
+    """ADR-0133 (review H1): the run's context pack (INTERNAL here) must be data the route may carry; a route that
+    allows only PUBLIC refuses the start (own code, nothing spawned). Near miss: every other run in this file starts on
+    a route that allows INTERNAL."""
+    from aeos.models.routing import ModelRoute
+
+    make, _ = setup
+    run_id, task_id = make("ctxclass")
+    with session_factory()() as s:
+        route = s.scalar(select(ModelRoute).where(ModelRoute.route_key == "worker.test-free"))
+        route.allowed_data_classes = ["PUBLIC"]
+        s.commit()
+    res = executor.execute_run(settings, run_id)
+    run, _te = _load(run_id, task_id)
+    assert res["status"] == "BLOCKED" and res["code"] == "CONTEXT_CLASS_NOT_ALLOWED", res
+    assert "is INTERNAL" in res["reason"] and "worker.test-free" in res["reason"]
+    assert run.pid is None

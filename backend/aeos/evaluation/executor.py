@@ -257,8 +257,10 @@ def eval_serving(session: Session, *, task: Any, route_key: str | None = None) -
                 # a LOCAL-only task never leaves for a remote eval-only route
                 reasons.append(f"the task asks for pool {task_pool}; an eval-only {route.pool} route serves "
                                "WORKER-pool evaluation tasks only")
+            from aeos.routing.facade import effective_task_class
+
             reasons += eval_only_problems(session, run, route, domain=task.domain,
-                                          data_classification=task.data_classification)
+                                          data_classification=effective_task_class(session, task))
         elif route.pool not in served:
             reasons.append(f"pool {route.pool} has no controlled execution path in this build")
         elif task_pool != route.pool:

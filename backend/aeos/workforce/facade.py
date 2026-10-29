@@ -112,7 +112,8 @@ def refresh_role_eval_status(session: Session, role_key: str | None = None) -> i
 def investigation_after_run(session: Session, run: Any, te: Any, task: Any, *, exit_code: int | None,
                             stop_reason: str | None, violations: list[dict[str, str]], actor: str) -> str:
     """Outcome of one finished hypothesis run (runtime outcome phase): run REVIEW (report) or FAILED, and the task
-    to READY for the next hypothesis or REVIEW (INVESTIGATION_COMPLETE) for the integrator. Never DONE."""
+    to READY for the next hypothesis or REVIEW (INVESTIGATION_COMPLETE) for the integrator, or BLOCKED when the broker
+    refused a model request of the run as sensitive (ADR-0127). Never DONE."""
     from aeos.workforce.investigation import after_run as impl
 
     return impl(session, run, te, task, exit_code=exit_code, stop_reason=stop_reason, violations=violations,

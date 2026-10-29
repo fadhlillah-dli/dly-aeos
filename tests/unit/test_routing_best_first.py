@@ -503,8 +503,11 @@ def test_the_openrouter_free_routes_share_one_account_wide_cap(routes, monkeypat
 
 def test_a_paid_route_is_never_chosen_after_a_skip(routes, monkeypatch):
     """Red: Go is busy and the owner's BUDGET-approved paid route is next: the task waits (would_serve names it).
-    Near miss: with a Go slot free, Go serves."""
+    Near miss: with a Go slot free, Go serves. ADR-0128 amends ADR-0124 point 6: this holds with the owner's OVERFLOW
+    switched off (``paid_overflow``); with it on (the default) an INTERNAL task overflows to the paid route
+    (``tests/unit/test_routing_paid_escalation.py``)."""
     install_fakes(monkeypatch)
+    _set(monkeypatch, paid_overflow="false")
     _go(routes, GO_MINIMAX)
     _paid(routes)
     assert select_route(routes, task=task()).route.route_key == GO_MINIMAX

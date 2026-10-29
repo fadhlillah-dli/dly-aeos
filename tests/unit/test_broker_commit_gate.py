@@ -23,6 +23,7 @@ from aeos.models.broker_ext import BrokerSideEffect
 from aeos.models.routing import CapabilityGrant
 from aeos.models.workforce import WorkerRun
 from tests.conftest import TEST_GIT_EMAIL, TEST_GIT_NAME
+from tests.unit.review_gate_support import record_claude_review
 from tests.unit.test_workforce_support import init_git_repo, make_project
 
 BRANCH = "aeos/task-g-1234abcd"
@@ -64,10 +65,12 @@ def env(db, tmp_path):
 
 
 def _run(db, env, head: str, *, base: str | None = None) -> WorkerRun:
+    """A run whose head is the candidate; its recorded base defaults to the repository's first commit."""
     run = WorkerRun(project_id=env["project"].id, domain="PERSONAL", execution_status="REVIEW",
-                    workspace_ref=str(env["src"]), branch=BRANCH, head_commit=head, base_commit=base)
+                    workspace_ref=str(env["src"]), branch=BRANCH, head_commit=head, base_commit=base or env["base"])
     db.add(run)
     db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     broker.issue_grant(db, run_id=run.id, project_id=run.project_id, domain=run.domain, kind="GIT_BRANCH",
                        scope={"repo": REPO, "branch": BRANCH}, ttl_seconds=300, max_requests=2)
     return run
@@ -162,9 +165,8 @@ def test_the_range_is_what_the_push_would_publish_not_the_runs_base(db, env, tmp
     assert [p["sha"] for p in e.value.details["problems"]] == [base]  # the run's own commit is fine
     assert _remote_refs(env) == ""
     _git(src, "push", "-q", str(env["bare"]), "main:refs/heads/main")  # the existing history is on the remote now
-    for recorded_base in (base, None):  # the remote decides the range, not the run's recorded base
-        res = _push(db, env, _run(db, env, head, base=recorded_base))
-        assert res["ok"] and res["status"] == "PUSHED", res
+    res = _push(db, env, _run(db, env, head, base=base))  # the remote decides the range, not the run's base
+    assert res["ok"] and res["status"] == "PUSHED", res
     assert _git(env["bare"], "rev-parse", f"refs/heads/{BRANCH}") == head
 
 

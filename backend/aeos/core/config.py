@@ -107,12 +107,24 @@ class Settings(BaseSettings):
     go_max_active_total: int = 2
     openrouter_free_max_active: int = 1
     route_reselect_after_minutes: int = 30
+    # ADR-0128 (owner decision R34, 2026-10-28): a per-token paid route (OpenRouter credits) may take an INTERNAL task
+    # only by ESCALATION (after 2 quality failures of the task on $0-marginal routes) or OVERFLOW (every $0-marginal
+    # route eligible for the task is busy, out of allowance fit or cooling down). Each switch turns its path off; both
+    # are on by default (the owner's answer). PUBLIC tasks are never paid, whatever these say. Owner settings, never a
+    # route's configuration identity nor policy/.
+    paid_escalation: bool = True
+    paid_overflow: bool = True
 
     # §02/§08 canonical MCI_V2 source: owner-supplied and never committed (the platform repository is public). By
     # default it is read from <data dir>/policy/canonical/<file> (policy/mci-reference.yaml ``location:
     # local:<file>``); this absolute path (aeos.yaml ``mci_source_path`` / AEOS_MCI_SOURCE_PATH) overrides it. A
     # path inside the repository is refused when the reference is verified (aeos.policy.snapshot).
     mci_source_path: Path | None = None
+
+    # Owner request R34 (2026-10-28) usage report: an optional ccusage JSON export (``ccusage daily --json`` written to
+    # a file by the owner). ``aeos usage report`` only reads it (token totals; never a dollar figure, §42). Unset = the
+    # report says that Claude Max use is measured by ccusage outside AEOS.
+    ccusage_export_path: Path | None = None
 
     platform_repo_slug: str = "fadhlillah-dli/dly-aeos"
     # §06 + owner rule 2026-10-26 (AGENTS.md invariant 11): the commit identity per code host, keyed by provider -

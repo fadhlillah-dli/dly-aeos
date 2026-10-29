@@ -35,6 +35,9 @@ KIMI = "opencode-zen/kimi-k2.7-code"  # paid, chat-completions API (QWEN: anthro
 GO_WORKERS = ("glm-5.3-flash", "mimo-v2.6-flash", "minimax-m3.1-flash", "hy3", "kimi-k2.7-code")
 GO_R31 = ("kimi-k3", "step-5-preview")  # owner decision R31 (2026-10-28, ADR-0125): tools UNKNOWN until probed
 GO_WATCH = ("longcat-2.0", "glm-5.2", "glm-5.3", "kimi-k3.1-pro", "mimo-v2.6-pro", "deepseek-v4.1-flash")
+# owner decision R34 (2026-10-28, ADR-0129): the remaining Go models and the Console-translation candidates
+GO_R34 = ("deepseek-v4-pro", "hy4-preview", "gemini-4-argon", "qwen3.8-max", "qwen3.8-flash", "qwen3.7-plus",
+          "minimax-m3", "mimo-v2.5", "mimo-v2.5-pro")
 GO_GLM = "opencode-go/glm-5.3-flash"
 GO_HY3 = "opencode-go/hy3"
 GO_DS = "opencode-go/deepseek-v4.1-flash"
@@ -111,7 +114,7 @@ def test_seed_is_design_candidate_personal_only(routes):
 
 SEEDED = {
     "SUPERVISOR": {"claude-native/fable", "claude-native/opus"},
-    "WORKER": {DS, GLM, *(f"opencode-go/{m}" for m in GO_WORKERS + GO_R31)},
+    "WORKER": {DS, GLM, *(f"opencode-go/{m}" for m in GO_WORKERS + GO_R31 + GO_R34)},
     "COMPARATOR": {GEMINI},
     "ARENA": {"opencode-zen/longcat-2.5-preview-free", "opencode-zen/mimo-v2.6-flash-free", "opencode-zen/beam-free",
               "opencode-zen/nemotron-3-ultra-free", "opencode-zen/nemotron-3.5-lightning-free",
@@ -129,7 +132,7 @@ def test_seed_registers_every_section_23_candidate_with_its_terms(routes):
     data terms the hard filter relies on (a widened MiMo or a Nemotron without its trial flag fails here)."""
     by = {r.route_key: r for r in routes.query(ModelRoute).all()}
     assert {k: {key for key, r in by.items() if r.pool == k} for k in SEEDED} == SEEDED
-    assert len(by) == sum(len(v) for v in SEEDED.values()) == 37
+    assert len(by) == sum(len(v) for v in SEEDED.values()) == 46
     for key in SEEDED["ARENA"] | SEEDED["WORKER"] | SEEDED["WATCHLIST"] | SEEDED["COMPARATOR"]:
         r = by[key]
         # a research reading of a provider claim is not an owner terms review (§23, §51 P2)
@@ -161,7 +164,7 @@ def test_seeded_go_routes_are_subscription_candidates_without_a_client_restricti
     only, a subscription with dollar allowances (never a per-token price), Go allows other clients, the reviewed
     region is required, and the free Zen pilots keep their S07 client restriction."""
     by = {r.route_key: r for r in routes.query(ModelRoute).filter(ModelRoute.provider == "opencode-go")}
-    assert set(by) == {f"opencode-go/{m}" for m in GO_WORKERS + GO_R31 + GO_WATCH}
+    assert set(by) == {f"opencode-go/{m}" for m in GO_WORKERS + GO_R31 + GO_WATCH + GO_R34}
     for key, r in by.items():
         assert (r.status, r.mode, r.origin, r.evidence_level) == ("CANDIDATE", "DESIGN", "SEED", "E1"), key
         assert r.eligible_domains == ["PERSONAL"] and r.is_free == "NO" and service.needs_budget(r), key

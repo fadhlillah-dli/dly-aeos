@@ -268,7 +268,10 @@ def test_a_non_free_openrouter_worker_route_keeps_the_existing_rules(routes, mon
     approve(routes, key, kind="TRIAL", details={"budget_decision_id": budget.id})
     _forwarded(routes, 60)  # the account's :free count is used up: not this route's limit
     assert eligible_routes(routes, domain="PERSONAL", data_classification="INTERNAL").eligible == [key]
-    assert select_route(routes, task=task(classification="INTERNAL")).route.route_key == key
+    # ADR-0128: a per-token paid route takes a task only by ESCALATION or OVERFLOW; as the only route it waits
+    with pytest.raises(Blocked) as ei:
+        select_route(routes, task=task(classification="INTERNAL"))
+    assert ei.value.code == "PAID_NOT_ADMITTED" and "no $0-marginal route is eligible" in ei.value.message
     assert service.route_use_problem(routes, paid) is None
     assert service.free_worker_problem(routes, paid, run_id="no-such-run") is None  # no PUBLIC-only TaskSpec rule
     assert free_tier.route_limit_problem(routes, paid) is None and not service.free_first(paid)
@@ -440,7 +443,9 @@ def proxy(settings, db, secrets_memory, monkeypatch):
     """The real routing rule behind the broker, a decision C route and a PUBLIC task's run."""
     fk = FakeModules().install(monkeypatch, skip=("aeos.routing.service",))
     secrets_memory.put("workers/openrouter", KEY, actor="test")
-    p = make_project(db)
+    # a PUBLIC project: routing applies max(task class, project class), and the compiler never puts a PUBLIC task into
+    # an INTERNAL project (ADR-0133); the INTERNAL task below is still refused
+    p = make_project(db, classification="PUBLIC")
     route = make_route(db, key=FREE, model_id="cohere/north-mini-code:free", status="TRIAL",
                        pricing=dict(FREE_PRICING), data_classes=["PUBLIC"])
     _plan, _pv, specs = make_plan(db, p, [{"task_key": "pub", "data_classification": "PUBLIC"},
