@@ -83,3 +83,13 @@ skipping a gate, and that a changed model alias is not accepted as the old basel
   still gated by an ACTIVE approval in `facade.transition_plan`). The plan detail exposes the project's
   configured `{provider, root_id}` targets (`operation_catalog.configured_targets`) so the owner approves
   exact targets; approving an unconfigured target returns a warning, never a silent write.
+
+## Amendment 2026-10-29 (stage timeout)
+
+* **1800 s per stage instead of 900 s (point 2).** The generation stages grow with every revision cycle,
+  because the plan and its revision notes do: measured on Opus 5.5 at about 146 output tokens/s, they
+  took 343-885 s over the first cycles, and the fifth Primary Planner run of a 14-task plan was killed
+  at 900 s (`TIMEOUT`, `PLANNING_FAILED`). The limit keeps twice the longest successful stage and stays
+  within the bridge's 3600 s bound; the stale-run grace stays the timeout plus 300 s, so a running
+  stage still blocks a duplicate run until its own timeout. A timed-out stage is resumed by a later
+  run, never skipped (LESSONS L31).

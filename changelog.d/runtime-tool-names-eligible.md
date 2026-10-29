@@ -1,0 +1,3 @@
+### Fixed
+
+- **A task that names the worker runtime's own tools can run.** The revised plans of 2026-10-29 wrote `tools_allowed` with the runtime's tool names (`read`, `glob`, `grep`, `list`, `edit`, `todowrite`); `list` and `todowrite` were not in the reviewed vocabulary, so every route would have refused every task. `list` now means reading files, and the agent's own task list (`todowrite`, `todoread`) asks for no capability; unknown names, `bash` and `webfetch` still keep a task ineligible under their own name. A test keeps every runtime tool name inside the reviewed set (LESSONS L29, strike 2). Evidence: E2 unit run on macOS arm64; the new test is red without the change.

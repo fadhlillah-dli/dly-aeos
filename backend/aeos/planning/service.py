@@ -61,7 +61,12 @@ from aeos.policy import catalog
 MAX_PROMPT_CHARS = 50_000
 MAX_ATTACHMENT_CHARS = 100_000
 MAX_ATTACHMENTS = 20
-STAGE_TIMEOUT_SECONDS = 900
+# A generation stage (Primary Planner, Synthesizer) grows with every revision cycle, because the plan and its revision
+# notes do. Measured 2026-10-29 on Opus 5.5 at about 146 output tokens/s: 343-885 s per generation stage over the
+# first cycles, and the fifth Primary Planner run of a 14-task plan exceeded the former 900 s limit (LESSONS L31).
+# The limit keeps twice the longest successful stage; a stage that still needs longer fails with TIMEOUT and a later
+# run resumes it (never skipped). The bridge accepts at most 3600 s.
+STAGE_TIMEOUT_SECONDS = 1800
 STALE_RUN_GRACE = timedelta(seconds=STAGE_TIMEOUT_SECONDS + 300)
 ACTIONS = ("APPROVE_AND_PUBLISH", "APPROVE", "REQUEST_REVISION", "REJECT")
 # §24 "Konteks yang benar-benar diterima model ... adalah ContextPack minimum ber-budget": not yet for the supervisor
