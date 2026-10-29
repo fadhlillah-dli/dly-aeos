@@ -632,6 +632,31 @@ def print_diff(before: Snapshot, after: Snapshot) -> list[str]:
     return degraded
 
 
+@contextlib.contextmanager
+def background_work_held() -> Iterator[list[str]]:
+    """Background work a script's call would start is recorded, never started (LESSONS L13).
+
+    A plan re-run starts the four Opus planning stages through the official Claude Code binary in a background thread
+    (``aeos.planning.runner.start``). In a dry run that thread outlived the copy, spent the owner's Claude quota and
+    wrote to the copy only (2026-10-29: two ``claude -p`` planning processes from one dry run of revise_plan.py).
+    The stub answers as if it started, so the script's output reads as it would for real, and the harness says what
+    was held."""
+    from aeos.planning import runner
+
+    held: list[str] = []
+    saved = runner.start
+
+    def hold(plan_id: str, *, actor: str, action: str = "run") -> bool:
+        held.append(f"planning {action} for plan {plan_id}")
+        return True
+
+    runner.start = hold  # type: ignore[assignment]
+    try:
+        yield held
+    finally:
+        runner.start = saved  # type: ignore[assignment]
+
+
 def run_script(run: Callable[..., Any], settings: Any, username: str, password: str, answers: Answers) -> None:
     from fastapi.testclient import TestClient
 
@@ -641,11 +666,13 @@ def run_script(run: Callable[..., Any], settings: Any, username: str, password: 
     saved_stdout = sys.stdout
     sys.stdout = _AsciiWriter(saved_stdout)  # type: ignore[assignment]
     try:
-        with prompts_routed(answers), TestClient(create_app(settings, testing=True, init_db=False),
-                                                 base_url="http://testserver") as client:
+        with prompts_routed(answers), background_work_held() as held, \
+                TestClient(create_app(settings, testing=True, init_db=False), base_url="http://testserver") as client:
             result = run(client, username, password, answers)
     finally:
         sys.stdout = saved_stdout
+    for item in held:
+        say(f"[dry run] background work NOT started (it would start for real): {item}")
     say("--- end of script output ---")
     if answers.missing is not None:  # the script caught MissingAnswer itself
         raise MissingAnswer(answers.missing)
