@@ -1,14 +1,17 @@
 """Planning & Blueprint service (§05 steps 6-10, §12, §14, §15, §21).
 
 Lifecycle: PlanningContext (DATA with provenance) -> Plan (DRAFT -> CONTEXT_READY) -> four bounded
-activities through the official Claude Code bridge (Primary Planner/opus -> Planning Challenger/fable
--> Planning Synthesizer/opus -> Final Planning Reviewer/fable) -> READY_FOR_HUMAN_REVIEW -> human
-decision bound to the exact PlanVersion + manifest hash.
+activities through the official Claude Code bridge (Primary Planner/opus -> Planning Challenger/opus
+-> Planning Synthesizer/opus -> Final Planning Reviewer/opus; ADR-0131: the Fable family is never requested)
+-> READY_FOR_HUMAN_REVIEW -> human decision bound to the exact PlanVersion + manifest hash.
 
 Guarantees:
 * Domain/goal come only from the human-created records; model output and attachments are DATA.
 * Each stage records a PlanningRun (requested/resolved model, engine version, input/output hash,
   usage, trace) and a PlanningArtifact. A resolved model outside the policy family fails the stage.
+* Each stage is its own bridge invocation in a fresh context (new supervisor directory, ``--no-session-persistence``,
+  ``--resume``/``--continue`` refused); a reviewer answering in its author's session fails (REVIEWER_NOT_INDEPENDENT).
+  That separation, not a second model family, is what keeps the Challenger and the Final Reviewer independent.
 * No stage is ever skipped. Bridge unavailable -> manual package + AWAITING_MANUAL_CLAUDE (never the
   Claude API); quota exhausted -> checkpoint + NEEDS_DECISION; OFFICE -> capability + company policy
   gate before any model call.
@@ -88,8 +91,9 @@ BRIDGE_UNAVAILABLE_CODES = frozenset({
 })
 
 PLANNING_BASELINE: dict[str, Any] = {
-    "name": "opus-fable-4-stage",
-    "source": "master §02, §15, §17: Opus -> Fable -> Opus -> Fable planning baseline",
+    "name": "opus-only-4-stage",
+    "source": "master §02, §15, §17 as amended by ADR-0131 (owner decision 2026-10-28): Opus -> Opus -> Opus -> Opus "
+              "planning baseline; the Claude Fable family is never requested; each stage runs in a fresh context",
     "stages": [{"stage": s.state.value, "role": s.role, "model": s.model, "family": s.family} for s in STAGES],
     "skippable": False,
     "change_rule": "Reducing or skipping a stage is a policy change that needs evaluation and a recorded POLICY "
@@ -131,6 +135,25 @@ def _bridge() -> Any:
     from aeos.claude_bridge import facade as bridge
 
     return bridge
+
+
+def _refused_family(model: str | None) -> str | None:
+    """ADR-0131: the Claude family DLY AEOS never requests nor accepts that *model* belongs to (one definition:
+    the bridge facade's ``refused_family``), else None."""
+    try:
+        return _bridge().refused_family(model)
+    except (ImportError, ModuleNotFoundError):  # no bridge: nothing can be requested or imported either
+        return None
+
+
+def _refused_package_message(plan: Plan, stage: str | None, model: str | None) -> str | None:
+    fam = _refused_family(model)
+    if not fam:
+        return None
+    return (f"the manual package of stage {stage} was written for {model!r} (Claude {fam} family), which DLY AEOS "
+            "never uses (owner decision 2026-10-28, ADR-0131); its result is not imported. Run the plan again "
+            f"(aeos plan run {plan.id} --actor <username>, or Jalankan in the Control Center): stage {stage} runs "
+            "with opus and writes a new manual package if the bridge is still not proven.")
 
 
 def injection_flags(text: str) -> list[str]:
@@ -1480,6 +1503,11 @@ def import_manual_result(session: Session, plan_id: str, *, actor: str, continue
     if stage not in [s.value for s in PIPELINE_STAGES] or run is None or not cp.get("package_id"):
         raise Conflict("checkpoint has no manual package to import", code="CHECKPOINT_INCOMPLETE")
     spec = STAGE_BY_STATE[S(stage)]
+    refused = _refused_package_message(plan, stage, run.model_requested)
+    if refused:  # ADR-0131: a package written for Fable before the decision is never imported (nothing changes)
+        raise PolicyDenied(refused, code="MODEL_FAMILY_REFUSED",
+                           details={"stage": stage, "package_id": cp["package_id"],
+                                    "model_requested": run.model_requested})
     office_gate(session, plan, actor=actor)
     try:
         result = _bridge().read_manual_result(cp["package_id"])
@@ -1579,10 +1607,26 @@ def _context_view(ctx: PlanningContext | None) -> dict[str, Any] | None:
     }
 
 
-def manual_instructions(plan: Plan) -> dict[str, Any] | None:
+def manual_instructions(plan: Plan, session: Session | None = None) -> dict[str, Any] | None:
     cp = plan.checkpoint or {}
     if plan.state != S.AWAITING_MANUAL_CLAUDE.value or not cp.get("package_id"):
         return None
+    run = session.get(PlanningRun, cp.get("run_id")) if session is not None and cp.get("run_id") else None
+    refused = _refused_package_message(plan, cp.get("stage"), run.model_requested if run else None)
+    if refused:
+        # ADR-0131: never tell the owner to run a package written for Fable; the way on is a new run (opus)
+        return {
+            "stage": cp.get("stage"), "package_id": cp.get("package_id"), "package_path": None,
+            "reason": refused, "refused": {"code": "MODEL_FAMILY_REFUSED", "model_requested": run.model_requested
+                                           if run else None},
+            "steps": [
+                "Jangan jalankan paket ini: paket ditulis untuk keluarga Claude Fable, yang tidak pernah dipakai DLY "
+                "AEOS (keputusan pemilik 2026-10-28, ADR-0131); hasilnya tidak akan diimpor.",
+                f"Jalankan ulang perencanaan (tombol 'Jalankan' atau: aeos plan run {plan.id} --actor <username>); "
+                f"tahap {cp.get('stage')} berjalan dengan opus dan menulis paket manual baru bila bridge belum terbukti.",
+            ],
+            "note": "Tidak ada fallback ke Claude API dan tidak ada model Fable.",
+        }
     return {
         "stage": cp.get("stage"), "package_id": cp.get("package_id"), "package_path": cp.get("package_path"),
         "reason": cp.get("manual_reason"),
@@ -1615,6 +1659,7 @@ def plan_detail(session: Session, plan: Plan) -> dict[str, Any]:
     decisions = list(session.scalars(select(Decision).where(Decision.target_type == catalog.TARGET_PLAN_VERSION,
                                                             Decision.target_id.in_(vids)).order_by(Decision.created_at)))
     state = S(plan.state)
+    manual = manual_instructions(plan, session)
     return {
         **plan_summary(session, plan),
         "policy_baseline": plan.policy_baseline or {},
@@ -1634,10 +1679,11 @@ def plan_detail(session: Session, plan: Plan) -> dict[str, Any]:
         "current_version_reviewed": bool(verdict and plan.current_version_id
                                          and cp.get("synthesis_version_id") == plan.current_version_id),
         "decisions": [registry.decision_view(session, d) for d in decisions],
-        "manual": manual_instructions(plan),
+        "manual": manual,
         "allowed": {
             "run": state in RUNNABLE_STATES or state == S.AWAITING_MANUAL_CLAUDE,
-            "import_manual": state == S.AWAITING_MANUAL_CLAUDE,
+            # ADR-0131: a package written for Fable is never imported; the way on is a new run
+            "import_manual": state == S.AWAITING_MANUAL_CLAUDE and not (manual or {}).get("refused"),
             "approve": state in (S.READY_FOR_HUMAN_REVIEW, S.APPROVED),
             "revise_or_reject": state in (S.READY_FOR_HUMAN_REVIEW, S.APPROVED, S.PUBLISHED, S.REVIEW_FAILED,
                                           S.PLANNING_FAILED, S.NEEDS_DECISION, S.PUBLICATION_PARTIAL,

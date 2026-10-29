@@ -1,4 +1,4 @@
-"""4-stage Opus/Fable planning pipeline with a fake bridge (no model, no API).
+"""4-stage Opus planning pipeline (ADR-0131: Opus at every stage, never Fable) with a fake bridge (no model, no API).
 
 §50 rows: "Fable Max quota habis" (review waits, gate not skipped), "Model alias/provider route
 berubah" (resolved model mismatch rejected), "Prompt memerintahkan OFFICE menjadi PERSONAL" and
@@ -48,7 +48,7 @@ def _runs(db, plan):
     return list(db.scalars(select(PlanningRun).where(PlanningRun.plan_id == plan.id).order_by(PlanningRun.created_at)))
 
 
-def test_full_pipeline_runs_four_stages_with_opus_fable(db, owner, monkeypatch, tmp_path):
+def test_full_pipeline_runs_four_stages_with_opus_only(db, owner, monkeypatch, tmp_path):
     bridge = FakeBridge(monkeypatch, tmp_path)
     plan = _plan(db, owner)
     assert plan.state == "CONTEXT_READY"
@@ -56,7 +56,7 @@ def test_full_pipeline_runs_four_stages_with_opus_fable(db, owner, monkeypatch, 
     db.refresh(plan)
     assert plan.state == "READY_FOR_HUMAN_REVIEW", plan.state_reason
     assert bridge.stage_calls() == ["PRIMARY_PLANNING", "CHALLENGE_REVIEW", "SYNTHESIS", "FINAL_REVIEW"]
-    assert [c.model for c in bridge.calls] == ["opus", "fable", "opus", "fable"]
+    assert [c.model for c in bridge.calls] == ["opus", "opus", "opus", "opus"]  # ADR-0131: never fable
     assert [c.role for c in bridge.calls] == ["Primary Planner", "Planning Challenger", "Planning Synthesizer",
                                               "Final Planning Reviewer"]
     assert all(c.domain == "PERSONAL" and c.project_id == plan.project_id for c in bridge.calls)
@@ -65,7 +65,7 @@ def test_full_pipeline_runs_four_stages_with_opus_fable(db, owner, monkeypatch, 
     for r in runs:
         assert r.input_hash and r.input_hash.startswith("sha256:")
         assert r.output_hash and r.output_hash.startswith("sha256:")
-        assert r.model_requested in ("opus", "fable") and r.model_resolved.startswith("claude-")
+        assert r.model_requested == "opus" and r.model_resolved.startswith("claude-opus-")
         assert r.engine_version and r.usage["input_tokens"] == 100
         assert db.scalar(select(PlanningArtifact).where(PlanningArtifact.planning_run_id == r.id)) is not None
     versions = list(db.scalars(select(PlanVersion).where(PlanVersion.plan_id == plan.id).order_by(PlanVersion.version)))
@@ -73,7 +73,9 @@ def test_full_pipeline_runs_four_stages_with_opus_fable(db, owner, monkeypatch, 
     assert versions[1].parent_version_id == versions[0].id  # synthesis creates a NEW version
     assert plan.current_version_id == versions[1].id and versions[1].mode == "MOCK"
     assert plan.policy_baseline["skippable"] is False
-    assert [s["model"] for s in plan.policy_baseline["stages"]] == ["opus", "fable", "opus", "fable"]
+    assert [s["model"] for s in plan.policy_baseline["stages"]] == ["opus", "opus", "opus", "opus"]
+    assert [s["family"] for s in plan.policy_baseline["stages"]] == ["opus", "opus", "opus", "opus"]
+    assert plan.policy_baseline["name"] == "opus-only-4-stage" and "ADR-0131" in plan.policy_baseline["source"]
     kinds = {e.kind for e in db.scalars(select(Event).where(Event.project_id == plan.project_id))}
     assert {"plan.state_changed", "planning.run.updated", "plan.version.created"} <= kinds
 
@@ -97,7 +99,7 @@ def test_challenger_and_reviewer_receive_only_the_package(db, owner, monkeypatch
     assert all(c.allowed_tools == [] for c in bridge.calls)
 
 
-@pytest.mark.parametrize("bad_model", ["claude-opus-5-5", None, "claude-sonnet-5-5"])
+@pytest.mark.parametrize("bad_model", ["claude-fable-5-1", None, "claude-sonnet-5-5"])
 def test_resolved_model_mismatch_fails_review_stage(db, owner, monkeypatch, tmp_path, bad_model):
     bridge = FakeBridge(monkeypatch, tmp_path, models={"CHALLENGE_REVIEW": bad_model})
     plan = _plan(db, owner)
@@ -110,11 +112,11 @@ def test_resolved_model_mismatch_fails_review_stage(db, owner, monkeypatch, tmp_
     run = _runs(db, plan)[-1]
     assert run.status == "MODEL_MISMATCH" and run.error_code == "MODEL_POLICY_MISMATCH"
     assert db.scalar(select(PlanningArtifact).where(PlanningArtifact.planning_run_id == run.id)) is None
-    # Resume re-runs the SAME stage with the SAME policy model (fable), never skips to synthesis.
+    # Resume re-runs the SAME stage with the SAME policy model (opus), never skips to synthesis.
     bridge.models.pop("CHALLENGE_REVIEW")
     service.run_pipeline(db, plan.id, actor=owner.id)
     db.refresh(plan)
-    assert bridge.stage_calls()[2] == "CHALLENGE_REVIEW" and bridge.calls[2].model == "fable"
+    assert bridge.stage_calls()[2] == "CHALLENGE_REVIEW" and bridge.calls[2].model == "opus"
     assert plan.state == "READY_FOR_HUMAN_REVIEW"
 
 
@@ -122,6 +124,7 @@ def test_resolved_model_mismatch_fails_review_stage(db, owner, monkeypatch, tmp_
     ("opus", "claude-opus-5-5", True), ("opus", "claude-opus-4-1-20250805", True), ("fable", "claude-fable-5-1", True),
     ("opus", "Claude-OPUS-5", True), ("opus", "claude-notopus-1", False), ("fable", "fableish-2", False),
     ("opus", "claude-sonnet-5-5", False), ("opus", None, False), ("opus", "", False), ("fable", "UNKNOWN", False),
+    ("opus", "claude-fable-5-1", False),
 ])
 def test_model_family_match_is_token_based(family, resolved, ok):
     """§12/§50 "Model alias/provider route berubah": only a resolved id of the policy family passes."""

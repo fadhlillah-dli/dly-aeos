@@ -371,6 +371,13 @@ def _after_lifecycle(session: Session, changed: list[Decision], *, plan_hook: bo
         if (d.kind == "WRITE_ENABLEMENT" and d.target_type == catalog.TARGET_PROVIDER_WRITE
                 and enablement.active_enablement_decision(session, d.target_id) is None):
             enablement.set_flag(session, d.target_id, False)
+    lowered = [d for d in changed if d.kind == "POLICY" and d.target_type == catalog.TARGET_PROJECT_CLASSIFICATION]
+    if lowered:
+        # ADR-0133: a lowering decision that is revoked (or expires) restores the class it lowered (fail closed)
+        from aeos.portfolio import facade as portfolio
+
+        for d in lowered:
+            portfolio.on_classification_decision_inactive(session, d)
     if any(d.kind in catalog.SNAPSHOT_DECISION_KINDS for d in changed):
         _refresh_snapshot(session, reason="decision lifecycle change")
     _notify_readiness(session, changed, reason="decision lifecycle change: " + ", ".join(

@@ -1,0 +1,3 @@
+### Fixed
+
+- **The worker kill sweep survives a process that is exiting.** On macOS psutil raises `SystemError` when it reads the environment of a process the kernel is tearing down; the worker runtime's marker sweep (`processes._marker_sweep`, used to stop a run's processes) let it escape, so one unrelated process exiting during a cancel aborted the sweep (seen as a failing container kill test during a full suite). Such a process is now skipped like any other unreadable one - never killed on a guess - and the run's own marked processes are still found; the verifier's process group already handled the same error (LESSONS L15). Evidence: E2, a unit test red on the previous code with the original `SystemError` and green now, on macOS arm64.

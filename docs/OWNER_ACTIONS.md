@@ -126,9 +126,11 @@ Lost password: `./aeos admin recover <username>`.
 
 Running `claude` the first time asks you to sign in with your Claude Max account; then type `/exit`.
 `claude auth status` must show `loggedIn true`, authMethod `claude.ai` and subscriptionType `max`. The `echo`
-must print `<not set>`; remove any `ANTHROPIC_API_KEY` export from `~/.zshrc` and `~/.zprofile`. The `fable` bridge
-test must resolve inside the Fable family, with no MODEL_POLICY_MISMATCH. `doctor --functional` is the Claude
-capability test and uses a little Max quota.
+must print `<not set>`; remove any `ANTHROPIC_API_KEY` export from `~/.zshrc` and `~/.zprofile`. The `opus` bridge
+test must resolve inside the Opus family, with no MODEL_POLICY_MISMATCH. Every planning and review stage uses Opus;
+DLY AEOS never requests a Claude Fable model (owner decision 2026-10-28,
+[ADR-0131](decisions/ADR-0131-opus-only-claude-stages.md)), so there is no `fable` bridge test: the bridge refuses
+it (MODEL_FAMILY_REFUSED). `doctor --functional` is the Claude capability test and uses a little Max quota.
 
 ```bash
 brew install --cask claude-code
@@ -136,14 +138,14 @@ claude
 claude auth status
 echo "${ANTHROPIC_API_KEY:-<not set>}"
 ./aeos bridge test --model opus
-./aeos bridge test --model fable
 ./aeos bridge status
 ./aeos doctor --functional
 ```
 
 You can run the same capability test from the Control Center: *Model & Rute* (`/models`) → *Pengawas* →
-*Uji kemampuan*. If `fable` keeps resolving outside the Fable family, that is a DECISION: choose another
-supervisor through a recorded POLICY decision ([2.12](#212-smaller-open-decisions)). Never switch silently.
+*Uji kemampuan*. If `opus` keeps resolving outside the Opus family, that is a DECISION: choose another
+supervisor (never Fable) through a recorded POLICY decision ([2.12](#212-smaller-open-decisions)). Never switch
+silently.
 
 ### 1.5 Commit identity in the local `aeos.yaml` [per machine]
 
@@ -451,6 +453,13 @@ Copy the route key and its config hash from the `routes list` output.
      Jenis keputusan BUDGET and target `model_route` / the route key. In PowerShell, use single quotes
      (`'OpenCode Go subscription, $10/month plan fee for the TRIAL'`) or escape the dollar sign with a backtick
      (`` `$10 ``): inside double quotes PowerShell reads `$10` as a variable.
+
+     A BUDGET decision can also name the routes it covers in its scope, beside its target, for example
+     `--scope 'routes=opencode-go/glm-5.3-flash,opencode-go/glm-5.3'` (quoted: PowerShell splits an unquoted comma).
+     The command stores the exact route keys as a list, and the BUDGET covers only a route whose key is exactly one
+     of them: `opencode-go/kimi-k3.1-pro` does not cover `opencode-go/kimi-k3`, and an OpenRouter `:free` key does
+     not cover its paid twin. A text scope recorded before this change is read the same way (split on commas, exact
+     keys). A BUDGET that names a route also keeps an OpenCode Go route from moving between WATCHLIST and WORKER.
   5. Activate it as TRIAL with that BUDGET decision. The provider restricts regions, so state the region(s) your
      workspace allows: `--region EU-US` for the workspace default (Europe and United States). If you want one region
      only, restrict the workspace first (Console → Settings → Privacy → Regions), then state that one. Name the ToS
@@ -495,6 +504,20 @@ Copy the route key and its config hash from the `routes list` output.
     `openrouter_free_max_active` and `route_reselect_after_minutes` ([OPERATIONS.md](OPERATIONS.md), "Environment
     variables"). They are not part of a route's configuration, so changing one never voids a TRIAL. Restart
     `./aeos serve` after a change.
+  * **Paid OpenRouter only by escalation or overflow (ADR-0128, your decision R34).** A route that costs money per call
+    always ranks after every Go and free route, whatever its score or the agent's preference. It takes an INTERNAL task
+    only when two earlier attempts of that task on Go or free routes failed the verifier, the review or the acceptance
+    (ESCALATION; a quota, time-out or crash stop does not count), or when every Go or free route that could take the
+    task is busy, out of its 5h window or cooling down (OVERFLOW). A PUBLIC task never runs on it. Otherwise the task
+    waits (`ROUTE_CAPACITY` or `PAID_NOT_ADMITTED`). The paid route still needs your BUDGET decision naming its exact
+    route key, its activation, and a cost limit per task (`limits.max_cost_usd`); the global budget still applies.
+    Every paid run is recorded as an event (`route.paid_admitted`) and in the audit log. To turn a path off,
+    set `paid_escalation: false` or `paid_overflow: false` in `aeos.yaml` and restart `./aeos serve`.
+    ESCALATION does not start by itself: a task may have at most 2 attempts (§21 pilot cap), so after the second
+    failure it is BLOCKED with `NEEDS_DECISION` ("attempt cap reached (2/2)"). Retry it with a rationale and one extra
+    attempt (*Pekerjaan Live* -> retry); that attempt is the one that goes to the paid route first. If the task's last
+    attempt stopped at a quota on a Go route, it goes back to a Go or free route instead (ADR-0124), never first to the
+    paid route.
 
   * **No cost limit per task.** A TaskSpec needs no `max_cost_usd`. The marginal cost of each run is $0, and the
     run's cost cap is $0.
@@ -549,8 +572,10 @@ Copy the route key and its config hash from the `routes list` output.
   4. To undo a move before you record any decision on it: the same command with `--pool WATCHLIST`.
 * **Free OpenRouter WORKER routes (decision C, ADR-0041 amendment 2026-10-26).** Free OpenRouter models (ids ending in
   `:free`) may serve worker tasks for **PUBLIC data only**, PERSONAL only. INTERNAL data stays on the OpenCode Go routes;
-  CONFIDENTIAL never goes to a worker route. Other OpenRouter routes keep the rules above (a paid route needs a BUDGET
-  decision); among OpenRouter routes `set-pool` moves only `:free` routes. Since your decision of 2026-10-28
+  CONFIDENTIAL never goes to a worker route. The DLY AEOS project's own tasks are INTERNAL until you record its
+  PUBLIC classification ([2.13](#213-data-classification-of-the-dly-aeos-project-per-machine)). Other OpenRouter
+  routes keep the rules above (a paid route needs a BUDGET decision); among OpenRouter routes `set-pool` moves only
+  `:free` routes. Since your decision of 2026-10-28
   (decision C', ADR-0124) a free route is the fallback for PUBLIC tasks: the Go routes rank first, and a PUBLIC task
   uses a free route when no Go route can take it (busy, cooling down, out of 5h allowance or past PUBLIC's share). When
   the free tier is at its limit and no Go route can take the task, it waits (`FREE_TIER_LIMIT_REACHED`, shown as
@@ -1119,8 +1144,8 @@ Each item below is recorded either as an ADR, through the builder, or with the c
     probed (LOCAL through `./aeos routes set-endpoint <local route_key> --endpoint http://127.0.0.1:<port>/v1 --as <admin> --rationale "<why>"`).
   * (D) Proxy anyway: `./aeos routes activate ... --accept-client-terms --client-terms-note "<what you read>"`. Still
     possible per free Zen route. Decision A leaves the Zen client restriction UNDECIDED.
-* **Supervisor model.** If Fable resolves to another family (1.4), choose another supervisor, or pin a stage
-  model with
+* **Supervisor model.** If Opus resolves to another family (1.4), choose another supervisor (never Fable,
+  ADR-0131), or pin a stage model of the Opus family with
   `./aeos policy decide --kind POLICY --stage-model <STAGE>=<exact-model-id> --eval-run <id> --rollback-target <old> --domain PERSONAL --as <admin> --rationale "<why>"`,
   or on *Keputusan* with the preset that starts "Pin model supervisor per tahap perencanaan". Also decide whether a
   supervisor version change must stop planning until it is evaluated.
@@ -1155,6 +1180,77 @@ Each item below is recorded either as an ADR, through the builder, or with the c
   was ever real, rotate it first.
 * **GitHub profile (optional).** Contributions on the public repository count once commits land on `main` with
   your verified or noreply address.
+
+### 2.13 Data classification of the DLY AEOS project [per machine]
+
+Decided 2026-10-28: the DLY AEOS project (`dly-aeos`, PERSONAL) becomes PUBLIC, because its repository is public
+on GitHub. `aeos seed` registers it INTERNAL. Until this is recorded, every task planned for it is at least
+INTERNAL, so the PUBLIC-only routes (DeepSeek on OpenCode Go, the free OpenRouter models) never take its tasks
+(ADR-0133).
+
+Record: you approve in chat and the maintainer runs this as your actor (your rule R43 of 2026-10-28), or you run
+it yourself. It asks for no password: that is allowed only because you approve in chat, and the decision and the
+audit record say so and name your approval (`--approval-ref`). `<admin>` is your SUPER_ADMIN username:
+
+```bash
+./aeos project reclassify --project dly-aeos --domain PERSONAL \
+  --to PUBLIC --actor "<admin>" \
+  --approval-ref "chat 2026-10-28, owner rule R43" \
+  --reason "owner decision 2026-10-28: the repository is public"
+```
+
+**It is refused while the project has content.** A lowering is only possible for a project with no plans, plan
+versions, planning contexts or runs, task specs, worker runs, reviews, documents or document revisions (checkpoints
+included), memory records, attachments, evidence, context packs, decision requests, eval case candidates, export
+snapshots or change proposals: copies of older content (compiled task inputs, re-rendered documents, context packs)
+would otherwise reach PUBLIC tasks and routes (ADR-0133 decision 17). Repositories and integrations are not content,
+and neither is platform probe evidence: a `PROVIDER_CAPABILITY` record (the code host's merge-gate capability probe)
+without a run or a task is metadata about the platform that never reaches a task's context (ADR-0133 decision 19); the
+output says how many such records it did not count. When content exists the command changes nothing, exits with 1
+and prints, for example:
+
+<!-- paste-safe: file-content -->
+```text
+LOWERING_BLOCKED_BY_CONTENT: project dly-aeos cannot be lowered from INTERNAL to
+PUBLIC while it has content recorded at INTERNAL: plans 1, plan versions 1, task
+specs 2, evidence 1. Copies of it (compiled task inputs, re-rendered documents,
+context packs) would carry it to PUBLIC tasks and routes. Archive or delete that
+content first; nothing was changed. Append-only, never deleted: evidence, plan
+versions, task specs; a project that has them keeps its class (create a new
+project at PUBLIC for the work that may be PUBLIC). Not counted: 1 platform
+probe evidence record(s) (PROVIDER_CAPABILITY without a run or task), which
+never reach a task's context.
+Nothing was changed.
+```
+
+What to do: archive or delete the listed content first (there is no archive command for this yet). Plan versions,
+task specs and evidence are append-only and can never be deleted, so a project that has any of them keeps its class;
+the work that may be PUBLIC then needs a new project created at PUBLIC. On this Mac (checked read-only on
+2026-10-29) the DLY AEOS project holds no content and one `PROVIDER_CAPABILITY` probe record, which is not counted,
+so the command above goes through here (its output then reads "Not counted: 1 platform probe evidence record(s)").
+Run it before the project gets plans or tasks: after that, a lowering is refused.
+
+When it succeeds it records a POLICY decision on `project_classification:<project id>` naming the old class
+INTERNAL, the new class PUBLIC, your reason, your username and the approval reference, plus the audit record
+`portfolio.project.reclassify` and the event `portfolio.project.reclassified` with the same facts. Plans and task
+DAGs compiled afterwards use PUBLIC: a task whose plan states no class is PUBLIC, and a task the plan marks higher
+keeps the higher class. The repository itself (its files at a task's commit) is PUBLIC, because that is what you
+decided; the owner-local MCI source never goes to a PUBLIC task.
+
+Check it with `./aeos project list --domain PERSONAL` (the class column) and
+`./aeos policy decisions --kind POLICY --target-type project_classification`.
+
+To undo, either run the command again with `--to INTERNAL` (a raise needs no decision; it ends the lowering
+decision), or revoke the decision with `./aeos policy revoke <decision id> --as "<admin>" --reason "<why>"` (asks for
+your password), which restores INTERNAL (after two lowerings in a row, the class before the first). After a raise to
+INTERNAL, exactly this happens to the project's open tasks: routing no longer selects a PUBLIC-only route for them;
+a run already in progress on such a route has its next model request, and every one after it, refused by the
+broker (HTTP 403 `TASK_CLASS_NOT_ALLOWED`, nothing is sent; the refusal is in the audit trail); a run starting later is
+refused before it starts (`CONTEXT_CLASS_NOT_ALLOWED`) if its context is above what the route allows; and the
+delivery gate G0 refuses a task whose class is below the project's. The TaskSpecs themselves are not changed.
+
+An OFFICE project is never lowered by this command: that is the company's authorisation
+([4.1](#41-company-authorisation-for-office)). Raising an OFFICE project is allowed.
 
 ---
 

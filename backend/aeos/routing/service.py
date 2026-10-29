@@ -67,6 +67,7 @@ from aeos.routing.facade import (
     TOOL_PROBE_PASS,
     RouteDecision,
 )
+from aeos.routing.task_class import effective_task_class
 
 log = logging.getLogger("aeos.routing")
 
@@ -260,6 +261,23 @@ def find_route_decision(session: Session, *, kind: str, route: ModelRoute) -> De
     return d if _decision_valid(d, kind=kind, config_hash=current) else None
 
 
+def scope_route_keys(auth_scope: object) -> list[str]:
+    """The exact route keys a decision's ``auth_scope.routes`` names - the one reader of that field.
+
+    A list stays a list (its strings, stripped; anything else in it is dropped); a string (``aeos policy decide
+    --scope routes=a,b`` stored one before it stored a list) is split on ',' (stripped, empties dropped); anything
+    else names no route. Callers test membership in the returned list, never in the raw value: ``key in "a,b"`` is a
+    substring test, so a scope naming ``opencode-go/kimi-k3.1-pro`` would also cover ``opencode-go/kimi-k3``."""
+    raw = auth_scope.get("routes") if isinstance(auth_scope, dict) else None
+    if isinstance(raw, str):
+        items: list[object] = list(raw.split(","))
+    elif isinstance(raw, list):
+        items = list(raw)
+    else:
+        return []
+    return [k for k in (x.strip() for x in items if isinstance(x, str)) if k]
+
+
 def budget_decision_valid(session: Session, decision_id: str | None, route: ModelRoute) -> tuple[bool, str]:
     if not decision_id:
         return False, "an explicit BUDGET decision id is required"
@@ -267,7 +285,7 @@ def budget_decision_valid(session: Session, decision_id: str | None, route: Mode
     if not _decision_valid(d, kind="BUDGET", config_hash=None):
         return False, "budget decision is missing, not ACTIVE, not human or expired"
     assert d is not None
-    routes = (d.auth_scope or {}).get("routes") or []
+    routes = scope_route_keys(d.auth_scope)  # exact keys: never a substring of a text scope
     covers = (d.target_type == TARGET_TYPE and d.target_id == route.route_key) or route.route_key in routes
     if not covers:
         return False, "budget decision does not cover this route"
@@ -315,8 +333,9 @@ def free_worker_problem(session: Session, route: ModelRoute, *, run_id: str | No
         task = session.get(TaskSpec, run.task_id) if run is not None and run.task_id else None
         if task is None:
             problems.append("the run's TaskSpec cannot be read, so its data classification is unknown (fail closed)")
-        elif task.data_classification != DataClassification.PUBLIC.value:
-            problems.append(f"the run's task is {task.data_classification}: decision C serves PUBLIC data only")
+        elif (klass := effective_task_class(session, task)) != DataClassification.PUBLIC.value:
+            # ADR-0133: the higher of the task's class and its project's current class (a raise applies at once)
+            problems.append(f"the run's task is {klass}: decision C serves PUBLIC data only")
     return "; ".join(problems) or None
 
 
@@ -1107,16 +1126,25 @@ def free_first(route: ModelRoute) -> bool:
 
 def rank_tier(route: ModelRoute, data_classification: str | None) -> int:
     """The first ranking key. PUBLIC (decision C', owner 2026-10-28): 0 a SUBSCRIPTION route within its plan (OpenCode
-    Go, $0 marginal), 1 a free OpenRouter WORKER route (decision C, the fallback), 2 any other route. Any other data
-    class (and a caller that names none): 0 a free OpenRouter WORKER route (never eligible for INTERNAL), 1 the rest -
-    the ranking INTERNAL tasks always had."""
+    Go, $0 marginal), 1 a free OpenRouter WORKER route (decision C, the fallback), 2 any other route, 3 a per-token paid
+    route. Any other data class (and a caller that names none): 0 a free OpenRouter WORKER route (never eligible for
+    INTERNAL), 1 the rest, 2 a per-token paid route. ADR-0128: the paid tier is below every $0-marginal tier, so an eval
+    score or an agent preference re-orders a paid route only among paid routes and never puts it ahead of a route that
+    costs nothing per call (whether it may take the task at all is ``paid.paid_admission``)."""
+    from aeos.routing import paid
+
+    charged = paid.per_token_paid(route)
     if data_classification == DataClassification.PUBLIC.value:
         from aeos.routing import capacity
 
         if capacity.go_first(route):
             return 0
-        return 1 if free_first(route) else 2
-    return 0 if free_first(route) else 1
+        if free_first(route):
+            return 1
+        return 3 if charged else 2
+    if free_first(route):
+        return 0
+    return 2 if charged else 1
 
 
 def preferred_list(value: Any) -> list[str]:
@@ -1195,7 +1223,7 @@ def _select_eval_route(session: Session, task: TaskSpec, pol: dict[str, Any], bo
         raise Blocked(f"the task is bound to {label}; its route {key or 'UNKNOWN'} cannot serve it: "
                       + "; ".join(bound.get("reasons") or []), code="EVAL_ROUTE_NOT_SERVED", details=bound)
     route = get_route(session, key)
-    decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
+    decision = eligible_routes(session, domain=task.domain, data_classification=effective_task_class(session, task),
                                needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=route.pool,
                                tools=[str(t) for t in task.tools_allowed or []])
     reasons = list(decision.rejected.get(key) or ([] if key in decision.eligible else ["not eligible"]))
@@ -1224,7 +1252,8 @@ def _free_tier_wait(limited: list[str], rejected: dict[str, list[str]], *, would
 def _limit_wait(session: Session, held: list[str], limited: list[str], rejected: dict[str, list[str]], *,
                 would_serve: str | None) -> Blocked:
     """The task waits: every $0-marginal route ranked ahead of what is left is kept out by a limit (*limited*) or
-    skipped for load (*held*), and what is left - if anything - is not $0 marginal (never a paid route after a skip).
+    skipped for load (*held*), and what is left - if anything - is not $0 marginal and not admitted as paid (ADR-0128:
+    a per-token paid route after a skip only by OVERFLOW or ESCALATION of an INTERNAL task, ``paid.paid_admission``).
     A free OpenRouter route at its limit keeps decision C's code (FREE_TIER_LIMIT_REACHED)."""
     from aeos.routing import capacity
 
@@ -1233,7 +1262,8 @@ def _limit_wait(session: Session, held: list[str], limited: list[str], rejected:
         return _free_tier_wait(free, rejected, would_serve=would_serve)
     keys = [*held, *[k for k in limited if k not in held]]
     return Blocked("every $0-marginal route for this task is busy, cooling down or out of 5h allowance; the task waits "
-                   "- never a paid route" + (f" (would have been {would_serve})" if would_serve else ""),
+                   "- never a paid route unless ADR-0128 admits one (an INTERNAL task, ESCALATION or OVERFLOW)"
+                   + (f" (would have been {would_serve})" if would_serve else ""),
                    code=capacity.CODE_CAPACITY,
                    details={"held": keys, "rejected": {k: rejected.get(k, []) for k in keys},
                             "would_serve": would_serve,
@@ -1244,9 +1274,10 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
     """The route for *task* (§23): hard filters, then the ranking (``rank``), then the first ranked route the load
     rules do not skip (``capacity``). *preferred_routes* is the implementing agent's ``route_policy.preferred_routes``:
     it only re-orders eligible routes."""
-    from aeos.routing import capacity
+    from aeos.routing import capacity, paid
 
     pol = _task_policy(task)
+    klass = effective_task_class(session, task)  # ADR-0133: max(task class, current project class)
     try:
         from aeos.broker.facade import SERVED_POOLS as served
     except ImportError:  # pragma: no cover - broker is part of the platform
@@ -1269,7 +1300,7 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
         raise Blocked(f"pool {pol['pool']} has no controlled execution path through the broker yet; "
                       f"only {', '.join(served)} routes are served", code="POOL_NOT_SERVED",
                       details={"pool": pol["pool"], "served_pools": list(served)})
-    decision, limited = _eligibility(session, domain=task.domain, data_classification=task.data_classification,
+    decision, limited = _eligibility(session, domain=task.domain, data_classification=klass,
                                      needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=pol["pool"],
                                      tools=[str(t) for t in task.tools_allowed or []])
     eligible = list(decision.eligible)
@@ -1289,8 +1320,16 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
             if skip is not None:  # a pinned primary waits for its own capacity, it is never swapped
                 rejected[primary] = [*rejected.get(primary, []), f"{skip[0]}: {skip[1]}"]
                 raise _limit_wait(session, [primary], [], rejected, would_serve=None)
+            pinned = paid.paid_admission(session, task, route)  # ADR-0128: a pinned paid primary is no exception
+            if pinned is not None and not pinned["admitted"]:
+                rejected[primary] = [*rejected.get(primary, []), f"{pinned['code']}: {pinned['why']}"]
+                raise Blocked(pinned["why"], code=paid.CODE_NOT_ADMITTED,
+                              details={"rejected": rejected, "primary": primary, "paid_admission": pinned,
+                                       "reasons": [pinned["why"]]})
             return RouteDecision(route=route, eligible=[primary, *[k for k in eligible if k != primary]],
-                                 rejected=rejected, reason=f"primary route {primary} eligible")
+                                 rejected=rejected, reason=f"primary route {primary} eligible"
+                                 + (f"; paid {pinned['reason']} (ADR-0128)" if pinned else ""),
+                                 paid_admission=pinned)
         fb = _walk_fallback(session, get_route(session, primary), eligible, rejected)
         if fb is not None:
             skip = capacity.capacity_skip(session, fb, task=task, runs=runs)
@@ -1308,10 +1347,20 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
             raise _limit_wait(session, [], limited, rejected, would_serve=None)
         raise Blocked("no approved route is eligible for this task", code="NO_ELIGIBLE_ROUTE",
                       details={"rejected": rejected, "domain": task.domain,
-                               "classification": task.data_classification})
+                               "classification": klass})
     preferred = preferred_list(preferred_routes)
     ranked = rank(session, [*eligible, *limited], role, preferred=preferred,
-                  data_classification=task.data_classification)
+                  data_classification=klass)
+    charged = {x.route_key for x in ranked if x.route_key not in limited
+               and paid.per_token_paid(get_route(session, x.route_key))}
+    if charged and paid.escalation_active(session, task):
+        # ADR-0128 ESCALATION: after 2 quality failures on $0-marginal routes the paid routes are tried first (in their
+        # own order); a busy paid route still leaves the $0-marginal ones after it. After a quota stop only the stopped
+        # route itself may go first (ADR-0124 decision 4: the admission refuses a move to any other paid route, so
+        # putting one first would keep the task waiting while a $0-marginal route is free)
+        stopped = paid.quota_stop_route(session, task)
+        first = charged if stopped is None else charged & {stopped}
+        ranked = [*[x for x in ranked if x.route_key in first], *[x for x in ranked if x.route_key not in first]]
     held: list[str] = []  # skipped for load (busy, allowance fit, PUBLIC share)
     passed: list[str] = []  # skipped for a limit (free tier, cool-down)
     for item in ranked:
@@ -1325,18 +1374,34 @@ def select_route(session: Session, *, task: TaskSpec, preferred_routes: list[str
             rejected[key] = [*rejected.get(key, []), f"{skip[0]}: {skip[1]}"]
             held.append(key)
             continue
-        if (held or passed) and not capacity.zero_marginal(route):
+        pa: dict[str, Any] | None = None
+        if key in charged:
+            # ADR-0128: the paid tier is last, so every $0-marginal route was tried before (or ESCALATION reordered)
+            blocked = [k for k in [*held, *passed] if k not in charged and (k in limited or capacity.zero_marginal(
+                get_route(session, k)))]
+            pa = paid.paid_admission(session, task, route, blocked=blocked)
+            if pa is not None and not pa["admitted"]:
+                rejected[key] = [*rejected.get(key, []), f"{pa['code']}: {pa['why']}"]
+                if held or passed:
+                    wait = _limit_wait(session, held, passed, rejected, would_serve=key)
+                    wait.details.update(paid_admission=pa,
+                                        reasons=[*wait.details.get("reasons", []), f"{pa['code']}: {pa['why']}"])
+                    raise wait
+                raise Blocked(pa["why"], code=paid.CODE_NOT_ADMITTED,
+                              details={"rejected": rejected, "paid_admission": pa, "reasons": [pa["why"]]})
+        elif (held or passed) and not capacity.zero_marginal(route):
             raise _limit_wait(session, held, passed, rejected, would_serve=key)
         serving = [r.route_key for r in ranked if r.route_key not in limited and r.route_key not in held]
         basis = item.basis.lower()
-        tier = ("Go first (decision C')" if item.tier == 0 and task.data_classification == "PUBLIC"
-                else "free (decision C)" if free_first(route) else None)
+        tier = ("Go first (decision C')" if item.tier == 0 and klass == "PUBLIC"
+                else "free (decision C)" if free_first(route)
+                else f"paid {pa['reason']} (ADR-0128)" if pa is not None else None)
         how = f"{tier}, then by {basis}" if tier else f"by {basis}"
         if item.preferred is not None:
             how += f" and agent preference #{item.preferred + 1}"
         skipped = f"; skipped {', '.join(held + passed)}" if held or passed else ""
         return RouteDecision(route=route, eligible=serving, rejected=rejected,
-                             reason=f"selected {how} for role {role}{skipped}")
+                             reason=f"selected {how} for role {role}{skipped}", paid_admission=pa)
     raise _limit_wait(session, held, passed, rejected, would_serve=None)
 
 
@@ -1374,7 +1439,7 @@ def fallback_route(session: Session, *, task: TaskSpec, failed_route_key: str) -
                       f"evaluated route {bound.get('route_key')}", code="EVAL_NO_FALLBACK", details=bound)
     failed = get_route(session, failed_route_key)
     pol = _task_policy(task)
-    decision = eligible_routes(session, domain=task.domain, data_classification=task.data_classification,
+    decision = eligible_routes(session, domain=task.domain, data_classification=effective_task_class(session, task),
                                needs_tools=pol["needs_tools"], min_context=pol["min_context"], pool=failed.pool,
                                tools=[str(t) for t in task.tools_allowed or []])
     eligible = [k for k in decision.eligible if not pol["routes"] or k in pol["routes"]]
@@ -1999,11 +2064,11 @@ GO_POOL_MOVES = frozenset({("WATCHLIST", "WORKER"), ("WORKER", "WATCHLIST")})
 
 def route_decision_ids(session: Session, route: ModelRoute) -> list[str]:
     """Every decision that names *route*, whatever its kind or status (INVALIDATED and expired ones too): decisions
-    targeting the route key, and BUDGET decisions listing it in ``auth_scope.routes``."""
+    targeting the route key, and BUDGET decisions listing it in ``auth_scope.routes`` (a list or a text scope, exact
+    keys only: ``scope_route_keys``)."""
     ids = list(session.scalars(select(Decision.id).where(Decision.target_id == route.route_key)))
     for d in session.scalars(select(Decision).where(Decision.kind == "BUDGET")):
-        routes = (d.auth_scope or {}).get("routes") if isinstance(d.auth_scope, dict) else None
-        if isinstance(routes, list) and route.route_key in routes and d.id not in ids:
+        if route.route_key in scope_route_keys(d.auth_scope) and d.id not in ids:
             ids.append(d.id)
     return ids
 

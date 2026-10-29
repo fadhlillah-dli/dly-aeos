@@ -21,6 +21,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/claude_hooks/zsh_wordsplit_guard.py\" || true"
+          }
+        ]
+      }
     ]
   }
 }

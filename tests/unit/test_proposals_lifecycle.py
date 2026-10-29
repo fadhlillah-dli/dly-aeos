@@ -420,7 +420,7 @@ def test_not_proven_record_only_after_the_bridge_could_not_run(db, policy, monke
 def test_checkpoint_via_bridge_and_quota_wait_keeps_the_gate_closed(db, policy, monkeypatch):
     p, _t, _ev = trialled(db)
     fake = types.ModuleType("aeos.claude_bridge.bridge")
-    fake.run_structured = lambda req: ClaudeResult(ok=False, structured=None, text="", model_requested="fable",
+    fake.run_structured = lambda req: ClaudeResult(ok=False, structured=None, text="", model_requested="opus",
                                                    model_resolved=None, engine_version=None, session_id=None, usage={},
                                                    duration_ms=1, error_code="QUOTA_EXHAUSTED", quota_exhausted=True)
     monkeypatch.setitem(sys.modules, "aeos.claude_bridge.bridge", fake)
@@ -434,7 +434,7 @@ def test_checkpoint_via_bridge_and_quota_wait_keeps_the_gate_closed(db, policy, 
 
     def ok(req):
         seen["prompt"] = req.prompt
-        return ClaudeResult(ok=True, structured=MANUAL_PASS, text="", model_requested="fable", model_resolved="claude-fable-5-1",
+        return ClaudeResult(ok=True, structured=MANUAL_PASS, text="", model_requested="opus", model_resolved="claude-opus-5-5",
                             engine_version="2", session_id=None, usage={}, duration_ms=1)
 
     fake.run_structured = ok

@@ -24,7 +24,7 @@ from aeos.models.claude_bridge_ext import ClaudeCapabilityTest
 from aeos.models.cost import QuotaState
 from aeos.models.routing import ModelRoute
 from tests.conftest import VIEWER_PW, AuthedClient, create_admin, create_viewer
-from tests.unit.test_claude_bridge_parsing import FABLE_FALLBACK, OPUS_OK, SCHEMA
+from tests.unit.test_claude_bridge_parsing import FABLE_ANSWER, OPUS_OK, SCHEMA
 from tests.unit.test_routing_fakes import install_fakes
 
 PROMPT = "Rencanakan fitur kecil. Kembalikan {\"ok\": true}."
@@ -129,30 +129,34 @@ def test_run_structured_contract(settings, db, fake_claude, monkeypatch, tmp_pat
     assert opus.resolved_version == "claude-opus-5-5" and opus.identity_status == "VERIFIED"
 
 
-def test_fable_policy_mismatch_rejected_and_not_recorded_as_resolution(settings, db, fake_claude, monkeypatch):
-    """§12 'tolak penerimaan hasil bila model ... tidak sesuai policy': no structured answer is handed out."""
+def test_opus_request_answered_by_fable_is_rejected_and_not_recorded_as_resolution(settings, db, fake_claude,
+                                                                                   monkeypatch):
+    """§12 'tolak penerimaan hasil bila model ... tidak sesuai policy', ADR-0131: an opus request whose answer came
+    from a Fable model is a MODEL_POLICY_MISMATCH (fail closed); no structured answer is handed out."""
     install_fakes(monkeypatch)
     _seed_routes(db)
-    fake_claude(FABLE_FALLBACK)
-    res = bridge.run_structured(ClaudeRequest(purpose="review.checkpoint", role="Reviewer", model="fable",
+    fake_claude(FABLE_ANSWER)
+    res = bridge.run_structured(ClaudeRequest(purpose="review.checkpoint", role="Reviewer", model="opus",
                                               prompt=PROMPT, json_schema=SCHEMA, domain="PERSONAL"), settings=settings)
-    assert not res.ok and res.error_code == "MODEL_POLICY_MISMATCH" and res.model_resolved == "claude-opus-4-8"
+    assert not res.ok and res.error_code == "MODEL_POLICY_MISMATCH" and res.model_resolved == "claude-fable-5-1"
     assert res.structured is None  # the off-policy answer never reaches the caller
     db.expire_all()
+    assert db.query(ModelRoute).filter_by(route_key="claude-native/opus").one().resolved_version is None
     assert db.query(ModelRoute).filter_by(route_key="claude-native/fable").one().resolved_version is None
 
 
 def test_quota_exhausted_checkpoint_wait_no_fallback(settings, db, fake_claude, monkeypatch):
-    """§50 'Fable Max quota habis': ok=False QUOTA_EXHAUSTED, QuotaState EXHAUSTED, single call only."""
+    """§50 'Fable Max quota habis' (since ADR-0131 the review model is opus): ok=False QUOTA_EXHAUSTED, QuotaState
+    EXHAUSTED, single call only."""
     install_fakes(monkeypatch)
     out = dict(OPUS_OK, is_error=True, subtype="error_during_execution", structured_output=None,
                result="Claude AI usage limit reached|1893456000")  # resets 2030-01-01
     fake_claude(out, exit_code=1)
-    res = bridge.run_structured(ClaudeRequest(purpose="review.checkpoint", role="Reviewer", model="fable",
+    res = bridge.run_structured(ClaudeRequest(purpose="review.checkpoint", role="Reviewer", model="opus",
                                               prompt=PROMPT, json_schema=SCHEMA, domain="PERSONAL"), settings=settings)
     assert not res.ok and res.quota_exhausted and res.error_code == "QUOTA_EXHAUSTED"
     assert fake_claude.state["calls"] == 1  # no retry with another model
-    q = db.query(QuotaState).filter_by(provider="claude-native", scope="fable").one()
+    q = db.query(QuotaState).filter_by(provider="claude-native", scope="opus").one()
     assert q.state == "EXHAUSTED" and q.resets_at is not None
     assert bridge.quota_view(db)["state"] == "EXHAUSTED"
     q.resets_at = q.resets_at.replace(year=2020)  # reset passed -> back to UNKNOWN (never "OK")
@@ -202,6 +206,9 @@ def test_blocked_bridge_never_runs(settings, monkeypatch):
 @pytest.mark.parametrize("kwargs, code", [
     ({"model": "gpt-6"}, "REQUEST_INVALID"),
     ({"model": "haiku"}, "REQUEST_INVALID"),
+    # ADR-0131: the Claude Fable family is never requested, as an alias or a pinned id
+    ({"model": "fable"}, "MODEL_FAMILY_REFUSED"),
+    ({"model": "claude-fable-5-1"}, "MODEL_FAMILY_REFUSED"),
     ({"allowed_tools": ["Read", "Bash"]}, "TOOL_NOT_ALLOWED"),
     ({"allowed_tools": ["Edit"]}, "TOOL_NOT_ALLOWED"),
     ({"project_id": "p1", "domain": None}, "DOMAIN_REQUIRED"),
