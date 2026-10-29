@@ -146,7 +146,8 @@ def test_timeout_kills_process_tree(tmp_path: Path):
                              disable_plugin_autoload=True)
     res = procs.run_process([sys.executable, "-c", code], cwd=tmp_path, env=env, timeout=3)
     assert res.timed_out and res.returncode is None
-    assert res.duration_s < 30
+    # timing-cap: 45 s vs a measured 3.0 s (3 s timeout + kill, load 5-65), 15x; waiting the 60 s sleep fails
+    assert res.duration_s < 45
 
 
 # Candidate code that starts a detached grandchild (own process group / session, no pipes) which acts two seconds
@@ -210,6 +211,7 @@ def test_a_contained_step_is_not_stalled_by_a_descendant_holding_its_output(tmp_
     res = procs.run_process([sys.executable, "-c", holder], cwd=tmp_path, env=env, timeout=90, contain=True)
     assert not res.timed_out and res.returncode == 0 and "main done" in res.stdout
     # Windows lists the venv launcher + interpreter (+ its console host) of the sleeper: at least one survivor
+    # timing-cap: 45 s vs a measured 2.1-3.0 s (load 5-65), 15x; a stall runs into the 90 s step timeout
     assert res.duration_s < 45 and len(res.survivors) >= 1, (res.duration_s, res.survivors)
 
 
@@ -244,11 +246,14 @@ def _contained(tmp_path: Path, seconds: float, **kw):
 def test_an_allow_listed_build_tool_helper_that_exits_within_its_grace_is_no_survivor(tmp_path: Path):
     """An honest build step is not quarantined: an allow-listed helper process still finishing after its parent got
     the helper grace, ended inside it (while the tamper window was open) and is listed, not hidden."""
-    res = _contained(tmp_path, HELPER_SECONDS, helpers=_helper_names(), helper_grace=15.0)
+    grace = 40.0  # far above the helper's HELPER_SECONDS, so the bound below has room for a slow machine
+    res = _contained(tmp_path, HELPER_SECONDS, helpers=_helper_names(), helper_grace=grace)
     assert res.returncode == 0 and not res.timed_out
     assert res.survivors == [], res.survivors
     assert res.helper_exits and all(s.get("pid") for s in res.helper_exits), res.helper_exits
-    assert res.duration_s < 15
+    # the step ended when the helper did, not when the grace ran out: a reap that waits the whole grace fails
+    # timing-cap: the bound is the grace itself; a run is the 3.5 s helper + 0.1-0.3 s (3.6-3.8 s at load 5-65), 10x
+    assert res.duration_s < grace
 
 
 def test_the_same_lingering_process_is_a_survivor_when_it_is_not_allow_listed(tmp_path: Path):
@@ -259,7 +264,9 @@ def test_the_same_lingering_process_is_a_survivor_when_it_is_not_allow_listed(tm
 def test_an_allow_listed_helper_still_alive_after_its_grace_is_a_survivor(tmp_path: Path):
     res = _contained(tmp_path, 60, helpers=_helper_names(), helper_grace=1.0)
     assert res.returncode == 0 and len(res.survivors) >= 1, res.survivors
-    assert res.duration_s < 30  # listed and killed, never waited for
+    # listed and killed, never waited for
+    # timing-cap: 45 s vs a measured 3.2-3.8 s (1 s helper grace + reap, load 5-65), 12x; the helper sleeps 60 s
+    assert res.duration_s < 45
 
 
 def test_a_contained_step_without_descendants_has_no_survivors(tmp_path: Path):
@@ -368,10 +375,14 @@ def test_a_member_that_left_the_group_is_a_survivor_at_once_without_grace(monkey
     import time
 
     g, calls = _scripted_group(monkeypatch, scans=[[777], [], []], detached_pids={777})
+    grace = 2.0
     start = time.monotonic()
-    survivors = g.reap(grace=2.0)
+    survivors = g.reap(grace=grace)
+    took = time.monotonic() - start
     assert [s["pid"] for s in survivors] == [777] and survivors[0]["detached"] is True
-    assert calls["killed"] == 1 and time.monotonic() - start < 1.0  # no grace was waited
+    assert calls["killed"] == 1
+    # timing-cap: the bound is the grace itself; waiting it fails, the scripted reap takes about 20 us
+    assert took < grace, f"reap took {took:.3f} s: the grace was waited"
 
 
 def test_an_ordinary_member_still_gets_the_grace_to_finish_exiting(monkeypatch):

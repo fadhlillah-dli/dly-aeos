@@ -165,6 +165,7 @@ def test_mmdc_timeout_kills_the_whole_process_tree(tmp_path):
     started = time.monotonic()
     with pytest.raises(subprocess.TimeoutExpired):
         vis.run_bounded([sys.executable, "-c", script], timeout=6)
+    # timing-cap: 30 s vs a measured 6.0 s (the 6 s timeout plus 0.01 s); a missing kill waits the 60 s sleep
     assert time.monotonic() - started < 30
     child = int(pid_file.read_text())
     deadline = time.monotonic() + 10

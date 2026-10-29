@@ -30,6 +30,7 @@ def test_parser_timeout_kills_process(tmp_path: Path, monkeypatch):
         f"import os,time; open(r'{pid_file}','w').write(str(os.getpid())); time.sleep(60)"))
     started = time.monotonic()
     out = parser.run_parser(src, "markdown", timeout=2)
+    # timing-cap: 20 s vs a measured 2.0 s (the 2 s timeout plus 0.01 s); a missing kill waits the 60 s sleep
     assert time.monotonic() - started < 20
     assert out.status == "FAILED" and out.error_code == "PARSE_TIMEOUT"
     deadline = time.monotonic() + 10

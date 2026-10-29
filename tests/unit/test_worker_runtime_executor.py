@@ -338,6 +338,7 @@ def test_timeout_kills_worker(settings, setup):
     t0 = time.monotonic()
     executor.execute_run(settings, run_id, heartbeat_seconds=0.2)
     run, _te = _load(run_id, task_id)
+    # timing-cap: 60 s vs a measured 2.1 s (the 1 s timeout plus the kill, 28x); a missing kill waits 120 s
     assert time.monotonic() - t0 < 60
     assert run.outcome_code == "TIMEOUT" and not processes.is_alive(run.pid, run.pid_create_time)
 

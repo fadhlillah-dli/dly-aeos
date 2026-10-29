@@ -47,6 +47,7 @@ def test_read_endpoint_latency_baseline(personal_client: AuthedClient, db):
         results[path] = {"n": SAMPLES, "p50_ms": round(statistics.median(timings), 2),
                          "p95_ms": round(_p95(timings), 2), "max_ms": round(max(timings), 2)}
     slow = {p: v for p, v in results.items() if float(v["p95_ms"]) > SANITY_CEILING_MS}
+    # timing-cap: 5000 ms vs a measured p95 of 2 to 60 ms per endpoint (85x the slowest); sanity only
     assert not slow, f"pathological latency (sanity ceiling {SANITY_CEILING_MS} ms): {slow}"
     report = {"status": "REPORT_ONLY", "note": "baseline numbers; no owner latency objective decided (§33)",
               "python": sys.version.split()[0], "platform": platform.platform(), "endpoints": results}
