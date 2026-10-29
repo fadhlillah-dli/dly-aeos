@@ -167,7 +167,8 @@ def require_case_insensitive_fs(tmp_path):
 
 
 def registered_paths(repo):
-    return [line[len("worktree "):] for line in g(repo, "worktree", "list", "--porcelain").splitlines()
+    """Registered worktree paths in this OS's spelling (Git for Windows prints C:/..., str(WindowsPath) is C:\\...)."""
+    return [str(Path(line[len("worktree "):])) for line in g(repo, "worktree", "list", "--porcelain").splitlines()
             if line.startswith("worktree ")]
 
 

@@ -438,7 +438,7 @@ def cmd_add(repo: Path, name: str, branch: str, base: str | None) -> int:
     refusal = refusal or link_refusal(legacy)
     old = next((e for e in entries[1:] if same_place(e.path, legacy)), None)
     if refusal is None and old is not None:
-        refusal = (f"a worktree named {name} already exists in the legacy location {old.path} (remove would be "
+        refusal = (f"a worktree named {name} already exists in the legacy location {Path(old.path)} (remove would be "
                    "ambiguous): move it into the worktrees folder or pick another name")
     if refusal is None and ref_sha(main, f"refs/heads/{branch}") is not None:
         refusal = f"branch {branch} already exists (add makes a NEW branch)"
@@ -495,8 +495,8 @@ def cmd_remove(repo: Path, name: str, *, unlink_links: bool, foreign: bool, forc
 
     in_folder, in_legacy = registered(dest), registered(legacy)
     if in_folder is not None and in_legacy is not None:
-        say(f"refused: ambiguous name {name}: both {in_folder.path} and the legacy {in_legacy.path} are worktrees; "
-            f"move one of them under another name, for example git worktree move {in_legacy.path} "
+        say(f"refused: ambiguous name {name}: both {Path(in_folder.path)} and the legacy {Path(in_legacy.path)} are worktrees; "
+            f"move one of them under another name, for example git worktree move {Path(in_legacy.path)} "
             f"{folder / '<other name>'} (never git worktree remove: it skips these checks and can follow a link), "
             "then run remove again")
         say(f"WORKTREE REMOVE: REFUSED {name}")
