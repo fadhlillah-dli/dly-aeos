@@ -683,3 +683,43 @@ def test_a_dry_run_test_with_live_alone_starts_no_host_binary(live, tmp_path, ca
         assert started == [], started
         assert out.rstrip().splitlines()[-1] == "OWNER_DRYRUN: OK", out
     _untouched(live)
+
+
+# --- background work a script starts is held, never run (L13, 2026-10-29) ------------------------------------------
+
+
+def test_background_planning_work_is_held_and_restored():
+    """A plan re-run inside a dry run must not start the four Opus planning stages for real: on 2026-10-29 one dry
+    run of revise_plan.py left two `claude -p` planning processes running against the throwaway copy."""
+    from aeos.planning import runner
+
+    original = runner.start
+    with od.background_work_held() as held:
+        assert runner.start is not original
+        assert runner.start("plan-1", actor="owner", action="run") is True
+    assert held == ["planning run for plan plan-1"]
+    assert runner.start is original  # restored, also for the rest of the process
+
+
+def test_run_script_holds_background_work_a_script_starts(monkeypatch, capsys):
+    """Red without the hold: the script's call reaches the real starter (here a sentinel that fails the test)."""
+    import fastapi
+
+    from aeos.api import app as app_module
+    from aeos.planning import runner
+
+    def real_start(*_a, **_k):
+        raise AssertionError("the dry run started real background planning work")
+
+    monkeypatch.setattr(runner, "start", real_start)
+    monkeypatch.setattr(app_module, "create_app", lambda *a, **k: fastapi.FastAPI())
+
+    def script_run(client, username, password, ask):
+        from aeos.planning import runner as r
+        return r.start("plan-9", actor=username, action="run")
+
+    od.run_script(script_run, settings=None, username="owner", password="pw", answers=od.Answers([]))
+    out = capsys.readouterr().out
+    assert "[dry run] background work NOT started (it would start for real): planning run for plan plan-9" in out
+    assert "run() returned: True" in out
+    assert runner.start is real_start  # restored after the run
