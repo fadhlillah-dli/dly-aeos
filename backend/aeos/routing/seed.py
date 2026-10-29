@@ -39,6 +39,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aeos.broker.facade import SUPERSEDED_ENDPOINTS, UPSTREAM_API_CHAT
+from aeos.core.errors import PolicyDenied
+from aeos.core.model_policy import invariant6_refusal
 from aeos.core.timeutil import ensure_aware
 from aeos.models.routing import ModelRoute
 from aeos.routing.service import REVIEWED_WORKER_TOOLS, compute_config_hash
@@ -175,6 +177,77 @@ GO_WORKERS_R31: tuple[tuple[str, str, float, dict[str, float]], ...] = (
     ("kimi-k3", "Kimi K3", 15, {"input": 3.00, "output": 15.00, "cached_read": 0.30}),
     ("step-5-preview", "Step 5 Preview", 15, {"input": 1.00, "output": 2.70, "cached_read": 0.10}),
 )
+# ---- OpenCode Go full registry of owner decision R34 (2026-10-28, ADR-0129; E1 reading, not exercised live) ----
+# Every remaining Go model the owner wants used. Allowance and data terms: https://opencode.ai/go (read 2026-10-28,
+# model table and privacy table: "Not used" for training, "0 days" retention for every model below); rates per 1M
+# tokens: models.dev providers/opencode-go. All are WORKER CANDIDATEs with tools UNKNOWN until the owner's probes pass.
+GO_R34_SOURCES = list(GO_R31_SOURCES)
+GO_R34_TERMS: dict[str, Any] = {
+    **GO_TERMS,
+    "read_for_research": f"{GO_R31_READ} (opencode.ai/go privacy table reading for owner decision R34; not an owner "
+                         "terms review)",
+}
+GO_R34_DEEPSEEK_TERMS: dict[str, Any] = {**GO_DEEPSEEK_TERMS, "read_for_research": GO_R34_TERMS["read_for_research"]}
+# Go serves these on the google / anthropic API families (models.dev); the Go docs state that every text model also
+# works through the other APIs, which the Console translates. The broker speaks chat-completions only, so they are
+# seeded on the chat-completions endpoint and stay unproven until both probes pass for their configuration.
+GO_TRANSLATION_STATEMENT = ("served through OpenCode Console API translation - NOT PROVEN until the plain and --tools "
+                            "probes pass")
+# models.dev providers/opencode-go models/<id>.provider: the native endpoint of each translation candidate's family
+GO_NATIVE_API: dict[str, str] = {
+    "google": "https://opencode.ai/inference/go/google/v1beta",
+    "anthropic": "https://opencode.ai/inference/go/anthropic/v1",
+}
+# (model, display, monthly allowance USD, allowance rate per 1M tokens per models.dev)
+GO_DIRECT_R34: tuple[tuple[str, str, float, dict[str, float]], ...] = (
+    ("hy4-preview", "Hy4 preview", 30, {"input": 0.834, "output": 2.501, "cached_read": 0.042}),
+)
+GO_DEEPSEEK_PRO: tuple[str, str, float, dict[str, float]] = (
+    "deepseek-v4-pro", "DeepSeek V4 Pro", 15, {"input": 0.66, "output": 1.98, "cached_read": 0.022})
+# Go docs (GO_DOCS, read 2026-10-28): the DeepSeek models have peak rates in the same peak hours; the off-peak rates
+# above are the allowance estimate, like its sibling deepseek-v4.1-flash (the peak rates are stated, not estimated)
+GO_PEAK_HOURS = "01:00-04:00 and 06:00-10:00 UTC, Mon-Fri"
+GO_DEEPSEEK_PRO_PEAK: dict[str, float] = {"input": 1.32, "output": 3.96, "cached_read": 0.044}
+GO_DEEPSEEK_PRO_PEAK_SOURCE = (f"{GO_DOCS} (DeepSeek V4 Pro off-peak and peak rates per 1M tokens and peak hours, "
+                               "read 2026-10-28)")
+# (model, display, monthly allowance USD, rates per 1M tokens, the native API family models.dev states)
+GO_TRANSLATION_R34: tuple[tuple[str, str, float, dict[str, float], str], ...] = (
+    # the FULL rate: Go lists Argon at a temporary 50% promotion (GO_PROMOTIONS); the allowance estimate stays at the
+    # full rate (conservative: it over-counts, never under-counts, the allowance used)
+    ("gemini-4-argon", "Gemini 4 Argon", 30, {"input": 4.00, "output": 20.00, "cached_read": 0.20}, "google"),
+    ("qwen3.8-max", "Qwen3.8 Max", 15, {"input": 2.00, "output": 6.00, "cached_read": 0.25}, "anthropic"),
+    ("qwen3.8-flash", "Qwen3.8 Flash", 30, {"input": 0.15, "output": 0.47, "cached_read": 0.016}, "anthropic"),
+    ("qwen3.7-plus", "Qwen3.7 Plus", 60, {"input": 0.40, "output": 1.60, "cached_read": 0.04}, "anthropic"),
+    ("minimax-m3", "MiniMax M3", 60, {"input": 0.30, "output": 1.20, "cached_read": 0.06}, "anthropic"),
+)
+# models.dev states a higher rate above a context size for two of them (tiers[].tier.size)
+GO_CONTEXT_TIERS: dict[str, dict[str, float]] = {
+    "qwen3.7-plus": {"from_context_tokens": 256000, "input": 1.20, "output": 4.80, "cached_read": 0.12},
+    "minimax-m3": {"from_context_tokens": 512000, "input": 0.60, "output": 2.40, "cached_read": 0.12},
+}
+# (model, display, allowance, rates, successor): superseded, own allowances, lowest priority of the pool (overflow only)
+GO_SUPERSEDED_R34: tuple[tuple[str, str, float, dict[str, float], str], ...] = (
+    ("mimo-v2.5", "MiMo-V2.5", 60, {"input": 0.14, "output": 0.28, "cached_read": 0.0028}, "mimo-v2.6-flash"),
+    ("mimo-v2.5-pro", "MiMo-V2.5-Pro", 15, {"input": 0.435, "output": 0.87, "cached_read": 0.003625},
+     "mimo-v2.6-pro"),
+)
+# temporary Go promotions: the promoted rate is recorded, the allowance is estimated at the full rate (conservative)
+GO_PROMOTIONS: dict[str, dict[str, Any]] = {
+    "gemini-4-argon": {
+        "promotion_rate_per_mtok": {"input": 2.00, "output": 10.00, "cached_read": 0.10},
+        "promotion": "temporary 50% off the full rate (Go docs: the 50% discount applies through November 30, 2026)",
+        "promotion_ends": "2026-11-30",
+        "promotion_source": f"{GO_DOCS} (Gemini 4 Argon rates, '50% off', read 2026-10-28)",
+        "allowance_estimate": "FULL rate (allowance_rate_per_mtok), not the promoted rate: conservative while the "
+                              "promotion runs",
+    },
+}
+GO_PROMOTION_NOTES: dict[str, str] = {
+    "gemini-4-argon": ("Go promotion 50% off (2.00/10.00/0.10 per 1M) through 2026-11-30 per the Go docs (read "
+                       "2026-10-28); allowance estimated at the full rate 4.00/20.00/0.20 (conservative)"),
+}
+GO_R34_TRANSLATION_PRIORITY = 30  # after the Zen pilots (10, 20): unproven upstream shape, not a ranking
+GO_R34_SUPERSEDED_PRIORITY = 990  # last of the WORKER pool
 # §23 "mode/thinking params" of the native supervisor routes: the bridge passes no --effort/thinking flag, so the
 # Claude Code default applies; stated explicitly so that a caller passing a level is a configuration change.
 SUPERVISOR_MODE_PARAMS = {"effort": "CLI_DEFAULT", "thinking": "CLI_DEFAULT"}
@@ -278,6 +351,7 @@ def _go_routes() -> list[dict[str, Any]]:
             source_refs=GO_R31_SOURCES, pricing_checked_at=GO_R31_READ_AT)
         for i, (model, display, allowance, rates) in enumerate(GO_WORKERS_R31)
     ]
+    out += _go_r34_routes(paid, first_priority=1 + len(GO_WORKERS) + len(GO_WORKERS_R31))
     out += [
         _go(model, display, pool="WATCHLIST", pricing=_go_pricing(allowance, rates), priority=510 + i,
             notes=f"OpenCode Go chat-completions model on the watchlist (not a WORKER pilot). {paid}")
@@ -286,12 +360,80 @@ def _go_routes() -> list[dict[str, Any]]:
     out.append(_go(
         "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", pool="WATCHLIST", priority=510 + len(GO_WATCH),
         pricing=_go_pricing(80, {"input": 0.15, "output": 0.60}, peak_rate_per_mtok={"input": 0.30, "output": 1.20},
-                            peak_hours="01:00-04:00 and 06:00-10:00 UTC, Mon-Fri"),
+                            peak_hours=GO_PEAK_HOURS),
         terms=GO_DEEPSEEK_TERMS, classes=[P],
         expires_note="DeepSeek ZDR agreement valid through 2026-10-31 per the Go docs (renewed monthly)",
         notes="OpenCode Go watchlist: needs the Global region in the Go workspace (default EU & US excludes it) and "
               "its zero-retention agreement is valid only through 2026-10-31 (renewed monthly, re-check at any "
               f"activation); PUBLIC only until the owner reviews it. {paid}"))
+    return out
+
+
+def go_translation_sources(model: str, family: str) -> list[str]:
+    """source_refs of a Console-translation candidate: they cite the native API family models.dev states and the Go
+    docs' translation sentence, never a catalog listing on chat-completions (that serving is NOT PROVEN).
+    GO_R34_SOURCES (chat-completions family) is for the models Go lists natively on chat-completions only."""
+    return [
+        "S07",
+        f"https://opencode.ai/go (monthly allowance and privacy table, read {GO_R31_READ})",
+        f"https://models.dev/api.json providers/opencode-go models/{model} (native {family} API family, "
+        f"{GO_NATIVE_API[family]}; tool_call, rates; read {GO_R31_READ}) - not listed on chat-completions",
+        f"{GO_DOCS} (every text model also works through the other APIs, which the Console translates; read "
+        f"{GO_R31_READ}) - chat-completions serving {GO_TRANSLATION_STATEMENT}",
+    ]
+
+
+def _go_r34_routes(paid: str, *, first_priority: int) -> list[dict[str, Any]]:
+    """The OpenCode Go WORKER candidates of owner decision R34 (2026-10-28, ADR-0129): the remaining chat-completions
+    models (DeepSeek V4 Pro PUBLIC only, Hy4 preview, the superseded MiMo V2.5 pair last) and the five models Go serves
+    on another API family, seeded on chat-completions as Console-translation candidates. New routes only: no key of an
+    existing seeded route changes (tests/unit/test_routing_go_registry_probe.py pins every existing hash)."""
+    tools = (f"Tool calling UNKNOWN: {GO_TOOLS_SOURCE.replace(GO_READ, GO_R31_READ)} states tool_call true (a catalog "
+             "claim); the route serves tool-using tasks only after a PASS of `aeos broker probe-route --tools` for its "
+             "configuration.")
+    head = "OpenCode Go WORKER candidate (owner decision R34, 2026-10-28, ADR-0129)"
+
+    def pricing(model: str, allowance: float, rates: dict[str, float]) -> dict[str, Any]:
+        extra: dict[str, Any] = (
+            {"context_tier_rate_per_mtok": dict(GO_CONTEXT_TIERS[model])} if model in GO_CONTEXT_TIERS else {})
+        extra.update(copy.deepcopy(GO_PROMOTIONS.get(model, {})))
+        return _go_pricing(allowance, rates, checked_at=GO_R31_READ, **extra)
+
+    common: dict[str, Any] = {"pool": "WORKER", "tools": "UNKNOWN", "source_refs": GO_R34_SOURCES,
+                              "pricing_checked_at": GO_R31_READ_AT}
+    out: list[dict[str, Any]] = []
+    model, display, allowance, rates = GO_DEEPSEEK_PRO
+    out.append(_go(
+        model, display, priority=first_priority, terms=GO_R34_DEEPSEEK_TERMS,
+        pricing=pricing(model, allowance, rates) | {"peak_rate_per_mtok": dict(GO_DEEPSEEK_PRO_PEAK),
+                                                    "peak_hours": GO_PEAK_HOURS,
+                                                    "peak_source": GO_DEEPSEEK_PRO_PEAK_SOURCE},
+        classes=[P], expires_note="DeepSeek ZDR agreement valid through 2026-10-31 per the Go docs (renewed monthly)",
+        notes=f"{head}: PUBLIC only - the DeepSeek zero-retention agreement is renewed monthly (current one through "
+              "2026-10-31) and the model needs the Global region of the Go workspace (default Europe & United States "
+              f"excludes it). Priority after the earlier Go WORKER candidates, not a ranking. {tools} {paid}",
+        **common))
+    for i, (model, display, allowance, rates) in enumerate(GO_DIRECT_R34, start=1):
+        out.append(_go(model, display, pricing=pricing(model, allowance, rates), priority=first_priority + i,
+                       terms=GO_R34_TERMS,
+                       notes=f"{head}: priority after the earlier Go WORKER candidates, not a ranking. {tools} {paid}",
+                       **common))
+    for i, (model, display, allowance, rates, family) in enumerate(GO_TRANSLATION_R34):
+        terms = {**GO_R34_TERMS, "serving": GO_TRANSLATION_STATEMENT,
+                 "native_api_family": f"{family} (models.dev providers/opencode-go, read {GO_R31_READ})"}
+        out.append(_go(model, display, pricing=pricing(model, allowance, rates),
+                       priority=GO_R34_TRANSLATION_PRIORITY + i, terms=terms,
+                       expires_note=GO_PROMOTION_NOTES.get(model),
+                       notes=f"{head}: {GO_TRANSLATION_STATEMENT}. Go serves it natively on the {family} API family; "
+                             "the broker calls the chat-completions endpoint (no new broker code). Priority after the "
+                             f"Zen pilots, not a ranking. {tools} {paid}",
+                       **{**common, "source_refs": go_translation_sources(model, family)}))
+    for i, (model, display, allowance, rates, successor) in enumerate(GO_SUPERSEDED_R34):
+        out.append(_go(model, display, pricing=pricing(model, allowance, rates),
+                       priority=GO_R34_SUPERSEDED_PRIORITY + i, terms=GO_R34_TERMS,
+                       notes=f"{head}: superseded by {successor}; its own monthly allowance is used only as overflow "
+                             f"(the lowest priority of the WORKER pool). {tools} {paid}",
+                       **common))
     return out
 
 
@@ -444,6 +586,19 @@ def seed_routes() -> list[dict[str, Any]]:
     return routes
 
 
+def invariant6_problems(specs: list[dict[str, Any]]) -> list[str]:
+    """AGENTS.md invariant 6 over seed specs (ADR-0129): a Claude-family model off the native bridge or a meta-router
+    is never seeded. One finding per refused route, from the shared ``aeos.core.model_policy`` check."""
+    out: list[str] = []
+    for spec in specs:
+        mode = spec.get("mode_params") or {}
+        why = invariant6_refusal(spec.get("route_key"), spec.get("model_id"), mode.get("upstream_model"),
+                                 provider=spec.get("provider"))
+        if why:
+            out.append(f"route {spec.get('route_key')}: {why}")
+    return out
+
+
 _NON_CONFIG_UPDATABLE = ("display_name", "notes", "source_refs", "expires_note")
 # mode_params keys a seed spec states and an untouched CANDIDATE row gets backfilled when it predates them
 _BACKFILLED_MODE_PARAMS = ("credential_ref", "upstream_model", "upstream_api", "reasoning", *LOCAL_BUILD_PARAMS)
@@ -486,7 +641,12 @@ def run(session: Session) -> dict[str, Any]:
     created = updated = existing = backfilled = terms_reset = 0
     corrected: list[str] = []
     pending: list[str] = []
-    for spec in seed_routes():
+    specs = seed_routes()
+    refused = invariant6_problems(specs)
+    if refused:
+        raise PolicyDenied("seed refused: " + "; ".join(refused), code="MODEL_FAMILY_REFUSED",
+                           details={"refused": refused})
+    for spec in specs:
         spec = dict(spec)
         mode_params = dict(spec.pop("mode_params", None) or {})
         row = session.scalars(select(ModelRoute).where(ModelRoute.route_key == spec["route_key"])).first()

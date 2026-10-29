@@ -48,8 +48,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from aeos.core.enums import DataClassification, Domain
-from aeos.core.errors import Blocked, Conflict, NotFound, ValidationFailed
+from aeos.core.errors import Blocked, Conflict, NotFound, PolicyDenied, ValidationFailed
 from aeos.core.hashing import content_hash
+from aeos.core.model_policy import REFUSAL_CODE as MODEL_FAMILY_REFUSED
+from aeos.core.model_policy import route_invariant6_refusal
 from aeos.core.redaction import redact, redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
@@ -956,6 +958,9 @@ def _route_rejections(
         reasons.append("configuration changed without a recorded re-review (stored hash differs)")
     if route.mode in {"MOCK", "DEMO"}:
         reasons.append(f"mode {route.mode}: fixtures are never routable")
+    family = route_invariant6_refusal(route)
+    if family:
+        reasons.append(family)  # a registry row that slipped in by another path never serves (ADR-0129)
     status = route.status
     if status == "APPROVED":
         if find_route_decision(session, kind="ROUTE_ACTIVATION", route=route) is None:
@@ -1820,7 +1825,9 @@ def activate_route(
       OpenCode client) needs the owner's explicit ``client_terms`` decision; it is written into the data terms (so
       the decision binds to it) and onto the decision. Without it: ``CLIENT_TERMS_DECISION_REQUIRED``.
     * The broker must be able to build the request (``broker.facade.upstream_request_shape``): a superseded seed
-      endpoint, an unsupported API or a LOCAL route without its loopback endpoint is refused before any decision."""
+      endpoint, an unsupported API or a LOCAL route without its loopback endpoint is refused before any decision.
+    * A Claude-family model off the native bridge or a meta-router is refused (``MODEL_FAMILY_REFUSED``, AGENTS.md
+      invariant 6, ADR-0129), the same check as the broker egress (``aeos.core.model_policy``)."""
     if mode not in {"APPROVED", "TRIAL"}:
         raise ValidationFailed("mode must be APPROVED or TRIAL")
     if len((rationale or "").strip()) < 10:
@@ -1831,6 +1838,10 @@ def activate_route(
                                "not by worker activation")
     if route.mode in {"MOCK", "DEMO"}:
         raise ValidationFailed("fixture routes cannot be activated")
+    family = route_invariant6_refusal(route)
+    if family:  # AGENTS.md invariant 6 (ADR-0129): a row that reached the database by another path is never active
+        raise PolicyDenied(f"route cannot be activated: {family}", code=MODEL_FAMILY_REFUSED,
+                           details={"route_key": route.route_key})
     current = compute_config_hash(route)
     if route.config_hash != current:
         refresh_config_hash(session, route, reason="unrecorded configuration change detected at activation")

@@ -68,6 +68,8 @@ from aeos.broker import grants
 from aeos.broker.facade import SENSITIVE_BLOCKED_OUTCOME, SENSITIVE_CONTENT_BLOCKED
 from aeos.core.db import session_factory
 from aeos.core.errors import AeosError, Blocked, Conflict, PolicyDenied
+from aeos.core.model_policy import REFUSAL_CODE as MODEL_FAMILY_REFUSED
+from aeos.core.model_policy import route_invariant6_refusal
 from aeos.core.redaction import find_high_confidence_secrets, redact_text
 from aeos.core.timeutil import utcnow
 from aeos.events import service as events
@@ -371,7 +373,9 @@ def request_shape(route: ModelRoute) -> dict[str, Any]:
 def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: str | None = None,
                      pools: tuple[str, ...] | None = None) -> Upstream:
     """``pools`` (additive, ADR-0111): the pools this caller may serve. The worker proxy uses the default
-    ``SERVED_POOLS`` (WORKER); only the owner-triggered feasibility probe passes ``PROBE_POOLS``."""
+    ``SERVED_POOLS`` (WORKER); only the owner-triggered feasibility probe passes ``PROBE_POOLS``. A Claude-family model
+    off the native bridge or a meta-router is refused first (``MODEL_FAMILY_REFUSED``, AGENTS.md invariant 6,
+    ADR-0129), before any credential is read or any request is sent."""
     from aeos.broker.facade import SERVED_POOLS
     from aeos.secrets import facade as secrets
 
@@ -379,6 +383,9 @@ def resolve_upstream(session: Any, route_key: str, *, domain: str, project_id: s
     route = session.scalar(select(ModelRoute).where(ModelRoute.route_key == route_key))
     if route is None:
         raise ProxyError(403, "ROUTE_UNKNOWN", "route in grant scope no longer exists")
+    family = route_invariant6_refusal(route)
+    if family:  # AGENTS.md invariant 6 (ADR-0129): the egress boundary refuses before any credential or request
+        raise ProxyError(403, MODEL_FAMILY_REFUSED, family)
     if route.provider == "claude-native" or route.pool == "SUPERVISOR":
         raise ProxyError(403, "ROUTE_NOT_WORKER", "route is not a worker route")
     if route.pool not in allowed_pools:

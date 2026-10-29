@@ -33,6 +33,17 @@
     ]
    }
   },
+  "2.0-1014": {
+   "release": "2026-10-14",
+   "url": "https://livebench.ai/data/20261014/table.csv",
+   "nq_url": "https://livebench.ai/data/20261014/cost.csv",
+   "sha256": {
+    "table.csv": "d53196864079bce597cb576e64256597f7a1714b8e943d8996c21276bd713da2",
+    "cost.csv": "230c0de807d63919a1d6737bcbc020e4c6def83107004b5ac72ca349882f2c6d",
+    "categories.json": "b1e46eedc4a461e8ad8a414c24203c35aa760e759096b4211826b40a45f97279"
+   },
+   "use": "the served builds of SERVED_BUILDS, plus the rows of the 2.0 models as the per-category comparability evidence"
+  },
   "v1": {
    "release": "2026-06-25",
    "url": "https://livebench.ai/v1/table_2026_06_25.csv",
@@ -93,6 +104,25 @@
      "Design": 83.4,
      "Reasoning": 89.1,
      "Research": 79.5
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "gemini-4-argon",
+    "scores": {
+     "Long Agentic": 61.2,
+     "Data Analysis": 85.2,
+     "Coding": 89.7,
+     "Design": 73.7,
+     "Reasoning": 95.1,
+     "Research": 83.1
     },
     "nq": {
      "Long Agentic": 18,
@@ -237,6 +267,25 @@
     }
    },
    {
+    "model": "qwen3.8-max",
+    "scores": {
+     "Long Agentic": 29.9,
+     "Data Analysis": 78.4,
+     "Coding": 60.3,
+     "Design": 78.6,
+     "Reasoning": 88.2,
+     "Research": 69.9
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
     "model": "step-5-preview",
     "scores": {
      "Long Agentic": 19.4,
@@ -256,7 +305,265 @@
     }
    }
   ],
+  "2.0-1014": [
+   {
+    "model": "deepseek-v4.1-flash",
+    "scores": {
+     "Long Agentic": 40.1,
+     "Data Analysis": 79.3,
+     "Coding": 90.2,
+     "Design": 79.2,
+     "Reasoning": 86.7,
+     "Research": 86.8
+    },
+    "nq": {
+     "Long Agentic": 25,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "deepseek-v4.1-flash-1017",
+    "scores": {
+     "Long Agentic": 50.9,
+     "Data Analysis": 79.5,
+     "Coding": 96.0,
+     "Design": 83.4,
+     "Reasoning": 89.1,
+     "Research": 79.5
+    },
+    "nq": {
+     "Long Agentic": 29,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "gemini-4-argon",
+    "scores": {
+     "Long Agentic": 69.9,
+     "Data Analysis": 85.2,
+     "Coding": 89.7,
+     "Design": 73.7,
+     "Reasoning": 95.1,
+     "Research": 83.1
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 25
+    }
+   },
+   {
+    "model": "gemma-4-31b",
+    "scores": {
+     "Long Agentic": 13.3,
+     "Data Analysis": 53.3,
+     "Coding": 49.0,
+     "Design": 58.4,
+     "Reasoning": 68.3,
+     "Research": 44.4
+    },
+    "nq": {
+     "Long Agentic": 29,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "glm-5.3-flash",
+    "scores": {
+     "Long Agentic": 28.4,
+     "Data Analysis": 76.4,
+     "Coding": 80.6,
+     "Design": 77.2,
+     "Reasoning": 77.6,
+     "Research": 70.1
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "inkling",
+    "scores": {
+     "Long Agentic": 14.1,
+     "Data Analysis": 72.8,
+     "Coding": 64.0,
+     "Design": 58.3,
+     "Reasoning": 78.3,
+     "Research": 59.9
+    },
+    "nq": {
+     "Long Agentic": 29,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "kimi-k3",
+    "scores": {
+     "Long Agentic": 42.8,
+     "Data Analysis": 78.7,
+     "Coding": 59.3,
+     "Design": 77.2,
+     "Reasoning": 90.7,
+     "Research": 79.0
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "kimi-k3.1-pro",
+    "scores": {
+     "Long Agentic": 49.5,
+     "Data Analysis": 79.1,
+     "Coding": 81.8,
+     "Design": 77.8,
+     "Reasoning": 91.1,
+     "Research": 77.9
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "mimo-v2.6-pro",
+    "scores": {
+     "Long Agentic": 47.5,
+     "Data Analysis": 72.3,
+     "Coding": 81.5,
+     "Design": 78.5,
+     "Reasoning": 79.6,
+     "Research": 76.7
+    },
+    "nq": {
+     "Long Agentic": 29,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "minimax-m3.1-flash",
+    "scores": {
+     "Long Agentic": 34.7,
+     "Data Analysis": 71.4,
+     "Coding": 83.9,
+     "Design": 74.0,
+     "Reasoning": 82.9,
+     "Research": 72.7
+    },
+    "nq": {
+     "Long Agentic": 23,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "qwen3.8-max",
+    "scores": {
+     "Long Agentic": 42.3,
+     "Data Analysis": 78.4,
+     "Coding": 60.3,
+     "Design": 78.6,
+     "Reasoning": 88.2,
+     "Research": 69.9
+    },
+    "nq": {
+     "Long Agentic": 18,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   },
+   {
+    "model": "step-5-preview",
+    "scores": {
+     "Long Agentic": 27.5,
+     "Data Analysis": 63.5,
+     "Coding": 85.6,
+     "Design": 76.9,
+     "Reasoning": 83.8,
+     "Research": 72.8
+    },
+    "nq": {
+     "Long Agentic": 24,
+     "Data Analysis": 150,
+     "Coding": 29,
+     "Design": 25,
+     "Reasoning": 202,
+     "Research": 22
+    }
+   }
+  ],
   "v1": [
+   {
+    "model": "deepseek-v4-pro",
+    "tasks": {
+     "AMPS_Hard": 98.0,
+     "code_completion": 69.565,
+     "code_generation": 70.423,
+     "connections": 98.0,
+     "consecutive_events": 75.421,
+     "integrals_with_game": 78.0,
+     "javascript": 54.545,
+     "logic_with_navigation": 64.0,
+     "math_comp": 96.078,
+     "olympiad": 90.624,
+     "paraphrase": 56.217,
+     "plot_unscrambling": 56.391,
+     "python": 50.0,
+     "simplify": 55.933,
+     "spatial": 94.0,
+     "story_generation": 67.75,
+     "summarize": 69.5,
+     "tablejoin": 48.192,
+     "tablereformat": 100.0,
+     "theory_of_mind": 80.769,
+     "typescript": 23.333,
+     "typos": 80.0,
+     "zebra_puzzle": 92.0
+    }
+   },
    {
     "model": "glm-5.2",
     "tasks": {
@@ -398,6 +705,34 @@
     }
    },
    {
+    "model": "minimax-m3",
+    "tasks": {
+     "AMPS_Hard": 75.0,
+     "code_completion": 67.391,
+     "code_generation": 69.014,
+     "connections": 96.333,
+     "consecutive_events": 84.614,
+     "integrals_with_game": 56.0,
+     "javascript": 63.636,
+     "logic_with_navigation": 66.0,
+     "math_comp": 91.176,
+     "olympiad": 85.614,
+     "paraphrase": 55.933,
+     "plot_unscrambling": 50.174,
+     "python": 35.0,
+     "simplify": 56.617,
+     "spatial": 94.0,
+     "story_generation": 63.55,
+     "summarize": 53.933,
+     "tablejoin": 45.846,
+     "tablereformat": 98.039,
+     "theory_of_mind": 76.923,
+     "typescript": 23.333,
+     "typos": 84.0,
+     "zebra_puzzle": 61.0
+    }
+   },
+   {
     "model": "nemotron-3-ultra-550b-a55b",
     "tasks": {
      "AMPS_Hard": 96.0,
@@ -423,6 +758,34 @@
      "typescript": 16.667,
      "typos": 78.0,
      "zebra_puzzle": 71.25
+    }
+   },
+   {
+    "model": "qwen3.8-max",
+    "tasks": {
+     "AMPS_Hard": 98.0,
+     "code_completion": 73.913,
+     "code_generation": 71.831,
+     "connections": 94.5,
+     "consecutive_events": 87.142,
+     "integrals_with_game": 81.0,
+     "javascript": 77.273,
+     "logic_with_navigation": 74.0,
+     "math_comp": 95.098,
+     "olympiad": 91.151,
+     "paraphrase": 73.317,
+     "plot_unscrambling": 58.562,
+     "python": 60.0,
+     "simplify": 67.35,
+     "spatial": 100.0,
+     "story_generation": 76.517,
+     "summarize": 79.15,
+     "tablejoin": 50.058,
+     "tablereformat": 98.039,
+     "theory_of_mind": 78.846,
+     "typescript": 56.667,
+     "typos": 86.0,
+     "zebra_puzzle": 100.0
     }
    }
   ]

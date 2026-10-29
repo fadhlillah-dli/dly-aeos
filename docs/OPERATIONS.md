@@ -742,8 +742,14 @@ isolation (§09 Zone 2) until it is verified in a separate environment (ADR-0106
 * **OpenCode Go routes (owner decision A, ADR-0041 amendment 2026-10-26):** `aeos seed` adds the `opencode-go/*`
   CANDIDATE routes. In the WORKER pool they rank above the Zen pilots: glm-5.3-flash, mimo-v2.6-flash,
   minimax-m3.1-flash, hy3 (no documented tool support) and kimi-k2.7-code, then the R31 candidates kimi-k3 and
-  step-5-preview (owner decision 2026-10-28, ADR-0125; tool support UNKNOWN until a tool-call probe PASS). The other
-  chat-completions models are on the WATCHLIST.
+  step-5-preview (owner decision 2026-10-28, ADR-0125; tool support UNKNOWN until a tool-call probe PASS), then the
+  R34 candidates (ADR-0129): deepseek-v4-pro (PUBLIC only) and hy4-preview, the Console-translation candidates
+  gemini-4-argon, qwen3.8-max, qwen3.8-flash, qwen3.7-plus and minimax-m3 (after the Zen pilots; served through the
+  Console's API translation, NOT PROVEN until the plain and `--tools` probes pass), and the superseded mimo-v2.5 and
+  mimo-v2.5-pro last (overflow only). The other chat-completions models are on the WATCHLIST. Seed, catalog discovery,
+  eligibility and the role ranking refuse a Claude-family model off the native bridge and any meta-router (one check,
+  `aeos.core.model_policy`; the seed fails with `MODEL_FAMILY_REFUSED`, the catalog refresh lists
+  `refused_model_family`).
   * **WATCHLIST to WORKER (ADR-0125).** `aeos routes set-pool opencode-go/<id> --pool WORKER|WATCHLIST --as <admin>
     --rationale "..."` (or `POST /api/routes/<key>/pool`) moves an OpenCode Go route between WATCHLIST and WORKER only
     while it is CANDIDATE and no decision of any kind or status names it (its key as the target, or a BUDGET decision

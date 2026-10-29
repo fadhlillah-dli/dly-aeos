@@ -36,6 +36,7 @@ from aeos.claude_bridge.binary import neutral_cwd
 from aeos.claude_bridge.env import child_env
 from aeos.core.config import Settings, get_settings
 from aeos.core.errors import AeosError
+from aeos.core.model_policy import invariant6_refusal
 from aeos.core.redaction import redact_text
 from aeos.core.timeutil import ensure_aware, utcnow
 from aeos.models.cost import QuotaState
@@ -174,8 +175,12 @@ def refresh_openrouter_catalog(session: Session, client: httpx.Client) -> dict[s
         if refresh_config_hash(session, route, reason="OpenRouter catalog values changed"):
             changed.append(route.route_key)
     discovered: list[str] = []
+    refused: list[str] = []
     for model_id, m in sorted(models.items()):
         if not model_id.endswith(":free") or model_id in known_ids:
+            continue
+        if invariant6_refusal(model_id, provider="openrouter"):
+            refused.append(f"openrouter/{model_id}")  # AGENTS.md invariant 6 (ADR-0129): never registered
             continue
         author = model_id.split("/", 1)[0]
         route = ModelRoute(
@@ -195,7 +200,8 @@ def refresh_openrouter_catalog(session: Session, client: httpx.Client) -> dict[s
         discovered.append(route.route_key)
     session.flush()
     return {"status": "OK", "checked_at": now.isoformat(), "catalog_size": len(models), "updated": updated,
-            "config_changed": changed, "missing": missing, "discovered": discovered, "evidence_level": "E1"}
+            "config_changed": changed, "missing": missing, "discovered": discovered, "refused_model_family": refused,
+            "evidence_level": "E1"}
 
 
 def _openrouter_key() -> tuple[str | None, str | None, str]:

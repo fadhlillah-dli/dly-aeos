@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from aeos.core.model_policy import model_family_refusal
 from aeos.workforce import catalog
 
 ROLE_UNKNOWN = "ROLE_UNKNOWN"
@@ -61,15 +62,11 @@ def agent_key_for_role(role_key: str | None) -> str | None:
 # ADR-0126 amendment of 2026-10-28 independent-verifier tasks run on the coder agent (verification of code and tests
 # is Coding work); the deterministic verifier runner keeps its own trusted-suite role (ADR-0060).
 UNMAPPED_EXECUTOR_ROLES: dict[str, str] = {}
-# (marker in the lower-cased route key, family) never preferred (ADR-0126): Gemini 4 Argon and the Qwen family (Go
-# serves them on API families the broker does not support; owner answer 2 of 2026-10-28), any Claude-family model
-# (AGENTS.md invariant 6: Claude only through the native claude binary) and meta-routers (they pick the model
-# themselves, so the ranking would not name what runs). DeepSeek is allowed (owner 2026-10-28, R32: "saya juga ingin
-# menggunakan DeepSeek"): its PUBLIC-only data class and the Go region decide through eligibility and probes.
-NEVER_PREFERRED: tuple[tuple[str, str], ...] = (
-    ("argon", "argon"), ("qwen", "qwen"), ("claude", "claude"), ("anthropic/", "claude"),
-    ("openrouter/openrouter/", "meta-router"),
-)
+# Never preferred (ADR-0129, amending ADR-0126): any Claude-family model off the native bridge (AGENTS.md invariant 6:
+# Claude only through the native claude binary) and meta-routers (they pick the model themselves, so the ranking would
+# not name what runs) - the one check of ``aeos.core.model_policy``. Gemini 4 Argon and the Qwen family are allowed
+# since owner answer R34 (2026-10-28: probe them through Go's chat-completions translation); their unproven serving
+# keeps them out through eligibility and the probes, never through this list. DeepSeek is allowed (owner R32).
 
 
 def catalog_problems(definitions: list[dict[str, object]] | None = None,
@@ -97,9 +94,10 @@ def catalog_problems(definitions: list[dict[str, object]] | None = None,
             served.setdefault(role, []).append(key)
         policy = spec.get("route_policy")
         for route in (policy.get("preferred_routes") or []) if isinstance(policy, dict) else []:
-            bad = next((fam for marker, fam in NEVER_PREFERRED if marker in str(route).lower()), None)
+            bad = model_family_refusal(str(route))
             if bad:
-                problems.append(f"agent {key} prefers route {route} ({bad} is never preferred, ADR-0126)")
+                problems.append(f"agent {key} prefers route {route} ({bad} is never preferred, AGENTS.md invariant 6, "
+                                "ADR-0129)")
     for role, agents in sorted(served.items()):
         workers = [a for a in agents if a in worker]  # a non-worker agent of the same role never runs a worker task
         if len(workers) > 1:
