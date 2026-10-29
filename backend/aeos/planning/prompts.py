@@ -19,7 +19,7 @@ from typing import Any
 from aeos.core.hashing import sha256_text
 from aeos.core.redaction import redact_text
 
-PROMPT_REVISION = "planning-prompts/2"
+PROMPT_REVISION = "planning-prompts/3"
 
 FIXED_POLICY = [
     "Human-only AUTH: plan approval, publication approval, merge to main, production deployment, risk acceptance and "
@@ -31,6 +31,11 @@ FIXED_POLICY = [
     "OFFICE data stays in OFFICE systems; external worker routes for OFFICE are denied unless company-approved.",
     "Keep features as testable end-to-end vertical slices; tasks form an acyclic DAG; each task has explicit "
     "allowed_paths; pilot limits: max 2 attempts per task, no nested fan-out.",
+    "Worker capabilities (LESSONS L30): a worker only reads and edits files inside its isolated clone, with the tools "
+    "read, glob, grep, list, edit and todowrite; it has no shell and cannot run tests, scripts, builds, the CLI or git. "
+    "The independent verifier runs the trusted suite on each task's base commit and head automatically (that is the "
+    "baseline). Never plan a task whose deliverable is the output of running a command: such steps are maintainer or "
+    "runbook steps outside the task DAG. In tools_allowed use only fs.read, fs.write:allowed_paths and tests.run.",
     "Contract-first: when tasks build against the same API, schema, design tokens or shared interface, declare it in "
     "interface_contracts; every consumer task depends on the provider task, so parallel work starts only after the "
     "contract is accepted. Do not split one feature into a frontend-only and a backend-only task without a contract.",
