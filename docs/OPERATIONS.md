@@ -906,6 +906,52 @@ from it (an unkeyed hash of a short secret such as a password could be brute-for
 move it out of the repository or the task's inputs, rotate it if it is real (AGENTS.md invariant 12), then let the
 task run again. A fixture that only looks like a key is assembled from parts at run time instead of written literally.
 
+## Publication needs a Claude review of the exact head (owner rule R44, ADR-0132)
+
+Owner rule R44 (2026-10-28), paraphrased: all OpenCode and OpenRouter work must pass a Claude review; a worker has no
+right to commit, push, let alone merge, as the architecture says.
+
+* **Who publishes.** Only the trusted broker pushes a worker run's `aeos/*` branch and opens its draft PR (GitHub
+  for PERSONAL, Bitbucket Cloud for OFFICE). A worker holds no code-host credential: git in its sandbox finds none
+  (HOME redirected, global and system git config off, no prompts), the self-build candidate has no remote, it gets
+  no shell in the process sandbox, and its only broker endpoint is the model proxy. The runtime commits the candidate
+  inside the run's own workspace only. Nothing in the runtime merges: merge to main is yours (or a delegated
+  maintainer's) with your own credential.
+* **The gate.** Before every push and every PR of a run, the broker checks the run's latest Claude checkpoint review
+  (`aeos verify review <run id>`, or the manual package collected with `aeos verify collect-review <review id>`): it
+  must be COMPLETED, not MOCK, a PASS that its own HIGH/CRITICAL findings do not contradict, answered by an **Opus**
+  model (owner rule 2026-10-28: never Fable, ADR-0131) that also satisfies the
+  review policy, of a package that showed the whole diff (the reviewer sees at most 60,000 characters), and bound to
+  exactly the head being published (the head named by the review's checkpoint package). This comes after the
+  run-state, runtime-head and quarantine checks (a quarantined patch still needs your release decision too) and before
+  any grant, credential or request. At the push the broker also checks, in its private mirror, that the head is the
+  runtime's single candidate commit on the run's base: the history that leaves is the diff the reviewer saw.
+* **Refusal.** `REVIEW_REQUIRED`: "no Claude review PASS for head <sha12>: <why>", audited as `broker.<operation>`
+  DENIED with `details.reason`: `NO_REVIEW`, `OTHER_HEAD` (the review covers an older head: a worker commit came
+  after it), `TRUNCATED` (the package cut the diff: split the task into smaller ones), `BINARY` (a binary file was
+  added or changed: add it yourself outside the worker run), `DIFF_UNAVAILABLE` / `SCOPE_UNAVAILABLE` (the diff or
+  scope evidence was missing or tampered when the package was built: verify again), `CONTROL_CHARS` (a changed file
+  name holds a tab, a line break or another control character: rename it), `NOT_PUSHED` (PR creation before the broker pushed exactly this
+  head), `HISTORY` (worker-made
+  commits between the base and the head, or no recorded base: run the task again), `NOT_PASS`, `FINDINGS`, `MODEL`
+  (not Opus, or not the policy's identity), `NOT_COMPLETED` (waiting for quota or a manual result), `MOCK`,
+  `NOT_CLAUDE`, `UNBOUND` (no intact checkpoint package binding), `NO_HEAD`, `REVIEW_GATE_UNAVAILABLE`. `prepare-pr`
+  answers with the same code. Remedy: request the review of the current head and publish after its PASS; a FAIL
+  verdict goes to a repair attempt, never to publication.
+* **Worker git.** Git in a worker's environment refuses every remote transport (ssh, https, http, git and ext each
+  `never`; only `file`, with git's `user` default; ssh and askpass are a failing command; the credential helper is
+  emptied), whatever the shared repository config of a `worktree` candidate says. A worker's own command-line `-c`
+  outranks this (defence in depth); the container's network is the boundary.
+* **What the reviewer sees.** The verifier reads the candidate only through the git dir the runtime recorded (never
+  the work tree's `.git` pointer; missing: `GIT_DIR_UNKNOWN`), ignores replace refs, takes in-tree attributes from
+  the empty tree (git 2.41 or newer; an older git fails the verification with a message) and switches off the
+  global, XDG and system attributes files; a git dir with replace refs, grafts or a non-empty `info/attributes`
+  blocks the verification (`GIT_CONTROL_UNTRUSTED`: remove them, or re-run the task), as does a `commondir` or
+  `gitdir` redirect in it. The host's global and system git config are not read. So a worker cannot hide a change
+  as "binary"; a `.gitattributes` or `.gitmodules` change itself goes to special review, a file name with a control
+  character is refused (`CONTROL_CHARS`), and a head with a submodule is not verified (`SUBMODULE_UNSUPPORTED`:
+  submodules are not supported for worker candidates).
+
 ## Commit identity and no AI attribution (owner rule, AGENTS.md invariant 11)
 
 The owner's standing rule for DLY AEOS and every project it creates or manages: every GitHub activity (commits as

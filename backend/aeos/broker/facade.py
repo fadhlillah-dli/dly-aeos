@@ -1,7 +1,8 @@
 """Cross-module contract for the trusted capability broker (§25, §26, §31). Owned by ``aeos.broker``.
 
 Workers never receive upstream credentials. They receive a short-lived capability token bound to
-one run, scope and caps. Only the broker may push ``aeos/*`` task branches and open PRs; there is
+one run, scope and caps. Only the broker may push ``aeos/*`` task branches and open PRs, and only for a run
+whose exact head commit has a Claude checkpoint review PASS (owner rule R44, ADR-0132); there is
 no merge operation anywhere in the broker (human-only merge, U-09).
 
 Provider follows the domain (U-02/U-03): PERSONAL runs push/open PRs on GitHub, OFFICE runs (and any
@@ -93,7 +94,11 @@ def push_task_branch(
     the configured identity of the provider (``commit_identities.github`` / ``.bitbucket``) and carry no AI
     attribution. A remote whose branches cannot be read is a FAILED push (nothing sent). Otherwise ``PolicyDenied`` with ``COMMIT_IDENTITY_MISSING`` (before any grant or
     credential), ``COMMIT_IDENTITY_MISMATCH``, ``AI_ATTRIBUTION_IN_COMMIT`` or ``COMMIT_RANGE_UNBOUNDED``; the
-    refusal is audited and the outbox row FAILED (nothing reached the remote)."""
+    refusal is audited and the outbox row FAILED (nothing reached the remote).
+
+    Owner rule R44 (additive, 2026-10-28, ADR-0132): the run's latest Claude checkpoint review must be a PASS bound to
+    exactly the runtime head being pushed (``aeos.verification.facade.publication_review``), else
+    ``PolicyDenied(REVIEW_REQUIRED)`` (audited) before any grant is consumed or credential read."""
     from aeos.broker.git_broker import push_task_branch as impl
 
     return impl(session, run_id=run_id, worktree=worktree, branch=branch, repo_full_name=repo_full_name,
@@ -104,7 +109,9 @@ def create_pull_request(
     session: Session, *, run_id: str, repo_full_name: str, head: str, base: str, title: str, body: str
 ) -> dict[str, Any]:
     """Open a draft PR (GitHub, or Bitbucket for OFFICE). A title/body with AI attribution is refused with
-    ``PolicyDenied(AI_ATTRIBUTION_IN_TEXT)`` before any credential is read (additive, 2026-10-26)."""
+    ``PolicyDenied(AI_ATTRIBUTION_IN_TEXT)`` before any credential is read (additive, 2026-10-26). Without a Claude
+    checkpoint review PASS bound to the run's exact head commit: ``PolicyDenied(REVIEW_REQUIRED)`` (additive, owner rule
+    R44, ADR-0132)."""
     from aeos.broker.git_broker import create_pull_request as impl
 
     return impl(session, run_id=run_id, repo_full_name=repo_full_name, head=head, base=base, title=title, body=body)

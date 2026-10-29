@@ -9,6 +9,9 @@ The same boundary as the GitHub path (``aeos.broker.git_broker``, every rule tes
 * fail closed before any credential or network call: the project's ``bitbucket/code`` integration is
   enabled (ADR-0073 disabled by default), the deployment is Bitbucket **Cloud** (Data Center ->
   ``BITBUCKET_DC_NOT_SUPPORTED``, §04), the repository is registered and its exact identity VERIFIED;
+* owner rule R44 (ADR-0132): a push or PR of a worker run needs a Claude checkpoint review PASS bound to exactly
+  the run's head commit (``_require_publishable`` -> ``REVIEW_REQUIRED``), checked before any grant or credential,
+  and a push publishes only the runtime's single candidate commit on the run's base (reason ``HISTORY``);
 * every remote write needs an ACTIVE run-bound capability grant (GIT_BRANCH / PR_CREATE) **and** the
   external-write interlock: the company authorisation POLICY decision listing ``bitbucket`` (OFFICE default
   deny, §23), write enablement, and the human APPROVAL of the run's plan version that allows the operation
@@ -55,8 +58,10 @@ from aeos.broker.git_broker import (
     commit_policy,
     guard_outbound_text,
     http_client,
+    pr_head_mismatch,
     push_from_mirror,
     refuse_push,
+    require_pushed_head,
     validate_branch,
     validate_remote_url,
 )
@@ -260,7 +265,8 @@ def push_task_branch(session: Session, *, run: WorkerRun, worktree: str, branch:
     work_root.mkdir(parents=True, exist_ok=True)
     res = push_from_mirror(source_repo=source, branch=branch, remote_url=url, token=cred.git_secret if cred else None,
                            work_root=work_root, expected_head=expected_head, commit_policy=policy,
-                           basic_user=cred.git_user if cred else ACCESS_TOKEN_GIT_USER)
+                           basic_user=cred.git_user if cred else ACCESS_TOKEN_GIT_USER,
+                           reviewed_base=run.base_commit or "")
     if res.get("refused"):
         refuse_push(session, run, se, res, action="broker.bitbucket.push_branch", provider=cid.BITBUCKET)
     se.status = "SUCCEEDED" if res["ok"] else ("UNKNOWN" if res.get("unknown") else "FAILED")
@@ -344,6 +350,8 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
     # Owner rule (AGENTS.md invariant 11): no AI attribution in what lands on Bitbucket - refused, never stripped.
     guard_outbound_text(session, run, action="broker.bitbucket.create_pr", where="Bitbucket pull request",
                         texts={"title": title, "description": body})
+    require_pushed_head(session, run, repo=repo_full_name, branch=head, provider=PROVIDER,
+                        action="broker.bitbucket.create_pr")
     target = {"provider": PROVIDER, "repo": repo_full_name, "head": head, "base": base}
     grant = _require_grant(session, run, "PR_CREATE", {"repo": repo_full_name, "head": head, "base": base})
     _interlock(session, run, provider=PROVIDER, operation="create_pr", target=target, grant=grant)
@@ -378,6 +386,10 @@ def create_pull_request(session: Session, *, run: WorkerRun, repo_full_name: str
                     outcome, detail = "SUCCEEDED", "reconciled existing PR before retry (no second POST)"
         if pr is None and outcome != "UNKNOWN":
             pr, outcome, detail = _post_pr(client, api_base, repo_full_name, head, base, headers, payload)
+    observed = str((((pr or {}).get("source") or {}).get("commit") or {}).get("hash") or "") or None
+    mismatch = pr_head_mismatch(run, observed) if outcome == "SUCCEEDED" else None
+    if mismatch:
+        outcome, detail = "FAILED", mismatch
     se.status = outcome
     if pr:
         se.external_id = str(pr.get("id"))

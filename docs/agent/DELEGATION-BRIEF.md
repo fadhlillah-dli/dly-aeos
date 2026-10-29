@@ -18,7 +18,7 @@ RULES (lesson ids in brackets)
    IDENTITY: <name> <email> (set with git config user.name and user.email in this repo, then check
    with git config user.email before the first commit). No AI name, co-author trailer, "generated" footer,
    robot emoji or AI address anywhere. Never write literal attribution samples into a file; build
-   them from parts.
+   them from parts. Paraphrase an owner quote that the attribution guard reads as an AI line.
 2. Branch and HEAD [L6]. After committing, check that 'git branch --show-current' is the branch
    and that 'git rev-parse <branch>' equals 'git rev-parse HEAD'. Never push from a detached HEAD.
 3. No links in a worktree [L4]. Never create a symlink or junction in a worktree (a .venv link once

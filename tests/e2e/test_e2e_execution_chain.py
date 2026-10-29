@@ -48,6 +48,11 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is requ
 
 @pytest.fixture
 def chain(settings, monkeypatch, tmp_path):
+    from aeos.verification import review as review_mod
+
+    # The broker publishes only a head with an Opus checkpoint review PASS (owner rule R44 and the owner rule of
+    # 2026-10-28: the checkpoint review is Opus, never Fable; ADR-0132): the review is requested from Opus.
+    monkeypatch.setattr(review_mod, "DEFAULT_REVIEW_MODEL", "opus")
     with respx.mock(assert_all_called=False, assert_all_mocked=True) as rmock:
         yield from build_chain(settings, monkeypatch, tmp_path, rmock)
 

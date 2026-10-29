@@ -33,6 +33,7 @@ from aeos.verification import acceptance
 from aeos.verification import scope as verification_scope
 from aeos.workforce import scheduler
 from aeos.workforce.states import is_legal
+from tests.unit.review_gate_support import record_claude_review
 from tests.unit.test_workforce_support import (
     FakeModules,
     init_git_repo,
@@ -345,7 +346,7 @@ def test_refspec_accepts_only_full_sha_pinned_sources():
 def test_push_is_sha_pinned_returns_head_sha_and_notifies_delivery(db, fakes, tmp_path):
     branch = "aeos/task-a-1234abcd"
     src = tmp_path / "candidate"
-    init_git_repo(src)
+    base = init_git_repo(src)
     _git(src, "checkout", "-q", "-b", branch)
     (src / "feature.txt").write_text("work\n", encoding="utf-8")
     _git(src, "add", "-A")
@@ -355,9 +356,10 @@ def test_push_is_sha_pinned_returns_head_sha_and_notifies_delivery(db, fakes, tm
     subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True, timeout=60)
     p = make_project(db)
     run = WorkerRun(project_id=p.id, domain="PERSONAL", execution_status="REVIEW", workspace_ref=str(src),
-                    branch=branch, head_commit=head)
+                    branch=branch, head_commit=head, base_commit=base)
     db.add(run)
     db.flush()
+    record_claude_review(db, run)  # owner rule R44: the Claude review PASS of this head (ADR-0132)
     pr = PullRequestRecord(project_id=p.id, domain="PERSONAL", task_id="t", run_id=run.id, acceptance_id="a",
                            repo_full_name="owner/repo", number=3, head_ref=branch, base_ref="main",
                            accepted_head_sha="9" * 40, state="OPEN", bundle_hash="sha256:x")

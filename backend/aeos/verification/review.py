@@ -41,6 +41,7 @@ from aeos.models.portfolio import Project
 from aeos.models.workforce import WorkerRun
 from aeos.verification import collector
 from aeos.verification.integration import call
+from aeos.verification.scope import binary_changed_paths
 from aeos.verification.verifier import latest_report, related_evidence, report_refs, report_view
 
 log = logging.getLogger("aeos.verification.review")
@@ -328,8 +329,13 @@ def build_checkpoint_package(session: Session, run: WorkerRun, task: TaskSpec, r
     evidence = _evidence_for(session, report_refs(report))
     scope_ev = related_evidence(session, report, "SCOPE_CHECK")
     diff_ev = related_evidence(session, report, "DIFF")
-    scope_doc = _read_json(scope_ev) or {}
-    diff_text = _read_text(diff_ev) or ""
+    # Fail closed (owner rule R44, ADR-0132): a SCOPE_CHECK or DIFF evidence that is missing or fails its content hash
+    # is recorded as unavailable - the reviewer then saw no file list or no diff (and no binary list), and the
+    # publication gate refuses the review (SCOPE_UNAVAILABLE / DIFF_UNAVAILABLE).
+    scope_read = _read_json(scope_ev)
+    scope_doc = scope_read or {}
+    diff_read = _read_text(diff_ev)
+    diff_text = diff_read or ""
     numstat = scope_doc.get("numstat") or {}
     name_status = scope_doc.get("name_status") or []
     per_file = [{"path": e.get("path"), "status": e.get("status"),
@@ -365,6 +371,10 @@ def build_checkpoint_package(session: Session, run: WorkerRun, task: TaskSpec, r
         "security_sensitive_paths": scope_doc.get("security_sensitive_paths") or [],
         "diff_excerpt": redact_text(diff_text[:DIFF_EXCERPT_CHARS]),
         "diff_truncated": len(diff_text) > DIFF_EXCERPT_CHARS,
+        "diff_available": diff_read is not None,
+        "scope_available": scope_read is not None,
+        # content the line diff cannot show the reviewer (numstat "-"); the publication gate refuses it (BINARY)
+        "binary_paths": binary_changed_paths(name_status, numstat)[:300],
         "verifier": {
             "status": view.get("status"),
             "report_evidence_id": report.id,
