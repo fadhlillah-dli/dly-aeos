@@ -297,7 +297,8 @@ TASK = _o({
     "depends_on": _sa("Task keys within this plan (must form a DAG)"),
     "allowed_paths": _sa("Repository paths/globs this task may write"),
     "forbidden_paths": _sa(),
-    "tools_allowed": _sa(),
+    "tools_allowed": _sa("Worker tools, exactly these names: fs.read, fs.write:allowed_paths, tests.run; add bash "
+                         "or bash:<command pattern> and webfetch only when the task truly needs them"),
     "egress_allowed": _sa("Hosts; default deny (empty)"),
     "capability_scope": _o({"operations": _sa(), "paths": _sa(), "notes": _s()}),
     "capability_ttl_seconds": _i(),

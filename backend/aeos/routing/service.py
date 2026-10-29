@@ -795,6 +795,9 @@ def reviewed_tool_set(route: ModelRoute) -> list[str] | None:
 
 
 def tool_set_rejections(route: ModelRoute, tools: list[str] | None) -> list[str]:
+    from aeos.core.tool_names import canonical_tools
+
+    tools = canonical_tools(tools)  # a planner's synonym (read_file, run_tests, ...) is the reviewed name (L29)
     if not tools:
         return []
     reviewed = reviewed_tool_set(route)

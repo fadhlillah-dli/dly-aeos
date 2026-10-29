@@ -272,3 +272,18 @@ def test_acceptance_unknown_when_verification_module_absent(db, absent_modules):
     absent_modules("aeos.verification.acceptance")
     out = _acceptance_for(db, "no-such-task", "sha256:x")
     assert out["status"] == "UNKNOWN" and out["valid"] is None
+
+
+def test_compile_maps_a_planners_tool_synonyms_to_the_reviewed_names(db):
+    """L29 (2026-10-29): the first live plan named read_file/write_file/run_tests/git_diff, so every route refused every
+    task; the compiler stores the reviewed names and keeps an unknown tool as written (it still makes the task wait)."""
+    project = make_project(db)
+    t1 = task("T1", tools_allowed=["read_file", "write_file", "run_tests", "git_diff"])
+    t2 = task("T2", tools_allowed=["fs.read", "shell_exec"])
+    _, v = _version(db, project, sample_content(tasks=[t1, t2]))
+    dag.compile_version(db, v, actor="tester")
+    db.commit()
+    spec1 = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id, TaskSpec.task_key == "T1"))
+    spec2 = db.scalar(select(TaskSpec).where(TaskSpec.plan_version_id == v.id, TaskSpec.task_key == "T2"))
+    assert spec1.tools_allowed == ["fs.read", "fs.write:allowed_paths", "tests.run"]
+    assert spec2.tools_allowed == ["fs.read", "shell_exec"]
